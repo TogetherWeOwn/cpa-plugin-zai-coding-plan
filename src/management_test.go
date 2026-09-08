@@ -132,6 +132,84 @@ func TestManagementRefreshCoalescesAndRedactsFailure(t *testing.T) {
 	}
 }
 
+func TestManagementConcurrentAccountConfigPreservesBothUpdates(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	first := account{Identity: accountIdentity("first-config"), Name: "first", KeySuffix: "first", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	second := account{Identity: accountIdentity("second-config"), Name: "second", KeySuffix: "second", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{first, second})
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, input := range []managementAccountConfigRequest{{Account: "first", Name: "ONE"}, {Account: "second", Name: "TWO"}} {
+		input := input
+		go func() {
+			<-start
+			results <- runtime.updateAccountConfig(input)
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings, err := runtime.snapshot.Store.loadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Accounts[first.Identity].Name != "ONE" || settings.Accounts[second.Identity].Name != "TWO" {
+		t.Fatalf("concurrent settings lost an acknowledged update: %#v", settings.Accounts)
+	}
+}
+
+func TestManagementAccountConfigRestartsPollersWithLiveSettings(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	clock := &fakeClock{now: now}
+	item := account{Identity: accountIdentity("live-config"), Name: "account", KeySuffix: "live", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	runtime.clock = clock
+	polls := make(chan struct{}, 4)
+	runtime.httpClient = roundTripDoer(func(request *http.Request) (*http.Response, error) {
+		polls <- struct{}{}
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	runtime.cancel = cancel
+	runtime.startPollers(ctx, runtime.snapshot)
+	<-polls
+
+	disabled := true
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Disabled: &disabled, PollingInterval: "1m", AuthoritativeMaxAge: "2m"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-polls:
+		t.Fatal("disabled account started another authenticated poll")
+	case <-time.After(20 * time.Millisecond):
+	}
+	if len(clock.sleeps) != 0 {
+		t.Fatalf("disabled worker slept again: %#v", clock.sleeps)
+	}
+
+	disabled = false
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Disabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-polls:
+	case <-time.After(time.Second):
+		t.Fatal("enabled account did not start a poller")
+	}
+	runtime.mu.RLock()
+	base := runtime.snapshot.Config.QuotaRefresh
+	runtime.mu.RUnlock()
+	if base != time.Minute {
+		t.Fatalf("live polling interval = %s, want 1m", base)
+	}
+	_ = runtime.shutdown()
+}
+
 func TestManagementRequestValidationAndAccountConfig(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("config"), Name: "account", KeySuffix: "redacted", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
@@ -199,6 +277,23 @@ func TestManagementUnblockRecomputesWithoutManufacturingCapacity(t *testing.T) {
 	after := runtime.managementStatus("registered").Accounts[0]
 	if after.Health != "exhausted" || after.FiveHourUtilization != before.FiveHourUtilization {
 		t.Fatalf("unblock manufactured capacity: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestManagementUnblockRejectsAmbiguousSelector(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	accounts := []account{
+		{Identity: accountIdentity("first-redacted"), Name: "first", KeySuffix: "redacted", Plan: "pro", FiveHourCredits: 100, WeeklyCredits: 100},
+		{Identity: accountIdentity("second-redacted"), Name: "second", KeySuffix: "redacted", Plan: "pro", FiveHourCredits: 100, WeeklyCredits: 100},
+	}
+	runtime := quotaTestRuntime(t, now, accounts)
+	response := runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementUnblockPath, Body: []byte(`{"account":"redacted"}`)})
+	if response.StatusCode != http.StatusBadRequest || !strings.Contains(string(response.Body), "ambiguous") {
+		t.Fatalf("ambiguous unblock response = %d %s", response.StatusCode, response.Body)
+	}
+	response = runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementUnblockPath, Body: []byte(`{}`)})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("explicit all-accounts unblock response = %d %s", response.StatusCode, response.Body)
 	}
 }
 

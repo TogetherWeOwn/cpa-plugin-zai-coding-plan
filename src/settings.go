@@ -30,8 +30,9 @@ type accountSetting struct {
 }
 
 type persistedState struct {
-	Version  int                          `json:"version"`
-	Accounts map[string]accountQuotaState `json:"accounts,omitempty"`
+	Version    int                          `json:"version"`
+	Accounts   map[string]accountQuotaState `json:"accounts,omitempty"`
+	Generation uint64                       `json:"-"`
 }
 
 type secureStore struct {

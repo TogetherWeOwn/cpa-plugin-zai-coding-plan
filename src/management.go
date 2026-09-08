@@ -194,8 +194,21 @@ func (r *pluginRuntime) forceRefresh(ctx context.Context) error {
 			return r.refreshErr
 		}
 	}
+	defer r.refreshWorkers.Done()
 
-	refreshErr := r.runRefresh(ctx)
+	r.mu.RLock()
+	base := r.refreshContext
+	r.mu.RUnlock()
+	if base == nil {
+		base = context.Background()
+	}
+	refreshCtx, cancel := context.WithCancel(base)
+	stop := context.AfterFunc(ctx, cancel)
+	defer func() {
+		stop()
+		cancel()
+	}()
+	refreshErr := r.runRefresh(refreshCtx)
 	r.endRefresh(refreshErr)
 	return refreshErr
 }
@@ -209,6 +222,10 @@ func (r *pluginRuntime) beginRefresh() (<-chan struct{}, bool, error) {
 	if r.refreshing {
 		return r.refreshDone, false, nil
 	}
+	if r.refreshContext == nil {
+		r.refreshContext, r.refreshCancel = context.WithCancel(context.Background())
+	}
+	r.refreshWorkers.Add(1)
 	r.refreshing = true
 	r.refreshDone = make(chan struct{})
 	r.refreshErr = nil
@@ -273,18 +290,24 @@ func (r *pluginRuntime) unblock(accountName string) error {
 	if r.stopped || r.snapshot == nil {
 		return fmt.Errorf("plugin is not configured")
 	}
-	matched := false
+	selector := strings.TrimSpace(accountName)
+	matches := make([]string, 0, len(r.snapshot.Accounts))
 	for _, item := range r.snapshot.Accounts {
-		if accountName != "" && !strings.EqualFold(strings.TrimSpace(accountName), item.Name) && strings.TrimSpace(accountName) != item.KeySuffix {
+		if selector != "" && !strings.EqualFold(selector, item.Name) && selector != item.KeySuffix {
 			continue
 		}
-		matched = true
-		state := r.snapshot.Quota[item.Identity]
-		state.compact(r.runtimeClock().Now(), r.snapshot.Config.StateRetention)
-		r.snapshot.Quota[item.Identity] = state
+		matches = append(matches, item.Identity)
 	}
-	if !matched {
+	if len(matches) == 0 {
 		return fmt.Errorf("account does not match a configured account")
+	}
+	if selector != "" && len(matches) != 1 {
+		return fmt.Errorf("account selector is ambiguous")
+	}
+	for _, identity := range matches {
+		state := r.snapshot.Quota[identity]
+		state.compact(r.runtimeClock().Now(), r.snapshot.Config.StateRetention)
+		r.snapshot.Quota[identity] = state
 	}
 	return nil
 }
@@ -295,6 +318,8 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 		return fmt.Errorf("account is required")
 	}
 
+	r.settingsMu.Lock()
+	defer r.settingsMu.Unlock()
 	r.mu.Lock()
 	if r.stopped || r.snapshot == nil || r.snapshot.Store == nil {
 		r.mu.Unlock()
@@ -412,12 +437,16 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 	}
 
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.stopped || r.snapshot == nil {
+		r.mu.Unlock()
 		return fmt.Errorf("plugin is shutting down")
 	}
 	r.snapshot.Accounts = updated.Accounts
 	r.snapshot.Config = updated.Config
+	r.mu.Unlock()
+	if err := r.restartPollers(); err != nil {
+		return err
+	}
 	return nil
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -40,20 +41,29 @@ type runtimeSnapshot struct {
 }
 
 type pluginRuntime struct {
-	mu           sync.RWMutex
-	snapshot     *runtimeSnapshot
-	lastErr      error
-	stopped      bool
-	reconfigures sync.WaitGroup
-	workers      sync.WaitGroup
-	cancel       context.CancelFunc
-	clock        clock
-	httpClient   httpDoer
-	endpoint     string
-	persist      func(*secureStore, persistedState) error
-	refreshing   bool
-	refreshDone  chan struct{}
-	refreshErr   error
+	mu             sync.RWMutex
+	snapshot       *runtimeSnapshot
+	lastErr        error
+	stopped        bool
+	reconfigures   sync.WaitGroup
+	workers        sync.WaitGroup
+	refreshWorkers sync.WaitGroup
+	cancel         context.CancelFunc
+	refreshContext context.Context
+	refreshCancel  context.CancelFunc
+	clock          clock
+	httpClient     httpDoer
+	endpoint       string
+	persist        func(*secureStore, persistedState) error
+	settingsMu     sync.Mutex
+	pollersMu      sync.Mutex
+	persistMu      sync.Mutex
+	persistWrite   func(*secureStore, persistedState) error
+	persistNext    atomic.Uint64
+	persisted      atomic.Uint64
+	refreshing     bool
+	refreshDone    chan struct{}
+	refreshErr     error
 }
 
 func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
@@ -117,6 +127,8 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	}
 	staged := &runtimeSnapshot{Config: cfg, Accounts: accounts, Store: store, Quota: quota, byAuthID: byAuthID}
 
+	r.pollersMu.Lock()
+	defer r.pollersMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
 	if r.stopped {
@@ -126,11 +138,15 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	}
 	previousCancel := r.cancel
 	r.cancel = cancel
+	if r.refreshContext == nil {
+		r.refreshContext, r.refreshCancel = context.WithCancel(context.Background())
+	}
 	r.snapshot = staged
 	r.lastErr = nil
 	r.mu.Unlock()
 	if previousCancel != nil {
 		previousCancel()
+		r.workers.Wait()
 	}
 	r.startPollers(ctx, staged)
 	return nil
@@ -268,6 +284,27 @@ func (r *pluginRuntime) startPollers(ctx context.Context, snapshot *runtimeSnaps
 	}
 }
 
+func (r *pluginRuntime) restartPollers() error {
+	r.pollersMu.Lock()
+	defer r.pollersMu.Unlock()
+	r.mu.Lock()
+	if r.stopped || r.snapshot == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("plugin is shutting down")
+	}
+	previousCancel := r.cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel = cancel
+	snapshot := cloneRuntimeSnapshot(r.snapshot)
+	r.mu.Unlock()
+	if previousCancel != nil {
+		previousCancel()
+		r.workers.Wait()
+	}
+	r.startPollers(ctx, snapshot)
+	return nil
+}
+
 func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, base time.Duration) {
 	defer r.workers.Done()
 	attempt := 0
@@ -328,7 +365,15 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string) erro
 }
 
 func (r *pluginRuntime) persistState(store *secureStore, state persistedState) error {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	if state.Generation != 0 && state.Generation <= r.persisted.Load() {
+		return nil
+	}
 	persist := r.persist
+	if r.persistWrite != nil {
+		persist = r.persistWrite
+	}
 	if persist == nil {
 		persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
 	}
@@ -344,11 +389,14 @@ func (r *pluginRuntime) persistState(store *secureStore, state persistedState) e
 		r.mu.Unlock()
 		return fmt.Errorf("persist quota state: %w", err)
 	}
+	if state.Generation != 0 {
+		r.persisted.Store(state.Generation)
+	}
 	return nil
 }
 
 func (r *pluginRuntime) persistenceSnapshotLocked() persistedState {
-	state := persistedState{Version: 1, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota))}
+	state := persistedState{Version: 1, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota)), Generation: r.persistNext.Add(1)}
 	for identity, accountState := range r.snapshot.Quota {
 		accountState.Events = append([]creditEvent(nil), accountState.Events...)
 		accountState.DedupHashes = append([]string(nil), accountState.DedupHashes...)
@@ -494,6 +542,8 @@ func (r *pluginRuntime) quotaEndpoint() string {
 }
 
 func (r *pluginRuntime) shutdown() error {
+	r.pollersMu.Lock()
+	defer r.pollersMu.Unlock()
 	r.mu.Lock()
 	if r.stopped {
 		r.mu.Unlock()
@@ -501,13 +551,19 @@ func (r *pluginRuntime) shutdown() error {
 	}
 	r.stopped = true
 	cancel := r.cancel
+	refreshCancel := r.refreshCancel
 	r.cancel = nil
+	r.refreshCancel = nil
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
+	if refreshCancel != nil {
+		refreshCancel()
+	}
 	r.reconfigures.Wait()
 	r.workers.Wait()
+	r.refreshWorkers.Wait()
 
 	r.mu.RLock()
 	snapshot := r.snapshot
@@ -519,12 +575,8 @@ func (r *pluginRuntime) shutdown() error {
 	if snapshot == nil || snapshot.Store == nil {
 		return nil
 	}
-	persist := r.persist
-	if persist == nil {
-		persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
-	}
-	if err := persist(snapshot.Store, persisted); err != nil {
-		return fmt.Errorf("persist quota state: %w", err)
+	if err := r.persistState(snapshot.Store, persisted); err != nil {
+		return err
 	}
 	return snapshot.Store.flush()
 }

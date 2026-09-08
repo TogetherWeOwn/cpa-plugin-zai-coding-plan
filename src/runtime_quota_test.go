@@ -154,6 +154,61 @@ func TestUsageHandleAcknowledgesLossyPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestRuntimeStatePersistenceRejectsStaleSnapshot(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("persist-order"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	var writes []persistedState
+	runtime.persistWrite = func(_ *secureStore, state persistedState) error {
+		writes = append(writes, state)
+		return nil
+	}
+	older := persistedState{Version: 1, Accounts: map[string]accountQuotaState{item.Identity: {Events: []creditEvent{{At: now, Microcredits: creditScale, Model: "glm-5.3"}}}}, Generation: 1}
+	newer := persistedState{Version: 1, Accounts: map[string]accountQuotaState{item.Identity: {Events: []creditEvent{{At: now, Microcredits: creditScale, Model: "glm-5.3"}, {At: now.Add(time.Second), Microcredits: creditScale, Model: "glm-5.3"}}}}, Generation: 2}
+	if err := runtime.persistState(runtime.snapshot.Store, newer); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.persistState(runtime.snapshot.Store, older); err != nil {
+		t.Fatal(err)
+	}
+	if len(writes) != 1 || writes[0].Generation != newer.Generation || len(writes[0].Accounts[item.Identity].Events) != 2 {
+		t.Fatalf("stale snapshot replaced newer state: %#v", writes)
+	}
+}
+
+func TestRuntimeShutdownCancelsAndJoinsForcedRefresh(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("refresh-shutdown"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	started := make(chan struct{})
+	runtime.httpClient = roundTripDoer(func(request *http.Request) (*http.Response, error) {
+		close(started)
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- runtime.forceRefresh(context.Background()) }()
+	<-started
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- runtime.shutdown() }()
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not cancel and join forced refresh")
+	}
+	select {
+	case err := <-refreshDone:
+		if err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+			t.Fatalf("refresh error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("forced refresh did not finish during shutdown")
+	}
+}
+
 func TestRuntimeShutdownCancelsAndJoinsPollWorkers(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	clock := &fakeClock{now: now}
