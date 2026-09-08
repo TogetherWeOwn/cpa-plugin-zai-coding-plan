@@ -208,7 +208,7 @@ func TestStableAuthIDsUseHostTrimmedRawBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, "HTTPS://API.Z.AI/api/anthropic/", "", "zai", ""); got != want {
+	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, "HTTPS://API.Z.AI/api/anthropic/"); got != want {
 		t.Fatalf("Claude auth ID = %q, want %q", got, want)
 	}
 	if got, want := accounts[0].OpenAIAuthID, upstreamStableID("openai-compatibility:zai-coding-plan", fixtureKey, "HTTPS://API.Z.AI/api/coding/paas/v4/", ""); got != want {
@@ -236,7 +236,7 @@ func TestStableAuthIDsPreserveHostIterationOrder(t *testing.T) {
 	if len(accounts) != 1 {
 		t.Fatalf("len(accounts) = %d, want 1", len(accounts))
 	}
-	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL, "", "zai", ""); got != want {
+	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL); got != want {
 		t.Fatalf("Claude auth ID = %q, want %q", got, want)
 	}
 	if got, want := accounts[0].OpenAIAuthID, upstreamStableID("openai-compatibility:zai-coding-plan", fixtureKey, zaiOpenAIBaseURL, ""); got != want {
@@ -244,7 +244,7 @@ func TestStableAuthIDsPreserveHostIterationOrder(t *testing.T) {
 	}
 }
 
-func TestStableClaudeAuthIDIncludesProxyPrefixAndSortedHeaders(t *testing.T) {
+func TestStableClaudeAuthIDMatchesPinnedHostRecipe(t *testing.T) {
 	fixture := exactPairFixture(fixtureKey)
 	fixture.ClaudeKeys[0].ProxyURL = " https://proxy.example "
 	fixture.ClaudeKeys[0].Prefix = " zai "
@@ -253,14 +253,7 @@ func TestStableClaudeAuthIDIncludesProxyPrefixAndSortedHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := upstreamStableID(
-		"claude:apikey",
-		fixtureKey,
-		zaiAnthropicBaseURL,
-		"https://proxy.example",
-		"zai",
-		"X-A\x00first\x00X-Z\x00last\x00",
-	)
+	want := upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL)
 	if accounts[0].ClaudeAuthID != want {
 		t.Fatalf("Claude auth ID = %q, want %q", accounts[0].ClaudeAuthID, want)
 	}
@@ -273,7 +266,7 @@ func TestStableAuthIDsMatchUpstreamFixtures(t *testing.T) {
 		parts []string
 		want  string
 	}{
-		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL, "", "zai", ""}, want: "claude:apikey:6f937cc6dcf8"},
+		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:ae1542c0f164"},
 		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:2ad86d46dbc6"},
 	}
 	for _, tt := range tests {

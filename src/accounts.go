@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
-	"sort"
 	"strings"
 )
 
@@ -143,9 +142,6 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 			"claude:apikey",
 			key,
 			strings.TrimSpace(entry.BaseURL),
-			strings.TrimSpace(entry.ProxyURL),
-			strings.TrimSpace(entry.Prefix),
-			formatSortedHeaders(entry.Headers),
 		)
 		baseURL, err := normalizedBaseURL(entry.BaseURL)
 		if err == nil {
@@ -327,25 +323,6 @@ func normalizedBaseURL(raw string) (string, error) {
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	parsed.RawPath = ""
 	return parsed.String(), nil
-}
-
-func formatSortedHeaders(headers map[string]string) string {
-	if len(headers) == 0 {
-		return ""
-	}
-	keys := make([]string, 0, len(headers))
-	for key := range headers {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	var output strings.Builder
-	for _, key := range keys {
-		output.WriteString(key)
-		output.WriteByte(0)
-		output.WriteString(headers[key])
-		output.WriteByte(0)
-	}
-	return output.String()
 }
 
 func accountIdentity(key string) string {
