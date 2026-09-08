@@ -56,6 +56,21 @@ func TestValidateReleaseRejectsRegistryMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateReleaseRejectsRegistryArchiveMismatch(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeReleaseFixture(t, root, "0.1.0")
+	writeRegistryValue(t, root, registryPlugin{
+		ID:      pluginID,
+		Version: "0.1.0",
+		License: "MIT",
+		Release: registryRelease{Archive: pluginID + "_0.1.1_linux_amd64.zip", Checksums: "checksums.txt"},
+	})
+	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "registry archive") {
+		t.Fatalf("validateRelease() error = %v, want registry archive error", err)
+	}
+}
+
 func TestValidateReleaseRequiresChecksumsForBothArtifacts(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -153,7 +168,7 @@ func writeDocumentation(t *testing.T, root string) {
 
 func writeRegistry(t *testing.T, root, version string) {
 	t.Helper()
-	value := registry{Plugins: []registryPlugin{{
+	writeRegistryValue(t, root, registryPlugin{
 		ID:      pluginID,
 		Version: version,
 		License: "MIT",
@@ -161,7 +176,12 @@ func writeRegistry(t *testing.T, root, version string) {
 			Archive:   pluginID + "_" + version + "_linux_amd64.zip",
 			Checksums: "checksums.txt",
 		},
-	}}}
+	})
+}
+
+func writeRegistryValue(t *testing.T, root string, plugin registryPlugin) {
+	t.Helper()
+	value := registry{Plugins: []registryPlugin{plugin}}
 	raw, err := json.Marshal(value)
 	if err != nil {
 		t.Fatal(err)

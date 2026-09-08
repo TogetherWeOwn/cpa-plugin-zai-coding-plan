@@ -21,14 +21,14 @@ test:
 	$(GO) test ./...
 
 test-release:
-	$(GO) test ./.github/scripts
+	$(GO) test ./.github/scripts/release-validation
 
 validate-source:
-	$(GO) run -buildvcs=false ./.github/scripts/release-validation.go -mode source
+	$(GO) run -buildvcs=false ./.github/scripts/release-validation -mode source
 
 validate-release:
 	test -n "$(TAG)"
-	$(GO) run -buildvcs=false ./.github/scripts/release-validation.go \
+	$(GO) run -buildvcs=false ./.github/scripts/release-validation \
 		-mode release -tag "$(TAG)" -version "$(VERSION)"
 
 build:

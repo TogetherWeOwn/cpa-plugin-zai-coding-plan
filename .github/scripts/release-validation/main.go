@@ -65,8 +65,8 @@ func run(args []string) error {
 	flags := flag.NewFlagSet("release-validation", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	mode := flags.String("mode", "release", "validation mode: release or source")
-	root := flags.String("root", ".", "repository root")
-	tag := flags.String("tag", "", "release tag, including the vv prefix")
+	root := flags.String("root", "", "repository root; defaults to the current directory")
+	tag := flags.String("tag", "", "release tag, including the v prefix")
 	version := flags.String("version", "", "release version without the v prefix")
 	dist := flags.String("dist", "dist", "release artifact directory")
 	if err := flags.Parse(args); err != nil {
@@ -105,6 +105,9 @@ func validateRelease(root, dist, tag, version string) error {
 		return err
 	}
 	if err := validateRegistry(root, version); err != nil {
+		return err
+	}
+	if err := validateChangelog(root, version); err != nil {
 		return err
 	}
 
@@ -165,9 +168,6 @@ func validateRegistry(root, version string) error {
 	}
 	if matches[0].Release.Checksums != "checksums.txt" {
 		return fmt.Errorf("registry checksums %q must be checksums.txt", matches[0].Release.Checksums)
-	}
-	if err := validateChangelog(root, version); err != nil {
-		return err
 	}
 	return nil
 }
