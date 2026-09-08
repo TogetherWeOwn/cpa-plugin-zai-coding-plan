@@ -1,0 +1,444 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+)
+
+const (
+	managementBasePath          = "/v0/management/plugins/zai-coding-plan"
+	managementStatusPath        = managementBasePath + "/status"
+	managementRefreshPath       = managementBasePath + "/refresh"
+	managementUnblockPath       = managementBasePath + "/unblock"
+	managementAccountConfigPath = managementBasePath + "/account-config"
+	managementContentType       = "application/json"
+	maxManagementRequestBody    = 64 << 10
+	minQuotaTimeout             = time.Second
+	maxQuotaTimeout             = 30 * time.Second
+)
+
+type managementRoutes struct {
+	Routes []managementRoute `json:"routes"`
+}
+
+type managementRoute struct {
+	Method      string `json:"method"`
+	Path        string `json:"path"`
+	Description string `json:"description,omitempty"`
+}
+
+func managementRegistration() managementRoutes {
+	return managementRoutes{Routes: []managementRoute{
+		{Method: http.MethodGet, Path: managementStatusPath, Description: "Reports redacted Z.ai coding-plan quota status."},
+		{Method: http.MethodPost, Path: managementRefreshPath, Description: "Forces a bounded quota refresh."},
+		{Method: http.MethodPost, Path: managementUnblockPath, Description: "Recomputes account availability without erasing usage."},
+		{Method: http.MethodPost, Path: managementAccountConfigPath, Description: "Updates validated non-secret account and polling settings."},
+	}}
+}
+
+func managementHandle(request []byte) ([]byte, error) {
+	var req pluginapi.ManagementRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, fmt.Errorf("decode management request")
+	}
+	response := runtimeState.handleManagement(context.Background(), req)
+	return okEnvelope(response)
+}
+
+func (r *pluginRuntime) handleManagement(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
+	if len(req.Body) > maxManagementRequestBody {
+		return managementError(http.StatusRequestEntityTooLarge, "request_too_large", "management request body exceeds 64 KiB")
+	}
+	switch {
+	case req.Method == http.MethodGet && req.Path == managementStatusPath:
+		return r.statusResponse(http.StatusOK)
+	case req.Method == http.MethodPost && req.Path == managementRefreshPath:
+		if err := requireEmptyJSONBody(req.Body); err != nil {
+			return managementError(http.StatusBadRequest, "invalid_request", err.Error())
+		}
+		if err := r.forceRefresh(ctx); err != nil {
+			return managementError(http.StatusBadGateway, "refresh_failed", boundedStatus(err.Error()))
+		}
+		return r.statusResponse(http.StatusOK)
+	case req.Method == http.MethodPost && req.Path == managementUnblockPath:
+		var input managementAccountSelector
+		if err := decodeManagementJSON(req.Body, &input); err != nil {
+			return managementError(http.StatusBadRequest, "invalid_request", err.Error())
+		}
+		if err := r.unblock(input.Account); err != nil {
+			return managementError(http.StatusBadRequest, "unblock_rejected", err.Error())
+		}
+		return r.statusResponse(http.StatusOK)
+	case req.Method == http.MethodPost && req.Path == managementAccountConfigPath:
+		var input managementAccountConfigRequest
+		if err := decodeManagementJSON(req.Body, &input); err != nil {
+			return managementError(http.StatusBadRequest, "invalid_request", err.Error())
+		}
+		if err := r.updateAccountConfig(input); err != nil {
+			return managementError(http.StatusBadRequest, "invalid_account_config", err.Error())
+		}
+		return r.statusResponse(http.StatusOK)
+	default:
+		return managementError(http.StatusNotFound, "not_found", "unknown management route")
+	}
+}
+
+func requireEmptyJSONBody(body []byte) error {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil
+	}
+	var value map[string]json.RawMessage
+	if err := decodeManagementJSON(body, &value); err != nil {
+		return err
+	}
+	if len(value) != 0 {
+		return fmt.Errorf("request body must be empty")
+	}
+	return nil
+}
+
+func decodeManagementJSON(body []byte, target any) error {
+	if len(bytes.TrimSpace(body)) == 0 {
+		body = []byte("{}")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return fmt.Errorf("invalid JSON request body")
+	}
+	if err := ensureJSONEOF(decoder); err != nil {
+		return fmt.Errorf("invalid JSON request body")
+	}
+	return nil
+}
+
+func managementJSON(status int, value any) pluginapi.ManagementResponse {
+	body, err := json.Marshal(value)
+	if err != nil {
+		return managementError(http.StatusInternalServerError, "encode_failed", "could not encode management response")
+	}
+	return pluginapi.ManagementResponse{
+		StatusCode: status,
+		Headers:    http.Header{"Content-Type": []string{managementContentType}},
+		Body:       body,
+	}
+}
+
+func managementError(status int, code, message string) pluginapi.ManagementResponse {
+	return managementJSONUnsafe(status, managementErrorBody{Error: managementErrorDetail{Code: code, Message: boundedStatus(message)}})
+}
+
+func managementJSONUnsafe(status int, value any) pluginapi.ManagementResponse {
+	body, _ := json.Marshal(value)
+	return pluginapi.ManagementResponse{
+		StatusCode: status,
+		Headers:    http.Header{"Content-Type": []string{managementContentType}},
+		Body:       body,
+	}
+}
+
+type managementErrorBody struct {
+	Error managementErrorDetail `json:"error"`
+}
+
+type managementErrorDetail struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type managementAccountSelector struct {
+	Account string `json:"account,omitempty"`
+}
+
+type managementAccountConfigRequest struct {
+	Account             string `json:"account"`
+	Clear               bool   `json:"clear,omitempty"`
+	Name                string `json:"name,omitempty"`
+	Plan                string `json:"plan,omitempty"`
+	Disabled            *bool  `json:"disabled,omitempty"`
+	FiveHourCredits     *int64 `json:"five_hour_credits,omitempty"`
+	WeeklyCredits       *int64 `json:"weekly_credits,omitempty"`
+	ThresholdPercent    *int   `json:"threshold_percent,omitempty"`
+	PollingInterval     string `json:"polling_interval,omitempty"`
+	AuthoritativeMaxAge string `json:"authoritative_max_age,omitempty"`
+	Timeout             string `json:"timeout,omitempty"`
+}
+
+func (r *pluginRuntime) statusResponse(statusCode int) pluginapi.ManagementResponse {
+	status := "registered"
+	if r.validationStatus() != "" {
+		status = "reconfigure_rejected"
+	}
+	return managementJSON(statusCode, r.managementStatus(status))
+}
+
+func (r *pluginRuntime) forceRefresh(ctx context.Context) error {
+	done, leader, err := r.beginRefresh()
+	if err != nil {
+		return err
+	}
+	if !leader {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+			r.mu.RLock()
+			defer r.mu.RUnlock()
+			return r.refreshErr
+		}
+	}
+
+	refreshErr := r.runRefresh(ctx)
+	r.endRefresh(refreshErr)
+	return refreshErr
+}
+
+func (r *pluginRuntime) beginRefresh() (<-chan struct{}, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped || r.snapshot == nil {
+		return nil, false, fmt.Errorf("plugin is not configured")
+	}
+	if r.refreshing {
+		return r.refreshDone, false, nil
+	}
+	r.refreshing = true
+	r.refreshDone = make(chan struct{})
+	r.refreshErr = nil
+	return r.refreshDone, true, nil
+}
+
+func (r *pluginRuntime) runRefresh(ctx context.Context) error {
+	r.mu.RLock()
+	accounts := append([]account(nil), r.snapshot.Accounts...)
+	timeout := r.snapshot.Config.QuotaTimeout
+	r.mu.RUnlock()
+	if timeout == 0 {
+		timeout = defaultQuotaTimeout
+	}
+
+	refreshCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	type pollResult struct{ err error }
+	results := make(chan pollResult, len(accounts))
+	launched := 0
+	for _, item := range accounts {
+		if item.Disabled {
+			continue
+		}
+		launched++
+		go func(item account) {
+			results <- pollResult{err: r.pollOnce(refreshCtx, item.Identity, item.key)}
+		}(item)
+	}
+	var failures int
+	var firstError error
+	for range launched {
+		result := <-results
+		if result.err != nil {
+			failures++
+			if firstError == nil {
+				firstError = result.err
+			}
+		}
+	}
+	if failures > 0 {
+		return fmt.Errorf("quota refresh failed for %d account(s): %s", failures, boundedStatus(firstError.Error()))
+	}
+	return nil
+}
+
+func (r *pluginRuntime) endRefresh(err error) {
+	r.mu.Lock()
+	done := r.refreshDone
+	r.refreshErr = err
+	r.refreshing = false
+	r.refreshDone = nil
+	if done != nil {
+		close(done)
+	}
+	r.mu.Unlock()
+}
+
+func (r *pluginRuntime) unblock(accountName string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped || r.snapshot == nil {
+		return fmt.Errorf("plugin is not configured")
+	}
+	matched := false
+	for _, item := range r.snapshot.Accounts {
+		if accountName != "" && !strings.EqualFold(strings.TrimSpace(accountName), item.Name) && strings.TrimSpace(accountName) != item.KeySuffix {
+			continue
+		}
+		matched = true
+		state := r.snapshot.Quota[item.Identity]
+		state.compact(r.runtimeClock().Now(), r.snapshot.Config.StateRetention)
+		r.snapshot.Quota[item.Identity] = state
+	}
+	if !matched {
+		return fmt.Errorf("account does not match a configured account")
+	}
+	return nil
+}
+
+func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest) error {
+	accountName := strings.TrimSpace(input.Account)
+	if accountName == "" {
+		return fmt.Errorf("account is required")
+	}
+
+	r.mu.Lock()
+	if r.stopped || r.snapshot == nil || r.snapshot.Store == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("plugin is not configured")
+	}
+	updated := cloneRuntimeSnapshot(r.snapshot)
+	index := -1
+	for i := range updated.Accounts {
+		if strings.EqualFold(accountName, updated.Accounts[i].Name) || accountName == updated.Accounts[i].KeySuffix {
+			if index >= 0 {
+				r.mu.Unlock()
+				return fmt.Errorf("account selector is ambiguous")
+			}
+			index = i
+		}
+	}
+	if index < 0 {
+		r.mu.Unlock()
+		return fmt.Errorf("account does not match a configured account")
+	}
+	item := &updated.Accounts[index]
+
+	settings, err := updated.Store.loadSettings()
+	if err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	if settings.Version == 0 {
+		settings.Version = 1
+	}
+	if settings.Accounts == nil {
+		settings.Accounts = make(map[string]accountSetting)
+	}
+	setting := settings.Accounts[item.Identity]
+	if input.Clear {
+		setting = accountSetting{}
+	} else {
+		if input.Name != "" {
+			setting.Name = strings.TrimSpace(input.Name)
+		}
+		if input.Plan != "" {
+			setting.Plan = normalizePlan(input.Plan)
+			if setting.Plan == "" {
+				r.mu.Unlock()
+				return fmt.Errorf("plan must be lite, pro, max, or custom")
+			}
+		}
+		if input.Disabled != nil {
+			setting.Disabled = input.Disabled
+		}
+		if input.FiveHourCredits != nil {
+			setting.FiveHourCredits = *input.FiveHourCredits
+		}
+		if input.WeeklyCredits != nil {
+			setting.WeeklyCredits = *input.WeeklyCredits
+		}
+		if err := validateStoredSetting(setting); err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+
+	cfg := updated.Config
+	if input.ThresholdPercent != nil {
+		if *input.ThresholdPercent < 1 || *input.ThresholdPercent > 100 {
+			r.mu.Unlock()
+			return fmt.Errorf("threshold_percent must be between 1 and 100")
+		}
+		cfg.ThresholdPercent = *input.ThresholdPercent
+	}
+	if strings.TrimSpace(input.PollingInterval) != "" {
+		cfg.QuotaRefresh, err = parsePositiveDuration("polling_interval", input.PollingInterval, cfg.QuotaRefresh)
+		if err != nil || cfg.QuotaRefresh < time.Minute || cfg.QuotaRefresh > 3*time.Minute {
+			r.mu.Unlock()
+			return fmt.Errorf("polling_interval must be between one and three minutes")
+		}
+	}
+	if strings.TrimSpace(input.AuthoritativeMaxAge) != "" {
+		cfg.AuthoritativeMaxAge, err = parsePositiveDuration("authoritative_max_age", input.AuthoritativeMaxAge, cfg.AuthoritativeMaxAge)
+		if err != nil {
+			r.mu.Unlock()
+			return err
+		}
+	}
+	if cfg.AuthoritativeMaxAge <= maxPollInterval(cfg.QuotaRefresh) {
+		r.mu.Unlock()
+		return fmt.Errorf("authoritative_max_age must exceed maximum polling jitter")
+	}
+	if strings.TrimSpace(input.Timeout) != "" {
+		cfg.QuotaTimeout, err = parsePositiveDuration("timeout", input.Timeout, defaultQuotaTimeout)
+		if err != nil || cfg.QuotaTimeout < minQuotaTimeout || cfg.QuotaTimeout > maxQuotaTimeout {
+			r.mu.Unlock()
+			return fmt.Errorf("timeout must be between one and thirty seconds")
+		}
+	}
+
+	candidate := *item
+	if input.Clear {
+		delete(settings.Accounts, item.Identity)
+	} else {
+		applySettingToAccount(&candidate, setting)
+		settings.Accounts[item.Identity] = setting
+	}
+	updated.Accounts[index] = candidate
+	updated.Config = cfg
+	if err := validateAccounts(updated.Accounts); err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	store := updated.Store
+	r.mu.Unlock()
+
+	if err := store.saveSettings(settings); err != nil {
+		return fmt.Errorf("save account settings: %w", err)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped || r.snapshot == nil {
+		return fmt.Errorf("plugin is shutting down")
+	}
+	r.snapshot.Accounts = updated.Accounts
+	r.snapshot.Config = updated.Config
+	return nil
+}
+
+func applySettingToAccount(item *account, setting accountSetting) {
+	if setting.Name != "" {
+		item.Name = setting.Name
+	}
+	if setting.Plan != "" {
+		item.Plan = setting.Plan
+		if buckets, ok := planBuckets[setting.Plan]; ok {
+			item.FiveHourCredits = buckets.FiveHour
+			item.WeeklyCredits = buckets.Weekly
+		}
+	}
+	if setting.Disabled != nil {
+		item.Disabled = *setting.Disabled
+	}
+	if setting.FiveHourCredits > 0 {
+		item.FiveHourCredits = setting.FiveHourCredits
+	}
+	if setting.WeeklyCredits > 0 {
+		item.WeeklyCredits = setting.WeeklyCredits
+	}
+}

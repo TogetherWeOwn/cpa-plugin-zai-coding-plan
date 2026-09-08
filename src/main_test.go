@@ -59,11 +59,10 @@ func TestManagementRegistrationRoutes(t *testing.T) {
 	if err := json.Unmarshal(envelope.Result, &routes); err != nil {
 		t.Fatal(err)
 	}
-	if len(routes.Routes) != 1 {
-		t.Fatalf("routes = %#v, want exactly one route", routes.Routes)
+	if len(routes.Routes) != 4 {
+		t.Fatalf("routes = %#v, want four routes", routes.Routes)
 	}
-	route := routes.Routes[0]
-	if route.Method != "GET" || route.Path != managementStatusPath {
+	if route := routes.Routes[0]; route.Method != "GET" || route.Path != managementStatusPath {
 		t.Fatalf("route = %#v, want GET %s", route, managementStatusPath)
 	}
 }
@@ -112,8 +111,20 @@ func TestManagementHandleUnknownPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := managementHandle(request); err == nil {
-		t.Fatal("managementHandle() error = nil, want not_found for unknown route")
+	raw, err := managementHandle(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wrapped envelope
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		t.Fatal(err)
+	}
+	var response pluginapi.ManagementResponse
+	if err := json.Unmarshal(wrapped.Result, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.StatusCode)
 	}
 }
 
