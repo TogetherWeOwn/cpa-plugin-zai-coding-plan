@@ -8,7 +8,7 @@ Version 0.1 will:
 
 1. discover and pair the two CPA credentials backed by each plan key;
 2. poll Z.AI's plan-quota endpoint for authoritative five-hour and weekly utilization, with local credit estimation as a degraded fallback;
-3. keep CPA's native scheduler in control while every account is healthy, but exclude an entire paired account when it is exhausted, suspended, disabled, or invalid; and
+3. remain CPA's sole active scheduler plugin, delegate to CPA's native scheduler while every account is healthy, and exclude an entire paired account when it is exhausted, suspended, disabled, or invalid; and
 4. expose authenticated management status and recovery operations.
 
 The plugin does not proxy inference, rewrite requests, or mint credentials. Its primary quota signal is `GET https://api.z.ai/api/monitor/usage/quota/limit`, queried per account with that account's plan key. Local accounting is a conservative fallback when the endpoint fails, and an observed upstream `429` remains authoritative.
@@ -186,6 +186,7 @@ plugins:
   configs:
     zai-coding-plan:
       enabled: true
+      priority: 1000
       cpa-config-path: /app/config.yaml
       quota-endpoint: https://api.z.ai/api/monitor/usage/quota/limit
       quota-refresh-interval: 2m
@@ -206,6 +207,7 @@ plugins:
 
 | Field | Default | Rule |
 |---|---:|---|
+| `priority` | `1000` | Host-level `PluginInstanceConfig` field, not plugin payload. V0.1 requires this plugin to be the only enabled scheduler; the high value makes accidental lower-priority schedulers non-winning but is not a substitute for exclusivity validation. |
 | `cpa-config-path` | `config.yaml` | Host config path readable by the plugin. |
 | `quota-endpoint` | Z.AI monitor URL | Fixed to `https://api.z.ai/api/monitor/usage/quota/limit` in production v0.1; test builds may inject a local fixture server. |
 | `quota-refresh-interval` | `2m` | Base jittered interval; accept only one to three minutes in v0.1. |
@@ -230,7 +232,7 @@ Published plan buckets:
 | Pro | 12,000 | 60,000 |
 | Max | 28,000 | 140,000 |
 
-Reject the complete registration/reconfiguration on invalid account cardinality, ambiguous suffixes, duplicate names, invalid durations, or non-positive buckets. Keep the last valid snapshot active on reconfiguration and expose the validation error; an invalid initial registration does not advertise scheduler capability.
+Reject the complete initial registration on invalid account cardinality, ambiguous suffixes, duplicate names, invalid durations, or non-positive buckets. On an invalid reconfiguration, do **not** return an RPC error or an invalid/empty registration: CPA v7.2.67 omits such a plugin from the rebuilt capability snapshot. Instead, retain the last valid internal snapshot and return a successful, valid registration for that retained state; expose the rejected configuration and validation error through bounded redacted status/log fields. An invalid initial registration does not advertise scheduler capability.
 
 ## Identity and pairing
 
@@ -288,13 +290,14 @@ Model names use an explicit alias allowlist derived from observed CPA records. A
 
 Token rules:
 
-- cached input is charged at the cached rate;
-- if CPA input includes cache reads, subtract cached input before applying the normal input rate;
-- cache-write tokens not covered by the published formula use the normal input rate unless Z.ai documents otherwise;
+- bind published cached-input pricing to `UsageDetail.CacheReadTokens` only;
+- bind cache writes to `UsageDetail.CacheCreationTokens` and charge them at the normal input rate unless Z.ai documents a separate rate;
+- never use generic `UsageDetail.CachedTokens` for pricing because the v7.2.67 Claude usage helper can substitute cache-creation tokens into that field when it is zero;
+- subtract `CacheReadTokens` from `InputTokens` only when a redacted real fixture proves that CPA's input count includes cache reads; otherwise treat the fields as disjoint and fail the contract test rather than double-subtracting;
 - a failed request with no usage adds no estimated credits; and
-- a failure that includes usage is accounted once.
+- a failure that includes usage is accounted on best effort.
 
-Persist a deterministic record identity to prevent double charging after replay/reconfigure. If CPA supplies no request ID, hash stable non-secret record fields and retain a bounded dedup set.
+`usage.handle` is a lossy observation channel, not an authoritative ledger: its interface has no acknowledgment, CPA discards RPC errors, delivery may be skipped after request-context cancellation, and `UsageRecord` contains no request ID. The estimator therefore reports an integrity state (`complete_since`, `delivery_warning`, and `dedup_mode`) and becomes conservative when persistence or delivery uncertainty is observed; it never claims exact consumption and never clears an upstream 429. A bounded hash of stable non-secret fields may suppress obvious replays across restart/reconfigure, but collisions can suppress legitimate identical records, so hash dedup is explicitly heuristic rather than replay-safe.
 
 ### Fallback rolling windows
 
@@ -341,6 +344,8 @@ Shared account health values:
 A real 429 overrides a lower estimate. Repeated failures extend, never shorten, an active block. Treat reset hints as untrusted: bound body/header lengths, reject malformed/past/unreasonably distant values, and expose the chosen reason/reset.
 
 ## Scheduler
+
+CPA v7.2.67 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `zai-coding-plan`. Startup/dogfood validation inspects the configured and registered capability set and refuses the Z.ai lane if any second scheduler is enabled or if this plugin is not first. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
 
 For `scheduler.pick`:
 
@@ -413,7 +418,7 @@ Requirements:
 - key settings by hashed account identity so renames survive but rotations reset;
 - one in-process mutex protects the active snapshot, state, dedup set, and cursors;
 - copy a persistence snapshot under lock, then write after releasing it; and
-- shutdown flush is idempotent.
+- shutdown is idempotent and ordered: stop accepting new work, cancel the quota-poller context, synchronously join every poller/refresh worker, then flush persistence and return. No goroutine may retain or call the host callback table after shutdown returns, because CPA deletes host callback state and immediately unloads the `.so`.
 
 Quarantine corrupt state with a redacted diagnostic. Start conservatively with an accounting warning rather than silently replacing it.
 
@@ -448,6 +453,7 @@ Z.ai keys, CPA management authentication, usage/account state, local ledger inte
 
 | Threat | Control |
 |---|---|
+| Scheduler precedence bypasses quota enforcement | Require `zai-coding-plan` to be the only enabled scheduler, validate the configured/registered capability set before admitting the lane, and retain `priority: 1000` only as defense in depth. |
 | Keys leak through logs/status/errors | Keys live only in the active in-memory account snapshot for exact pairing and authenticated quota requests; they are never persisted or returned. Central redaction and tests scan every serialized output/log/error path for fixture keys. |
 | Quota request leaks or is redirected | Fix production requests to HTTPS `api.z.ai`, reject redirects, disable ambient proxy use by default, never forward credentials cross-origin, cap headers/body/time, validate schema, and never log raw headers or bodies. |
 | Wrong pairing through suffix collision | Pair only by full-key equality. Suffix matching is override-only and ambiguity fails closed. |
@@ -493,8 +499,10 @@ Unit/property coverage:
 - exact pairing, duplicates, missing siblings, ambiguous suffixes, rotation;
 - reset headers/body variants and adversarial values;
 - cross-protocol 401/403/429 health;
-- healthy explicit built-in round-robin delegation, degraded exclusion/round-robin/stickiness, and all-impaired hard-error propagation;
-- dedup across replay/restart;
+- scheduler precedence/exclusivity with lower-, higher-, and equal-priority competitors; healthy explicit built-in round-robin delegation, degraded exclusion/round-robin/stickiness, and all-impaired hard-error propagation;
+- invalid reconfiguration retains the previous valid registration with a surfaced validation error;
+- lossy usage delivery, persistence-failure integrity state, and heuristic dedup collision/replay cases;
+- shutdown cancels and joins every background worker before callback teardown/unload;
 - permissions, atomic replacement, corrupt files, symlinks; and
 - collector status golden JSON.
 
@@ -517,6 +525,6 @@ The repository and reference plugin are MIT-licensed. Preserve required notices 
 
 1. Record the immutable digest/version of the deployed `eceasy/cli-proxy-api` image and pass the native load test. The private fork could not be read directly in this run.
 2. Capture a redacted real quota response fixture and verify the five-hour/weekly unit mapping and utilization scale against the live endpoint.
-3. Capture redacted real `pluginapi.UsageRecord` fixtures to settle cache-token semantics and model aliases for fallback accounting.
+3. Capture redacted real `pluginapi.UsageRecord` fixtures to validate input/cache field overlap and model aliases for fallback accounting. Pricing is already bound to `CacheReadTokens` and `CacheCreationTokens`, never generic `CachedTokens`.
 4. Confirm whether `cliproxy_usage_snapshot.py` expects utilization ratios or percentages and lock it with a golden test.
 5. Capture real redacted Z.ai 429/reset variants.
