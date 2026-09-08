@@ -348,32 +348,3 @@ func rejectSymlinkPathComponents(path string) error {
 		clean = parent
 	}
 }
-
-func rejectExistingSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect target: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing symlink target")
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("target is not a regular file")
-	}
-	return nil
-}
-
-func syncDirectory(dir string) error {
-	file, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open secure store directory: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	if errSync := file.Sync(); errSync != nil {
-		return fmt.Errorf("sync secure store directory: %w", errSync)
-	}
-	return nil
-}
