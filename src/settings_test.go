@@ -125,6 +125,81 @@ func TestFixtureKeyAbsentFromSerializedOutputs(t *testing.T) {
 	}
 }
 
+func TestSecureStoreRejectsInsecureFilePermissions(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.dir, "settings.json")
+	if err := os.WriteFile(path, []byte("{\"version\":1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.loadSettings(); err == nil || !strings.Contains(err.Error(), "insecure permissions") {
+		t.Fatalf("error = %v, want insecure permissions", err)
+	}
+}
+
+func TestSecureStoreRejectsDirectoryReplacementWithSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink permissions vary on Windows")
+	}
+	root := t.TempDir()
+	store, err := newSecureStore(filepath.Join(root, "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := store.dir + ".original"
+	if err := os.Rename(store.dir, original); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, store.dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.saveSettings(settingsFile{Version: 1}); err == nil || !strings.Contains(err.Error(), "not a directory") {
+		t.Fatalf("save error = %v, want replaced directory rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(target, "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("redirected write reached symlink target: %v", err)
+	}
+}
+
+func TestPersistedStateValidation(t *testing.T) {
+	identity := accountIdentity(fixtureKey)
+	tests := []struct {
+		name  string
+		state persistedState
+	}{
+		{name: "unsupported version", state: persistedState{Version: 999}},
+		{name: "invalid identity", state: persistedState{Version: 1, Accounts: map[string]json.RawMessage{"not-an-identity": json.RawMessage(`{}`)}}},
+		{name: "invalid body", state: persistedState{Version: 1, Accounts: map[string]json.RawMessage{identity: json.RawMessage(`not-json`)}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validatePersistedState(tt.state); err == nil {
+				t.Fatal("invalid persisted state succeeded")
+			}
+		})
+	}
+}
+
+func TestSecureStoreRejectsMultipleJSONDocuments(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.dir, "state.json")
+	if err := os.WriteFile(path, []byte("{\"version\":1} {\"version\":1}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.loadState(); err == nil || !strings.Contains(err.Error(), "corrupt state") {
+		t.Fatalf("error = %v, want corrupt state", err)
+	}
+}
+
 func TestStoredSettingsValidation(t *testing.T) {
 	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{DefaultPlan: "pro"})
 	if err != nil {

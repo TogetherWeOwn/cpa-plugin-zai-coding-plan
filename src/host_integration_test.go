@@ -16,6 +16,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginhost"
+	"gopkg.in/yaml.v3"
 
 	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/abiclient"
 )
@@ -172,14 +173,21 @@ func TestHostRegistersPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	authDir := filepath.Join(root, "auth")
+	cpaConfigPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
 	enabled := true
+	var configNode yaml.Node
+	if err := yaml.Unmarshal([]byte("enabled: true\npriority: 0\ncpa-config-path: "+cpaConfigPath+"\ndefault-plan: pro\n"), &configNode); err != nil {
+		t.Fatal(err)
+	}
 	host := pluginhost.New()
 	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
 		Enabled: true,
 		Dir:     filepath.Join(root, "plugins"),
-		AuthDir: filepath.Join(root, "auth"),
+		AuthDir: authDir,
 		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled},
+			pluginID: {Enabled: &enabled, Raw: *configNode.Content[0]},
 		},
 	})
 	defer host.ShutdownAll()
@@ -244,6 +252,66 @@ func buildTestPlugin(t *testing.T) (string, error) {
 		return "", err
 	}
 	return out, nil
+}
+
+func TestInvalidReconfigureRetainsHostRegistration(t *testing.T) {
+	binary, err := buildTestPlugin(t)
+	if err != nil {
+		t.Fatalf("build plugin: %v", err)
+	}
+	client, err := abiclient.Open(binary)
+	if err != nil {
+		t.Fatalf("open plugin: %v", err)
+	}
+	defer client.Close()
+
+	root := t.TempDir()
+	cpaConfigPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, cpaConfigPath, filepath.Join(root, "auth"), fixtureKey)
+	valid := []byte("cpa-config-path: " + cpaConfigPath + "\ndefault-plan: pro\n")
+
+	registerRequest, err := json.Marshal(map[string]any{"config_yaml": valid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registeredRaw, err := client.Call(pluginabi.MethodPluginRegister, registerRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := decodeEnvelopeResult[registration](t, registeredRaw, pluginabi.MethodPluginRegister)
+
+	invalidRequest, err := json.Marshal(map[string]any{"config_yaml": []byte("threshold-percent: 0\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconfiguredRaw, err := client.Call(pluginabi.MethodPluginReconfigure, invalidRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconfigured := decodeEnvelopeResult[registration](t, reconfiguredRaw, pluginabi.MethodPluginReconfigure)
+	if reconfigured.SchemaVersion != registered.SchemaVersion || reconfigured.Metadata.Name != registered.Metadata.Name || reconfigured.Capabilities != registered.Capabilities {
+		t.Fatalf("retained registration changed: before %#v after %#v", registered, reconfigured)
+	}
+
+	statusRequest, err := json.Marshal(pluginapi.ManagementRequest{Method: http.MethodGet, Path: managementStatusPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusRaw, err := client.Call(pluginabi.MethodManagementHandle, statusRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusResponse := decodeEnvelopeResult[pluginapi.ManagementResponse](t, statusRaw, pluginabi.MethodManagementHandle)
+	var status managementStatusBody
+	if err := json.Unmarshal(statusResponse.Body, &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.Status != "reconfigure_rejected" || status.ValidationError == "" {
+		t.Fatalf("status = %#v, want retained registration diagnostic", status)
+	}
+	if strings.Contains(status.ValidationError, fixtureKey) {
+		t.Fatal("validation status leaked provider key")
+	}
 }
 
 func copyFile(dst, src string) error {

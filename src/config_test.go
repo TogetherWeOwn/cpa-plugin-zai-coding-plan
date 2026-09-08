@@ -64,6 +64,21 @@ func TestPluginConfigRoundTripDoesNotExposeCPAKeys(t *testing.T) {
 	}
 }
 
+func TestLoadCPAConfigDecodeErrorIsRedacted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "openai-compatibility:\n  - name: zai-coding-plan\n    disabled: " + fixtureKey + "\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := loadCPAConfig(path)
+	if err == nil {
+		t.Fatal("malformed CPA config succeeded")
+	}
+	if strings.Contains(err.Error(), fixtureKey) || strings.Contains(err.Error(), fixtureKey[:7]) {
+		t.Fatalf("decode error leaked provider key material: %v", err)
+	}
+}
+
 func TestLoadCPAConfigProjection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	raw := "auth-dir: /auth\nclaude-api-key:\n  - api-key: " + fixtureKey + "\n    base-url: https://api.z.ai/api/anthropic\nopenai-compatibility:\n  - name: zai-coding-plan\n    base-url: https://api.z.ai/api/coding/paas/v4\n    api-key-entries:\n      - api-key: " + fixtureKey + "\n"

@@ -41,12 +41,11 @@ import "C"
 
 import (
 	"encoding/json"
+	"fmt"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 )
-
-var runtimeState pluginRuntime
 
 func main() {}
 
@@ -78,24 +77,30 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	var raw []byte
 	var err error
 	switch C.GoString(method) {
-	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-		var lifecycle struct {
-			ConfigYAML []byte `json:"config_yaml"`
-		}
-		if request == nil && requestLen > 0 {
-			raw = errorEnvelope("invalid_request", "request body is required")
-			break
-		}
-		var requestBytes []byte
-		if requestLen > 0 {
-			requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
-		}
-		if errDecode := json.Unmarshal(requestBytes, &lifecycle); errDecode != nil {
+	case pluginabi.MethodPluginRegister:
+		lifecycle, errLifecycle := decodeLifecycle(payload)
+		if errLifecycle != nil {
 			raw = errorEnvelope("invalid_request", "request body is invalid")
 			break
 		}
 		if errConfig := runtimeState.reconfigure(lifecycle.ConfigYAML); errConfig != nil {
-			raw = errorEnvelope("invalid_config", errConfig.Error())
+			raw = errorEnvelope("invalid_config", runtimeState.validationStatus())
+			break
+		}
+		raw, err = okEnvelope(pluginRegistration())
+	case pluginabi.MethodPluginReconfigure:
+		lifecycle, errLifecycle := decodeLifecycle(payload)
+		if errLifecycle != nil {
+			if runtimeState.hasSnapshot() {
+				_ = runtimeState.recordError(errLifecycle)
+				raw, err = okEnvelope(pluginRegistration())
+			} else {
+				raw = errorEnvelope("invalid_request", "request body is invalid")
+			}
+			break
+		}
+		if errConfig := runtimeState.reconfigure(lifecycle.ConfigYAML); errConfig != nil && !runtimeState.hasSnapshot() {
+			raw = errorEnvelope("invalid_config", runtimeState.validationStatus())
 			break
 		}
 		raw, err = okEnvelope(pluginRegistration())
@@ -108,7 +113,10 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	case pluginabi.MethodManagementHandle:
 		raw, err = managementHandle(payload)
 	case pluginabi.MethodPluginShutdown:
-		raw, err = okEnvelope(struct{}{})
+		err = runtimeState.shutdown()
+		if err == nil {
+			raw, err = okEnvelope(struct{}{})
+		}
 	default:
 		raw = errorEnvelope("unknown_method", "method is not implemented by this plugin")
 	}
@@ -120,6 +128,21 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	return 0
 }
 
+type lifecycleRequest struct {
+	ConfigYAML []byte `json:"config_yaml"`
+}
+
+func decodeLifecycle(payload []byte) (lifecycleRequest, error) {
+	var lifecycle lifecycleRequest
+	if len(payload) == 0 {
+		return lifecycle, fmt.Errorf("empty lifecycle request")
+	}
+	if err := json.Unmarshal(payload, &lifecycle); err != nil {
+		return lifecycleRequest{}, err
+	}
+	return lifecycle, nil
+}
+
 //export cliproxyPluginFree
 func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 	_ = length
@@ -129,7 +152,9 @@ func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 }
 
 //export cliproxyPluginShutdown
-func cliproxyPluginShutdown() {}
+func cliproxyPluginShutdown() {
+	_ = runtimeState.shutdown()
+}
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {
 	if response == nil || len(raw) == 0 {

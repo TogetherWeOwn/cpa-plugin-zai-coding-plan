@@ -63,7 +63,7 @@ func TestDiscoverAccountsPairingErrors(t *testing.T) {
 		mutate func(*cpaConfigProjection)
 		want   string
 	}{
-		{name: "missing sibling", mutate: func(c *cpaConfigProjection) { c.OpenAICompatibility[0].APIKeyEntries = nil }, want: "missing zai-coding-plan sibling"},
+		{name: "missing sibling", mutate: func(c *cpaConfigProjection) { c.OpenAICompatibility = nil }, want: "missing zai-coding-plan sibling"},
 		{name: "duplicate claude", mutate: func(c *cpaConfigProjection) { c.ClaudeKeys = append(c.ClaudeKeys, c.ClaudeKeys[0]) }, want: "duplicate Z.ai Anthropic"},
 		{name: "duplicate compat", mutate: func(c *cpaConfigProjection) {
 			c.OpenAICompatibility[0].APIKeyEntries = append(c.OpenAICompatibility[0].APIKeyEntries, c.OpenAICompatibility[0].APIKeyEntries[0])
@@ -163,8 +163,30 @@ func TestDiscoverAccountsRejectsDisabledSibling(t *testing.T) {
 	fixture := exactPairFixture(fixtureKey)
 	fixture.OpenAICompatibility[0].Disabled = true
 	_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
-	if err == nil || !strings.Contains(err.Error(), "missing zai-coding-plan sibling") {
-		t.Fatalf("error = %v, want missing sibling", err)
+	if err == nil || !strings.Contains(err.Error(), "must be enabled") {
+		t.Fatalf("error = %v, want disabled provider rejection", err)
+	}
+}
+
+func TestDiscoverAccountsRejectsMalformedNamedProvider(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*cpaConfigProjection)
+		want   string
+	}{
+		{name: "wrong base", mutate: func(c *cpaConfigProjection) { c.OpenAICompatibility[0].BaseURL = "https://example.invalid/v1" }, want: "invalid base URL"},
+		{name: "no entries", mutate: func(c *cpaConfigProjection) { c.OpenAICompatibility[0].APIKeyEntries = nil }, want: "no API key entries"},
+		{name: "empty entry", mutate: func(c *cpaConfigProjection) { c.OpenAICompatibility[0].APIKeyEntries[0].APIKey = "" }, want: "empty API key entry"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := exactPairFixture(fixtureKey)
+			tt.mutate(&fixture)
+			_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
 	}
 }
 
@@ -186,7 +208,7 @@ func TestStableAuthIDsUseHostTrimmedRawBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, "HTTPS://API.Z.AI/api/anthropic/"); got != want {
+	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, "HTTPS://API.Z.AI/api/anthropic/", "", "zai", ""); got != want {
 		t.Fatalf("Claude auth ID = %q, want %q", got, want)
 	}
 	if got, want := accounts[0].OpenAIAuthID, upstreamStableID("openai-compatibility:zai-coding-plan", fixtureKey, "HTTPS://API.Z.AI/api/coding/paas/v4/", ""); got != want {
@@ -214,11 +236,33 @@ func TestStableAuthIDsPreserveHostIterationOrder(t *testing.T) {
 	if len(accounts) != 1 {
 		t.Fatalf("len(accounts) = %d, want 1", len(accounts))
 	}
-	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL); got != want {
+	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL, "", "zai", ""); got != want {
 		t.Fatalf("Claude auth ID = %q, want %q", got, want)
 	}
 	if got, want := accounts[0].OpenAIAuthID, upstreamStableID("openai-compatibility:zai-coding-plan", fixtureKey, zaiOpenAIBaseURL, ""); got != want {
 		t.Fatalf("OpenAI auth ID = %q, want %q", got, want)
+	}
+}
+
+func TestStableClaudeAuthIDIncludesProxyPrefixAndSortedHeaders(t *testing.T) {
+	fixture := exactPairFixture(fixtureKey)
+	fixture.ClaudeKeys[0].ProxyURL = " https://proxy.example "
+	fixture.ClaudeKeys[0].Prefix = " zai "
+	fixture.ClaudeKeys[0].Headers = map[string]string{"X-Z": "last", "X-A": "first"}
+	accounts, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := upstreamStableID(
+		"claude:apikey",
+		fixtureKey,
+		zaiAnthropicBaseURL,
+		"https://proxy.example",
+		"zai",
+		"X-A\x00first\x00X-Z\x00last\x00",
+	)
+	if accounts[0].ClaudeAuthID != want {
+		t.Fatalf("Claude auth ID = %q, want %q", accounts[0].ClaudeAuthID, want)
 	}
 }
 
@@ -229,7 +273,7 @@ func TestStableAuthIDsMatchUpstreamFixtures(t *testing.T) {
 		parts []string
 		want  string
 	}{
-		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:ae1542c0f164"},
+		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL, "", "zai", ""}, want: "claude:apikey:6f937cc6dcf8"},
 		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:2ad86d46dbc6"},
 	}
 	for _, tt := range tests {

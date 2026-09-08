@@ -66,7 +66,31 @@ func (s *secureStore) loadState() (persistedState, error) {
 	if err := s.readJSON("state.json", &state); err != nil {
 		return persistedState{}, err
 	}
+	if err := validatePersistedState(state); err != nil {
+		return persistedState{}, err
+	}
 	return state, nil
+}
+
+func validatePersistedState(state persistedState) error {
+	if state.Version == 0 && len(state.Accounts) == 0 {
+		return nil
+	}
+	if state.Version != 1 {
+		return fmt.Errorf("state.json has unsupported version")
+	}
+	for identity, raw := range state.Accounts {
+		if len(identity) != sha256.Size*2 {
+			return fmt.Errorf("state.json contains invalid account identity")
+		}
+		if _, err := hex.DecodeString(identity); err != nil {
+			return fmt.Errorf("state.json contains invalid account identity")
+		}
+		if !json.Valid(raw) {
+			return fmt.Errorf("state.json contains corrupt account state")
+		}
+	}
+	return nil
 }
 
 func applyStoredSettings(accounts []account, settings settingsFile) error {
@@ -151,6 +175,9 @@ func validateAccounts(accounts []account) error {
 }
 
 func (s *secureStore) readJSON(name string, dst any) error {
+	if err := s.validateDirectory(); err != nil {
+		return err
+	}
 	path, err := s.securePath(name)
 	if err != nil {
 		return err
@@ -169,6 +196,9 @@ func (s *secureStore) readJSON(name string, dst any) error {
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%s is not a regular file", name)
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("%s has insecure permissions", name)
 	}
 	if info.Size() > maxStateFileSize {
 		return fmt.Errorf("%s exceeds maximum size", name)
@@ -192,6 +222,9 @@ func (s *secureStore) readJSON(name string, dst any) error {
 }
 
 func (s *secureStore) writeJSON(name string, value any) error {
+	if err := s.validateDirectory(); err != nil {
+		return err
+	}
 	path, err := s.securePath(name)
 	if err != nil {
 		return err
@@ -253,6 +286,36 @@ func (s *secureStore) securePath(name string) (string, error) {
 	return filepath.Join(s.dir, name), nil
 }
 
+func (s *secureStore) validateDirectory() error {
+	if s == nil || s.dir == "" {
+		return fmt.Errorf("secure store is not initialized")
+	}
+	info, err := os.Lstat(s.dir)
+	if err != nil {
+		return fmt.Errorf("inspect secure store directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return fmt.Errorf("secure store path is not a directory")
+	}
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("secure store directory has insecure permissions")
+	}
+	if err := rejectSymlinkPathComponents(filepath.Dir(s.dir)); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *secureStore) flush() error {
+	if s == nil {
+		return nil
+	}
+	if err := s.validateDirectory(); err != nil {
+		return err
+	}
+	return syncDirectory(s.dir)
+}
+
 func ensureSecureDirectory(dir string) error {
 	if err := rejectSymlinkPathComponents(filepath.Dir(dir)); err != nil {
 		return err
@@ -278,6 +341,9 @@ func ensureJSONEOF(decoder *json.Decoder) error {
 	err := decoder.Decode(&extra)
 	if errors.Is(err, io.EOF) {
 		return nil
+	}
+	if err == nil {
+		return fmt.Errorf("multiple JSON values")
 	}
 	return err
 }

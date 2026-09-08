@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -79,12 +80,12 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 	for i := range cpa.ClaudeKeys {
 		entry := cpa.ClaudeKeys[i]
 		key := strings.TrimSpace(entry.APIKey)
-		if key == "" {
+		_, recognized := recognizedBaseURL(entry.BaseURL, zaiAnthropicBaseURL)
+		if !recognized {
 			continue
 		}
-		_, ok := recognizedBaseURL(entry.BaseURL, zaiAnthropicBaseURL)
-		if !ok {
-			continue
+		if key == "" {
+			return nil, fmt.Errorf("Z.ai Anthropic entry has no API key")
 		}
 		pair := pairs[key]
 		if pair == nil {
@@ -96,18 +97,23 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 
 	for i := range cpa.OpenAICompatibility {
 		compat := cpa.OpenAICompatibility[i]
-		if compat.Disabled || strings.ToLower(strings.TrimSpace(compat.Name)) != zaiCompatName {
+		if strings.ToLower(strings.TrimSpace(compat.Name)) != zaiCompatName {
 			continue
 		}
-		_, ok := recognizedBaseURL(compat.BaseURL, zaiOpenAIBaseURL)
-		if !ok {
-			continue
+		if compat.Disabled {
+			return nil, fmt.Errorf("zai-coding-plan provider must be enabled")
+		}
+		if _, recognized := recognizedBaseURL(compat.BaseURL, zaiOpenAIBaseURL); !recognized {
+			return nil, fmt.Errorf("zai-coding-plan provider has invalid base URL")
+		}
+		if len(compat.APIKeyEntries) == 0 {
+			return nil, fmt.Errorf("zai-coding-plan provider has no API key entries")
 		}
 		for j := range compat.APIKeyEntries {
 			entry := compat.APIKeyEntries[j]
 			key := strings.TrimSpace(entry.APIKey)
 			if key == "" {
-				continue
+				return nil, fmt.Errorf("zai-coding-plan provider contains an empty API key entry")
 			}
 			pair := pairs[key]
 			if pair == nil {
@@ -118,6 +124,9 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		}
 	}
 
+	if len(pairs) == 0 {
+		return nil, fmt.Errorf("no complete Z.ai account pairs found")
+	}
 	if err := validatePairs(pairs); err != nil {
 		return nil, err
 	}
@@ -130,7 +139,14 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		if key == "" {
 			continue
 		}
-		id := idGen.next("claude:apikey", key, strings.TrimSpace(entry.BaseURL))
+		id := idGen.next(
+			"claude:apikey",
+			key,
+			strings.TrimSpace(entry.BaseURL),
+			strings.TrimSpace(entry.ProxyURL),
+			strings.TrimSpace(entry.Prefix),
+			formatSortedHeaders(entry.Headers),
+		)
 		baseURL, err := normalizedBaseURL(entry.BaseURL)
 		if err == nil {
 			if pair := pairs[key]; pair != nil && pair.claudeCount == 1 && pair.openAIEntryCount == 1 && baseURL == zaiAnthropicBaseURL {
@@ -311,6 +327,25 @@ func normalizedBaseURL(raw string) (string, error) {
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	parsed.RawPath = ""
 	return parsed.String(), nil
+}
+
+func formatSortedHeaders(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var output strings.Builder
+	for _, key := range keys {
+		output.WriteString(key)
+		output.WriteByte(0)
+		output.WriteString(headers[key])
+		output.WriteByte(0)
+	}
+	return output.String()
 }
 
 func accountIdentity(key string) string {

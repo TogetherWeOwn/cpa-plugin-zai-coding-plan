@@ -207,7 +207,7 @@ func loadCPAConfig(path string) (cpaConfigProjection, error) {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	var cfg cpaConfigProjection
 	if errDecode := decoder.Decode(&cfg); errDecode != nil {
-		return cpaConfigProjection{}, fmt.Errorf("decode CPA config: %w", errDecode)
+		return cpaConfigProjection{}, fmt.Errorf("decode CPA config: invalid YAML")
 	}
 	return cfg, nil
 }

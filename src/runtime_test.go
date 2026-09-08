@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -69,6 +70,29 @@ func TestRuntimeReconfigureKeepsLastValidSnapshot(t *testing.T) {
 	}
 	if len(after.Accounts) != 1 || after.Accounts[0].Identity != before.Accounts[0].Identity {
 		t.Fatalf("last valid snapshot changed: before %#v after %#v", before, after)
+	}
+}
+
+func TestRuntimeValidationStatusIsBounded(t *testing.T) {
+	var runtime pluginRuntime
+	long := make([]byte, 400)
+	for i := range long {
+		long[i] = 'x'
+	}
+	_ = runtime.recordError(fmt.Errorf("validation failed: %s", long))
+	status := runtime.validationStatus()
+	if len(status) != 240 {
+		t.Fatalf("status length = %d, want 240", len(status))
+	}
+}
+
+func TestRuntimeShutdownStopsReconfigure(t *testing.T) {
+	var runtime pluginRuntime
+	if err := runtime.shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.reconfigure([]byte("threshold-percent: 97\n")); err == nil {
+		t.Fatal("reconfigure succeeded after shutdown")
 	}
 }
 
