@@ -13,11 +13,13 @@ import (
 )
 
 const (
-	defaultCPAConfigPath  = "config.yaml"
-	defaultThreshold      = 97
-	defaultSuspend        = 30 * time.Minute
-	defaultFallback       = 10 * time.Minute
-	defaultStateRetention = 8 * 24 * time.Hour
+	defaultCPAConfigPath       = "config.yaml"
+	defaultQuotaRefresh        = 2 * time.Minute
+	defaultAuthoritativeMaxAge = 5 * time.Minute
+	defaultThreshold           = 97
+	defaultSuspend             = 30 * time.Minute
+	defaultFallback            = 10 * time.Minute
+	defaultStateRetention      = 8 * 24 * time.Hour
 )
 
 var planBuckets = map[string]creditBuckets{
@@ -32,13 +34,15 @@ type creditBuckets struct {
 }
 
 type pluginConfig struct {
-	CPAConfigPath    string
-	ThresholdPercent int
-	SuspendDuration  time.Duration
-	FallbackCooldown time.Duration
-	StateRetention   time.Duration
-	DefaultPlan      string
-	Accounts         []accountOverride
+	CPAConfigPath       string
+	QuotaRefresh        time.Duration
+	AuthoritativeMaxAge time.Duration
+	ThresholdPercent    int
+	SuspendDuration     time.Duration
+	FallbackCooldown    time.Duration
+	StateRetention      time.Duration
+	DefaultPlan         string
+	Accounts            []accountOverride
 }
 
 type accountOverride struct {
@@ -51,15 +55,17 @@ type accountOverride struct {
 }
 
 type rawPluginConfig struct {
-	Enabled          bool                 `yaml:"enabled"`
-	Priority         int                  `yaml:"priority"`
-	CPAConfigPath    string               `yaml:"cpa-config-path"`
-	ThresholdPercent *int                 `yaml:"threshold-percent"`
-	SuspendDuration  string               `yaml:"suspend-duration"`
-	FallbackCooldown string               `yaml:"fallback-cooldown"`
-	StateRetention   string               `yaml:"state-retention"`
-	DefaultPlan      string               `yaml:"default-plan"`
-	Accounts         []rawAccountOverride `yaml:"accounts"`
+	Enabled             bool                 `yaml:"enabled"`
+	Priority            int                  `yaml:"priority"`
+	CPAConfigPath       string               `yaml:"cpa-config-path"`
+	QuotaRefresh        string               `yaml:"quota-refresh-interval"`
+	AuthoritativeMaxAge string               `yaml:"authoritative-max-age"`
+	ThresholdPercent    *int                 `yaml:"threshold-percent"`
+	SuspendDuration     string               `yaml:"suspend-duration"`
+	FallbackCooldown    string               `yaml:"fallback-cooldown"`
+	StateRetention      string               `yaml:"state-retention"`
+	DefaultPlan         string               `yaml:"default-plan"`
+	Accounts            []rawAccountOverride `yaml:"accounts"`
 }
 
 type rawAccountOverride struct {
@@ -86,12 +92,14 @@ func parsePluginConfig(raw []byte) (pluginConfig, error) {
 	}
 
 	cfg := pluginConfig{
-		CPAConfigPath:    strings.TrimSpace(input.CPAConfigPath),
-		ThresholdPercent: defaultThreshold,
-		SuspendDuration:  defaultSuspend,
-		FallbackCooldown: defaultFallback,
-		StateRetention:   defaultStateRetention,
-		DefaultPlan:      normalizePlan(input.DefaultPlan),
+		CPAConfigPath:       strings.TrimSpace(input.CPAConfigPath),
+		QuotaRefresh:        defaultQuotaRefresh,
+		AuthoritativeMaxAge: defaultAuthoritativeMaxAge,
+		ThresholdPercent:    defaultThreshold,
+		SuspendDuration:     defaultSuspend,
+		FallbackCooldown:    defaultFallback,
+		StateRetention:      defaultStateRetention,
+		DefaultPlan:         normalizePlan(input.DefaultPlan),
 	}
 	if cfg.CPAConfigPath == "" {
 		cfg.CPAConfigPath = defaultCPAConfigPath
@@ -104,6 +112,18 @@ func parsePluginConfig(raw []byte) (pluginConfig, error) {
 	}
 
 	var err error
+	if cfg.QuotaRefresh, err = parsePositiveDuration("quota-refresh-interval", input.QuotaRefresh, defaultQuotaRefresh); err != nil {
+		return pluginConfig{}, err
+	}
+	if cfg.QuotaRefresh < time.Minute || cfg.QuotaRefresh > 3*time.Minute {
+		return pluginConfig{}, fmt.Errorf("quota-refresh-interval must be between one and three minutes")
+	}
+	if cfg.AuthoritativeMaxAge, err = parsePositiveDuration("authoritative-max-age", input.AuthoritativeMaxAge, defaultAuthoritativeMaxAge); err != nil {
+		return pluginConfig{}, err
+	}
+	if cfg.AuthoritativeMaxAge <= maxPollInterval(cfg.QuotaRefresh) {
+		return pluginConfig{}, fmt.Errorf("authoritative-max-age must exceed the maximum poll interval")
+	}
 	if cfg.SuspendDuration, err = parsePositiveDuration("suspend-duration", input.SuspendDuration, defaultSuspend); err != nil {
 		return pluginConfig{}, err
 	}

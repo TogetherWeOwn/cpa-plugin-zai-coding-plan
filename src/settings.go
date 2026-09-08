@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const maxStateFileSize = 8 << 20
@@ -29,8 +30,8 @@ type accountSetting struct {
 }
 
 type persistedState struct {
-	Version  int                        `json:"version"`
-	Accounts map[string]json.RawMessage `json:"accounts,omitempty"`
+	Version  int                          `json:"version"`
+	Accounts map[string]accountQuotaState `json:"accounts,omitempty"`
 }
 
 type secureStore struct {
@@ -77,6 +78,13 @@ func (s *secureStore) loadState() (persistedState, error) {
 	return state, nil
 }
 
+func (s *secureStore) saveState(state persistedState) error {
+	if err := validatePersistedState(state); err != nil {
+		return err
+	}
+	return s.writeJSON("state.json", state)
+}
+
 func validatePersistedState(state persistedState) error {
 	if state.Version == 0 && len(state.Accounts) == 0 {
 		return nil
@@ -84,15 +92,44 @@ func validatePersistedState(state persistedState) error {
 	if state.Version != 1 {
 		return fmt.Errorf("state.json has unsupported version")
 	}
-	for identity, raw := range state.Accounts {
+	for identity, accountState := range state.Accounts {
 		if len(identity) != sha256.Size*2 {
 			return fmt.Errorf("state.json contains invalid account identity")
 		}
 		if _, err := hex.DecodeString(identity); err != nil {
 			return fmt.Errorf("state.json contains invalid account identity")
 		}
-		if !json.Valid(raw) {
-			return fmt.Errorf("state.json contains corrupt account state")
+		if err := validateAccountQuotaState(accountState); err != nil {
+			return fmt.Errorf("state.json contains invalid account state")
+		}
+	}
+	return nil
+}
+
+func validateAccountQuotaState(state accountQuotaState) error {
+	if state.ConsecutiveFailures < 0 || len(state.DedupHashes) > maxDedupHashes {
+		return fmt.Errorf("invalid polling metadata")
+	}
+	if state.Authoritative != nil {
+		for _, window := range []quotaWindow{state.Authoritative.FiveHour, state.Authoritative.Weekly} {
+			if window.ConsumedMicrocredits < 0 || window.BucketMicrocredits <= 0 || window.ConsumedMicrocredits > window.BucketMicrocredits || window.ResetsAt.IsZero() {
+				return fmt.Errorf("invalid authoritative quota")
+			}
+		}
+	}
+	last := time.Time{}
+	for _, event := range state.Events {
+		if event.At.IsZero() || event.Microcredits <= 0 || normalizeModelName(event.Model) == "" || (!last.IsZero() && event.At.Before(last)) {
+			return fmt.Errorf("invalid credit event")
+		}
+		last = event.At
+	}
+	for _, hash := range state.DedupHashes {
+		if len(hash) != sha256.Size*2 {
+			return fmt.Errorf("invalid dedup hash")
+		}
+		if _, err := hex.DecodeString(hash); err != nil {
+			return fmt.Errorf("invalid dedup hash")
 		}
 	}
 	return nil
@@ -347,33 +384,4 @@ func rejectSymlinkPathComponents(path string) error {
 		}
 		clean = parent
 	}
-}
-
-func rejectExistingSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect target: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing symlink target")
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("target is not a regular file")
-	}
-	return nil
-}
-
-func syncDirectory(dir string) error {
-	file, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open secure store directory: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	if errSync := file.Sync(); errSync != nil {
-		return fmt.Errorf("sync secure store directory: %w", errSync)
-	}
-	return nil
 }
