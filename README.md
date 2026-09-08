@@ -28,7 +28,7 @@ No provider-specific settings are accepted by this scaffold. Future settings mus
 
 ## API and security
 
-The scaffold advertises no scheduler, usage, or management capability. When management endpoints are added, they must require the CLIProxyAPI management key. Never commit or log API keys.
+The plugin registers with the `scheduler`, `usage_plugin`, and `management_api` capabilities required by [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). The scheduler declines every pick (`Handled: false`) so CLIProxyAPI's native scheduler stays in control until quota-aware selection lands; `usage.handle` is acknowledged; and a read-only `GET /v0/management/plugins/zai-coding-plan/status` route reports plugin status behind the CLIProxyAPI management key. Never commit or log API keys.
 
 ## Development
 

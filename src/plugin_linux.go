@@ -62,8 +62,6 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 
 //export cliproxyPluginCall
 func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
-	_ = request
-	_ = requestLen
 	if response != nil {
 		response.ptr = nil
 		response.len = 0
@@ -73,13 +71,24 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 		return 1
 	}
 
+	payload := C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
 	var raw []byte
 	var err error
 	switch C.GoString(method) {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
 		raw, err = okEnvelope(pluginRegistration())
+	case pluginabi.MethodSchedulerPick:
+		raw, err = schedulerPick(payload)
+	case pluginabi.MethodUsageHandle:
+		raw, err = usageHandle(payload)
+	case pluginabi.MethodManagementRegister:
+		raw, err = okEnvelope(managementRegistration())
+	case pluginabi.MethodManagementHandle:
+		raw, err = managementHandle(payload)
+	case pluginabi.MethodPluginShutdown:
+		raw, err = okEnvelope(struct{}{})
 	default:
-		raw = errorEnvelope("unknown_method", "method is not implemented by the scaffold")
+		raw = errorEnvelope("unknown_method", "method is not implemented by this plugin")
 	}
 	if err != nil {
 		writeResponse(response, errorEnvelope("plugin_error", err.Error()))
