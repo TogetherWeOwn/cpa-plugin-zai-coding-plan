@@ -17,8 +17,12 @@ import (
 const maxStateFileSize = 8 << 20
 
 type settingsFile struct {
-	Version  int                       `json:"version"`
-	Accounts map[string]accountSetting `json:"accounts,omitempty"`
+	Version             int                       `json:"version"`
+	Accounts            map[string]accountSetting `json:"accounts,omitempty"`
+	ThresholdPercent    *int                      `json:"threshold_percent,omitempty"`
+	PollingInterval     string                    `json:"polling_interval,omitempty"`
+	AuthoritativeMaxAge string                    `json:"authoritative_max_age,omitempty"`
+	Timeout             string                    `json:"timeout,omitempty"`
 }
 
 type accountSetting struct {
@@ -59,6 +63,20 @@ func newSecureStore(authDir string) (*secureStore, error) {
 func (s *secureStore) loadSettings() (settingsFile, error) {
 	var settings settingsFile
 	if err := s.readJSON("settings.json", &settings); err != nil {
+		return settingsFile{}, err
+	}
+	if settings.Version == 0 && settingsEmpty(settings) {
+		return settings, nil
+	}
+	if settings.Version != 1 {
+		return settingsFile{}, fmt.Errorf("settings.json has unsupported version")
+	}
+	if _, err := applyStoredConfig(pluginConfig{
+		QuotaRefresh:        defaultQuotaRefresh,
+		AuthoritativeMaxAge: defaultAuthoritativeMaxAge,
+		QuotaTimeout:        defaultQuotaTimeout,
+		ThresholdPercent:    defaultThreshold,
+	}, settings); err != nil {
 		return settingsFile{}, err
 	}
 	return settings, nil
@@ -137,11 +155,19 @@ func validateAccountQuotaState(state accountQuotaState) error {
 }
 
 func applyStoredSettings(accounts []account, settings settingsFile) error {
-	if settings.Version == 0 && len(settings.Accounts) == 0 {
+	if settings.Version == 0 && settingsEmpty(settings) {
 		return nil
 	}
 	if settings.Version != 1 {
 		return fmt.Errorf("settings.json has unsupported version")
+	}
+	if _, err := applyStoredConfig(pluginConfig{
+		QuotaRefresh:        defaultQuotaRefresh,
+		AuthoritativeMaxAge: defaultAuthoritativeMaxAge,
+		QuotaTimeout:        defaultQuotaTimeout,
+		ThresholdPercent:    defaultThreshold,
+	}, settings); err != nil {
+		return err
 	}
 	for identity, stored := range settings.Accounts {
 		if len(identity) != sha256.Size*2 {
@@ -180,6 +206,42 @@ func applyStoredSettings(accounts []account, settings settingsFile) error {
 		}
 	}
 	return validateAccounts(accounts)
+}
+
+func settingsEmpty(settings settingsFile) bool {
+	return len(settings.Accounts) == 0 && settings.ThresholdPercent == nil && settings.PollingInterval == "" && settings.AuthoritativeMaxAge == "" && settings.Timeout == ""
+}
+
+func applyStoredConfig(cfg pluginConfig, settings settingsFile) (pluginConfig, error) {
+	if settings.ThresholdPercent != nil {
+		if *settings.ThresholdPercent < 1 || *settings.ThresholdPercent > 100 {
+			return pluginConfig{}, fmt.Errorf("settings.json contains invalid threshold_percent")
+		}
+		cfg.ThresholdPercent = *settings.ThresholdPercent
+	}
+	var err error
+	if settings.PollingInterval != "" {
+		cfg.QuotaRefresh, err = parsePositiveDuration("polling_interval", settings.PollingInterval, cfg.QuotaRefresh)
+		if err != nil || cfg.QuotaRefresh < time.Minute || cfg.QuotaRefresh > 3*time.Minute {
+			return pluginConfig{}, fmt.Errorf("settings.json contains invalid polling_interval")
+		}
+	}
+	if settings.AuthoritativeMaxAge != "" {
+		cfg.AuthoritativeMaxAge, err = parsePositiveDuration("authoritative_max_age", settings.AuthoritativeMaxAge, cfg.AuthoritativeMaxAge)
+		if err != nil {
+			return pluginConfig{}, fmt.Errorf("settings.json contains invalid authoritative_max_age")
+		}
+	}
+	if cfg.AuthoritativeMaxAge <= maxPollInterval(cfg.QuotaRefresh) {
+		return pluginConfig{}, fmt.Errorf("settings.json authoritative_max_age must exceed maximum polling jitter")
+	}
+	if settings.Timeout != "" {
+		cfg.QuotaTimeout, err = parsePositiveDuration("timeout", settings.Timeout, cfg.QuotaTimeout)
+		if err != nil || cfg.QuotaTimeout < minQuotaTimeout || cfg.QuotaTimeout > maxQuotaTimeout {
+			return pluginConfig{}, fmt.Errorf("settings.json contains invalid timeout")
+		}
+	}
+	return cfg, nil
 }
 
 func validateStoredSetting(stored accountSetting) error {

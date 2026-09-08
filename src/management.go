@@ -320,31 +320,30 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 
 	r.settingsMu.Lock()
 	defer r.settingsMu.Unlock()
-	r.mu.Lock()
+	r.mu.RLock()
 	if r.stopped || r.snapshot == nil || r.snapshot.Store == nil {
-		r.mu.Unlock()
+		r.mu.RUnlock()
 		return fmt.Errorf("plugin is not configured")
 	}
 	updated := cloneRuntimeSnapshot(r.snapshot)
+	r.mu.RUnlock()
+
 	index := -1
 	for i := range updated.Accounts {
 		if strings.EqualFold(accountName, updated.Accounts[i].Name) || accountName == updated.Accounts[i].KeySuffix {
 			if index >= 0 {
-				r.mu.Unlock()
 				return fmt.Errorf("account selector is ambiguous")
 			}
 			index = i
 		}
 	}
 	if index < 0 {
-		r.mu.Unlock()
 		return fmt.Errorf("account does not match a configured account")
 	}
 	item := &updated.Accounts[index]
 
 	settings, err := updated.Store.loadSettings()
 	if err != nil {
-		r.mu.Unlock()
 		return err
 	}
 	if settings.Version == 0 {
@@ -363,7 +362,6 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 		if input.Plan != "" {
 			setting.Plan = normalizePlan(input.Plan)
 			if setting.Plan == "" {
-				r.mu.Unlock()
 				return fmt.Errorf("plan must be lite, pro, max, or custom")
 			}
 		}
@@ -377,7 +375,6 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 			setting.WeeklyCredits = *input.WeeklyCredits
 		}
 		if err := validateStoredSetting(setting); err != nil {
-			r.mu.Unlock()
 			return err
 		}
 	}
@@ -385,35 +382,35 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 	cfg := updated.Config
 	if input.ThresholdPercent != nil {
 		if *input.ThresholdPercent < 1 || *input.ThresholdPercent > 100 {
-			r.mu.Unlock()
 			return fmt.Errorf("threshold_percent must be between 1 and 100")
 		}
 		cfg.ThresholdPercent = *input.ThresholdPercent
+		value := *input.ThresholdPercent
+		settings.ThresholdPercent = &value
 	}
 	if strings.TrimSpace(input.PollingInterval) != "" {
 		cfg.QuotaRefresh, err = parsePositiveDuration("polling_interval", input.PollingInterval, cfg.QuotaRefresh)
 		if err != nil || cfg.QuotaRefresh < time.Minute || cfg.QuotaRefresh > 3*time.Minute {
-			r.mu.Unlock()
 			return fmt.Errorf("polling_interval must be between one and three minutes")
 		}
+		settings.PollingInterval = cfg.QuotaRefresh.String()
 	}
 	if strings.TrimSpace(input.AuthoritativeMaxAge) != "" {
 		cfg.AuthoritativeMaxAge, err = parsePositiveDuration("authoritative_max_age", input.AuthoritativeMaxAge, cfg.AuthoritativeMaxAge)
 		if err != nil {
-			r.mu.Unlock()
 			return err
 		}
+		settings.AuthoritativeMaxAge = cfg.AuthoritativeMaxAge.String()
 	}
 	if cfg.AuthoritativeMaxAge <= maxPollInterval(cfg.QuotaRefresh) {
-		r.mu.Unlock()
 		return fmt.Errorf("authoritative_max_age must exceed maximum polling jitter")
 	}
 	if strings.TrimSpace(input.Timeout) != "" {
 		cfg.QuotaTimeout, err = parsePositiveDuration("timeout", input.Timeout, defaultQuotaTimeout)
 		if err != nil || cfg.QuotaTimeout < minQuotaTimeout || cfg.QuotaTimeout > maxQuotaTimeout {
-			r.mu.Unlock()
 			return fmt.Errorf("timeout must be between one and thirty seconds")
 		}
+		settings.Timeout = cfg.QuotaTimeout.String()
 	}
 
 	candidate := *item
@@ -426,28 +423,12 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 	updated.Accounts[index] = candidate
 	updated.Config = cfg
 	if err := validateAccounts(updated.Accounts); err != nil {
-		r.mu.Unlock()
 		return err
 	}
-	store := updated.Store
-	r.mu.Unlock()
-
-	if err := store.saveSettings(settings); err != nil {
+	if err := updated.Store.saveSettings(settings); err != nil {
 		return fmt.Errorf("save account settings: %w", err)
 	}
-
-	r.mu.Lock()
-	if r.stopped || r.snapshot == nil {
-		r.mu.Unlock()
-		return fmt.Errorf("plugin is shutting down")
-	}
-	r.snapshot.Accounts = updated.Accounts
-	r.snapshot.Config = updated.Config
-	r.mu.Unlock()
-	if err := r.restartPollers(); err != nil {
-		return err
-	}
-	return nil
+	return r.commitSnapshot(updated)
 }
 
 func applySettingToAccount(item *account, setting accountSetting) {

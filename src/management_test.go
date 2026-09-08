@@ -162,6 +162,87 @@ func TestManagementConcurrentAccountConfigPreservesBothUpdates(t *testing.T) {
 	}
 }
 
+func TestManagementAccountConfigSerializesWithReconfigure(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, configPath, authDir, fixtureKey)
+	rawConfig := []byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")
+
+	var runtime pluginRuntime
+	if err := runtime.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runtime.shutdown() }()
+
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	go func() {
+		<-start
+		results <- runtime.reconfigure(rawConfig)
+	}()
+	go func() {
+		<-start
+		results <- runtime.updateAccountConfig(managementAccountConfigRequest{Account: "zai-pro-1", Name: "managed"})
+	}()
+	close(start)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	snapshot, err := runtime.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Accounts[0].Name != "managed" {
+		t.Fatalf("acknowledged account config lost to reconfigure: %#v", snapshot.Accounts[0])
+	}
+	settings, err := snapshot.Store.loadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Accounts[snapshot.Accounts[0].Identity].Name != "managed" {
+		t.Fatalf("stored account config lost: %#v", settings.Accounts)
+	}
+}
+
+func TestManagementGlobalSettingsSurviveReconfigure(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, configPath, authDir, fixtureKey)
+	rawConfig := []byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")
+
+	var runtime pluginRuntime
+	if err := runtime.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	threshold := 91
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{
+		Account:             "zai-pro-1",
+		ThresholdPercent:    &threshold,
+		PollingInterval:     "1m",
+		AuthoritativeMaxAge: "2m",
+		Timeout:             "5s",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = runtime.shutdown() }()
+
+	snapshot, err := runtime.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Config.ThresholdPercent != 91 || snapshot.Config.QuotaRefresh != time.Minute || snapshot.Config.AuthoritativeMaxAge != 2*time.Minute || snapshot.Config.QuotaTimeout != 5*time.Second {
+		t.Fatalf("global management settings did not survive reconfigure: %#v", snapshot.Config)
+	}
+}
+
 func TestManagementAccountConfigRestartsPollersWithLiveSettings(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	clock := &fakeClock{now: now}

@@ -33,11 +33,12 @@ func (realClock) Sleep(ctx context.Context, delay time.Duration) error {
 }
 
 type runtimeSnapshot struct {
-	Config   pluginConfig
-	Accounts []account
-	Store    *secureStore
-	Quota    map[string]accountQuotaState
-	byAuthID map[string]string
+	Config     pluginConfig
+	Accounts   []account
+	Store      *secureStore
+	Quota      map[string]accountQuotaState
+	byAuthID   map[string]string
+	Generation uint64
 }
 
 type pluginRuntime struct {
@@ -101,11 +102,17 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
+	r.settingsMu.Lock()
+	defer r.settingsMu.Unlock()
 	settings, err := store.loadSettings()
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
 	if err = applyStoredSettings(accounts, settings); err != nil {
+		return r.recordError(err, providerKeys...)
+	}
+	cfg, err = applyStoredConfig(cfg, settings)
+	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
 	persisted, err := store.loadState()
@@ -126,30 +133,7 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 		byAuthID[accounts[i].OpenAIAuthID] = accounts[i].Identity
 	}
 	staged := &runtimeSnapshot{Config: cfg, Accounts: accounts, Store: store, Quota: quota, byAuthID: byAuthID}
-
-	r.pollersMu.Lock()
-	defer r.pollersMu.Unlock()
-	ctx, cancel := context.WithCancel(context.Background())
-	r.mu.Lock()
-	if r.stopped {
-		r.mu.Unlock()
-		cancel()
-		return fmt.Errorf("plugin is shutting down")
-	}
-	previousCancel := r.cancel
-	r.cancel = cancel
-	if r.refreshContext == nil {
-		r.refreshContext, r.refreshCancel = context.WithCancel(context.Background())
-	}
-	r.snapshot = staged
-	r.lastErr = nil
-	r.mu.Unlock()
-	if previousCancel != nil {
-		previousCancel()
-		r.workers.Wait()
-	}
-	r.startPollers(ctx, staged)
-	return nil
+	return r.commitSnapshot(staged)
 }
 
 func (r *pluginRuntime) recordError(err error, secrets ...string) error {
@@ -175,6 +159,10 @@ func (r *pluginRuntime) current() (*runtimeSnapshot, error) {
 		return nil, fmt.Errorf("plugin is not configured")
 	}
 	return cloneRuntimeSnapshot(r.snapshot), nil
+}
+
+func sameSecureStore(left, right *secureStore) bool {
+	return left != nil && right != nil && left.dir == right.dir
 }
 
 func cloneRuntimeSnapshot(source *runtimeSnapshot) *runtimeSnapshot {
@@ -282,6 +270,47 @@ func (r *pluginRuntime) startPollers(ctx context.Context, snapshot *runtimeSnaps
 		r.workers.Add(1)
 		go r.pollAccount(ctx, item.Identity, item.key, snapshot.Config.QuotaRefresh)
 	}
+}
+
+func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
+	r.pollersMu.Lock()
+	defer r.pollersMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		cancel()
+		return fmt.Errorf("plugin is shutting down")
+	}
+	previousCancel := r.cancel
+	if r.snapshot != nil {
+		staged.Generation = r.snapshot.Generation + 1
+		if sameSecureStore(r.snapshot.Store, staged.Store) {
+			for identity, state := range r.snapshot.Quota {
+				if _, exists := staged.Quota[identity]; exists {
+					staged.Quota[identity] = state
+				}
+			}
+		}
+	} else {
+		staged.Generation = 1
+	}
+	r.cancel = cancel
+	if r.refreshContext == nil {
+		r.refreshContext, r.refreshCancel = context.WithCancel(context.Background())
+	}
+	r.snapshot = staged
+	r.lastErr = nil
+	pollerSnapshot := cloneRuntimeSnapshot(staged)
+	r.mu.Unlock()
+
+	if previousCancel != nil {
+		previousCancel()
+		r.workers.Wait()
+	}
+	r.startPollers(ctx, pollerSnapshot)
+	return nil
 }
 
 func (r *pluginRuntime) restartPollers() error {
