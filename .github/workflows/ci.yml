@@ -42,7 +42,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: Build plugin
-        run: make build VERSION=0.0.1
-      - name: Verify artifact
-        run: test -s dist/zai-coding-plan-v0.0.1.so
+      - name: Package plugin
+        run: make package VERSION=0.0.1
+      - name: Verify plugin-store artifact
+        run: |
+          set -euo pipefail
+          library="dist/zai-coding-plan-v0.0.1.so"
+          archive="dist/zai-coding-plan_0.0.1_linux_amd64.zip"
+          test -s "$library"
+          nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
+          test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
+          cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
+          (cd dist && sha256sum --check checksums.txt)
