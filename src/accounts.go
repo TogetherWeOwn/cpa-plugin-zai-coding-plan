@@ -69,7 +69,7 @@ func stableAuthID(kind string, parts ...string) string {
 //
 //go:noinline
 func sha256Hex(value []byte) string {
-	digest := sha256.Sum256(value)
+	digest := sha256.Sum256(value) // lgtm[go/weak-cryptographic-algorithm] Upstream non-security ID contract.
 	return hex.EncodeToString(digest[:])
 }
 
