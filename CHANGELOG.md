@@ -1,17 +1,34 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
+All notable changes to this project are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.0.1] - 2026-09-08
+### Changed
+
+- Corrected the architecture and documentation to use Z.AI's authoritative plan-quota endpoint when available, with local token-based accounting as a fallback.
+
+## [0.1.0] - 2026-09-08
 
 ### Added
 
-- Initial CLIProxyAPI C ABI plugin scaffold.
-- CI, release packaging, registry metadata, project documentation, and community templates.
+- Exact-key pairing of Z.AI Anthropic and OpenAI-compatible CLIProxyAPI credentials into one logical account.
+- Authoritative five-hour and weekly quota polling, including reset timestamps and off-peak status, with fixed-point token accounting as a degraded fallback.
+- Shared account health and quota-aware scheduling across both credential protocols.
+- Authenticated management status, refresh, unblock, and non-secret account-configuration operations.
+- Atomic redacted state storage under `<auth-dir>/zai-coding-plan/` with restrictive permissions.
+- Native CLIProxyAPI v7.2.x C ABI registration for scheduler, usage, and management capabilities.
+- Versioned Linux/amd64 shared-library and plugin-store archive packaging with SHA-256 checksums.
+- Continuous integration, exact-image compatibility gate, release consistency checks, security checks, and community documentation.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.0.1...HEAD
-[0.0.1]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.0.1
+### Security
+
+- Management routes rely on CLIProxyAPI management-key authentication.
+- Keys, authorization headers, raw request bodies, and key hashes are excluded from persistent state, logs, and status responses.
+
+> This entry describes the v0.1.0 release candidate. The release workflow still refuses publication unless the tag, registry, archive names, and checksums match this version at the reviewed release commit.
+
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0

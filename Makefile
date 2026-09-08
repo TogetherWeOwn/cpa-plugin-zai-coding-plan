@@ -1,12 +1,12 @@
-VERSION ?= 0.0.1
+VERSION ?= 0.1.0
 GO ?= go
 PLUGIN_ID = zai-coding-plan
 OUT = dist/$(PLUGIN_ID)-v$(VERSION).so
 ARCHIVE = dist/$(PLUGIN_ID)_$(VERSION)_linux_amd64.zip
-ARCHIVE_CHECKSUM = $(ARCHIVE).sha256
+CHECKSUMS = dist/checksums.txt
 DEPLOY_DIR ?= ../../plugins/linux/amd64
 
-.PHONY: fmt-check vet lint test build package deploy clean
+.PHONY: fmt-check vet lint test test-release validate-source validate-release build package deploy clean
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
@@ -20,6 +20,17 @@ lint:
 test:
 	$(GO) test ./...
 
+test-release:
+	$(GO) test ./.github/scripts
+
+validate-source:
+	$(GO) run -buildvcs=false ./.github/scripts/release-validation.go -mode source
+
+validate-release:
+	test -n "$(TAG)"
+	$(GO) run -buildvcs=false ./.github/scripts/release-validation.go \
+		-mode release -tag "$(TAG)" -version "$(VERSION)"
+
 build:
 	test "$$($(GO) env GOOS)" = "linux"
 	test "$$($(GO) env GOARCH)" = "amd64"
@@ -32,9 +43,9 @@ build:
 package: build
 	$(GO) run -buildvcs=false ./.github/scripts/package-release.go \
 		-library "$(OUT)" -entry "$(PLUGIN_ID).so" \
-		-archive "$(ARCHIVE)" -checksum "$(ARCHIVE_CHECKSUM)"
-	cp "$(ARCHIVE_CHECKSUM)" dist/checksums.txt
-	test -s dist/checksums.txt
+		-archive "$(ARCHIVE)" -checksum "$(CHECKSUMS)"
+	test -s "$(ARCHIVE)"
+	test -s "$(CHECKSUMS)"
 
 deploy: build
 	mkdir -p "$(DEPLOY_DIR)"
