@@ -26,6 +26,10 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      - name: Test release validation
+        run: make test-release
+      - name: Validate release source
+        run: make validate-source
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:
@@ -53,4 +57,4 @@ jobs:
           nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
           test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
-          (cd dist && sha256sum --check checksums.txt)
+          make validate-release VERSION=0.0.1 TAG=v0.0.1
