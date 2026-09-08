@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +84,18 @@ func TestRuntimeValidationStatusIsBounded(t *testing.T) {
 	status := runtime.validationStatus()
 	if len(status) != 240 {
 		t.Fatalf("status length = %d, want 240", len(status))
+	}
+}
+
+func TestRuntimeValidationStatusRedactsProviderKeys(t *testing.T) {
+	var runtime pluginRuntime
+	_ = runtime.recordError(fmt.Errorf("validation failed for %s", fixtureKey), fixtureKey)
+	status := runtime.validationStatus()
+	if strings.Contains(status, fixtureKey) {
+		t.Fatalf("validation status leaked provider key: %q", status)
+	}
+	if !strings.Contains(status, "[redacted]") {
+		t.Fatalf("validation status = %q, want redaction marker", status)
 	}
 }
 

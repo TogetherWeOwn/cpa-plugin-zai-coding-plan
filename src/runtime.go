@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -42,27 +43,28 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	if err != nil {
 		return r.recordError(err)
 	}
+	providerKeys := cpaProviderKeys(cpa)
 	authDir, err := resolveAuthDir(cpa.AuthDir)
 	if err != nil {
-		return r.recordError(err)
+		return r.recordError(err, providerKeys...)
 	}
 	store, err := newSecureStore(authDir)
 	if err != nil {
-		return r.recordError(err)
+		return r.recordError(err, providerKeys...)
 	}
 	accounts, err := discoverAccounts(cpa, cfg)
 	if err != nil {
-		return r.recordError(err)
+		return r.recordError(err, providerKeys...)
 	}
 	settings, err := store.loadSettings()
 	if err != nil {
-		return r.recordError(err)
+		return r.recordError(err, providerKeys...)
 	}
 	if err = applyStoredSettings(accounts, settings); err != nil {
-		return r.recordError(err)
+		return r.recordError(err, providerKeys...)
 	}
 	if _, err = store.loadState(); err != nil {
-		return r.recordError(err)
+		return r.recordError(err, providerKeys...)
 	}
 
 	staged := &runtimeSnapshot{Config: cfg, Accounts: accounts, Store: store}
@@ -77,16 +79,17 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	return nil
 }
 
-func (r *pluginRuntime) recordError(err error) error {
+func (r *pluginRuntime) recordError(err error, secrets ...string) error {
 	if err == nil {
 		return nil
 	}
+	redacted := redactError(err, secrets...)
 	r.mu.Lock()
 	if !r.stopped {
-		r.lastErr = err
+		r.lastErr = redacted
 	}
 	r.mu.Unlock()
-	return err
+	return redacted
 }
 
 func (r *pluginRuntime) current() (*runtimeSnapshot, error) {
@@ -135,6 +138,33 @@ func (r *pluginRuntime) shutdown() error {
 		return nil
 	}
 	return snapshot.Store.flush()
+}
+
+func cpaProviderKeys(cpa cpaConfigProjection) []string {
+	keys := make([]string, 0, len(cpa.ClaudeKeys)+len(cpa.OpenAICompatibility))
+	for i := range cpa.ClaudeKeys {
+		keys = append(keys, cpa.ClaudeKeys[i].APIKey)
+	}
+	for i := range cpa.OpenAICompatibility {
+		for j := range cpa.OpenAICompatibility[i].APIKeyEntries {
+			keys = append(keys, cpa.OpenAICompatibility[i].APIKeyEntries[j].APIKey)
+		}
+	}
+	return keys
+}
+
+func redactError(err error, secrets ...string) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	for _, secret := range secrets {
+		secret = strings.TrimSpace(secret)
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	return errors.New(message)
 }
 
 func boundedStatus(message string) string {

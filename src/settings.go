@@ -34,7 +34,8 @@ type persistedState struct {
 }
 
 type secureStore struct {
-	dir string
+	dir       string
+	dirHandle *os.File
 }
 
 func newSecureStore(authDir string) (*secureStore, error) {
@@ -46,7 +47,11 @@ func newSecureStore(authDir string) (*secureStore, error) {
 	if err := ensureSecureDirectory(dir); err != nil {
 		return nil, err
 	}
-	return &secureStore{dir: dir}, nil
+	dirHandle, err := openSecureDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &secureStore{dir: dir, dirHandle: dirHandle}, nil
 }
 
 func (s *secureStore) loadSettings() (settingsFile, error) {
@@ -222,15 +227,11 @@ func (s *secureStore) readJSON(name string, dst any) error {
 }
 
 func (s *secureStore) writeJSON(name string, value any) error {
+	if _, err := s.securePath(name); err != nil {
+		return err
+	}
 	if err := s.validateDirectory(); err != nil {
 		return err
-	}
-	path, err := s.securePath(name)
-	if err != nil {
-		return err
-	}
-	if errCheck := rejectExistingSymlink(path); errCheck != nil {
-		return errCheck
 	}
 	data, err := json.Marshal(value)
 	if err != nil {
@@ -240,40 +241,10 @@ func (s *secureStore) writeJSON(name string, value any) error {
 	if len(data) > maxStateFileSize {
 		return fmt.Errorf("%s exceeds maximum size", name)
 	}
-
-	temp, err := os.CreateTemp(s.dir, "."+name+".tmp-")
-	if err != nil {
-		return fmt.Errorf("create temporary %s: %w", name, err)
+	if err := writeJSONAt(s.dirHandle, name, data); err != nil {
+		return err
 	}
-	tempPath := temp.Name()
-	committed := false
-	defer func() {
-		_ = temp.Close()
-		if !committed {
-			_ = os.Remove(tempPath)
-		}
-	}()
-
-	if errChmod := temp.Chmod(0o600); errChmod != nil {
-		return fmt.Errorf("chmod temporary %s: %w", name, errChmod)
-	}
-	if _, errWrite := temp.Write(data); errWrite != nil {
-		return fmt.Errorf("write temporary %s: %w", name, errWrite)
-	}
-	if errSync := temp.Sync(); errSync != nil {
-		return fmt.Errorf("sync temporary %s: %w", name, errSync)
-	}
-	if errClose := temp.Close(); errClose != nil {
-		return fmt.Errorf("close temporary %s: %w", name, errClose)
-	}
-	if errCheck := rejectExistingSymlink(path); errCheck != nil {
-		return errCheck
-	}
-	if errRename := os.Rename(tempPath, path); errRename != nil {
-		return fmt.Errorf("replace %s: %w", name, errRename)
-	}
-	committed = true
-	return syncDirectory(s.dir)
+	return s.validateDirectory()
 }
 
 func (s *secureStore) securePath(name string) (string, error) {
@@ -287,18 +258,25 @@ func (s *secureStore) securePath(name string) (string, error) {
 }
 
 func (s *secureStore) validateDirectory() error {
-	if s == nil || s.dir == "" {
+	if s == nil || s.dir == "" || s.dirHandle == nil {
 		return fmt.Errorf("secure store is not initialized")
 	}
-	info, err := os.Lstat(s.dir)
+	pathInfo, err := os.Lstat(s.dir)
 	if err != nil {
 		return fmt.Errorf("inspect secure store directory: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+	handleInfo, err := s.dirHandle.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect opened secure store directory: %w", err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.IsDir() || !handleInfo.IsDir() {
 		return fmt.Errorf("secure store path is not a directory")
 	}
-	if info.Mode().Perm() != 0o700 {
+	if pathInfo.Mode().Perm() != 0o700 || handleInfo.Mode().Perm() != 0o700 {
 		return fmt.Errorf("secure store directory has insecure permissions")
+	}
+	if !os.SameFile(pathInfo, handleInfo) {
+		return fmt.Errorf("secure store directory was replaced")
 	}
 	if err := rejectSymlinkPathComponents(filepath.Dir(s.dir)); err != nil {
 		return err
@@ -313,7 +291,7 @@ func (s *secureStore) flush() error {
 	if err := s.validateDirectory(); err != nil {
 		return err
 	}
-	return syncDirectory(s.dir)
+	return s.dirHandle.Sync()
 }
 
 func ensureSecureDirectory(dir string) error {

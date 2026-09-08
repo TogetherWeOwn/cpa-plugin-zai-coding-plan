@@ -204,12 +204,15 @@ func loadCPAConfig(path string) (cpaConfigProjection, error) {
 	if err != nil {
 		return cpaConfigProjection{}, fmt.Errorf("read CPA config: %w", err)
 	}
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	var cfg cpaConfigProjection
-	if errDecode := decoder.Decode(&cfg); errDecode != nil {
-		return cpaConfigProjection{}, fmt.Errorf("decode CPA config: invalid YAML")
+	cfg, err := sdkconfig.ParseConfigBytes(data)
+	if err != nil {
+		return cpaConfigProjection{}, fmt.Errorf("load CPA config: invalid configuration")
 	}
-	return cfg, nil
+	return cpaConfigProjection{
+		AuthDir:             cfg.AuthDir,
+		ClaudeKeys:          cfg.ClaudeKey,
+		OpenAICompatibility: cfg.OpenAICompatibility,
+	}, nil
 }
 
 func resolveCPAConfigPath(pluginConfigPath string) (string, error) {

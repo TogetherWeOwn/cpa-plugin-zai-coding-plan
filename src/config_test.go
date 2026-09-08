@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -81,7 +82,7 @@ func TestLoadCPAConfigDecodeErrorIsRedacted(t *testing.T) {
 
 func TestLoadCPAConfigProjection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
-	raw := "auth-dir: /auth\nclaude-api-key:\n  - api-key: " + fixtureKey + "\n    base-url: https://api.z.ai/api/anthropic\nopenai-compatibility:\n  - name: zai-coding-plan\n    base-url: https://api.z.ai/api/coding/paas/v4\n    api-key-entries:\n      - api-key: " + fixtureKey + "\n"
+	raw := "auth-dir: /auth\nclaude-api-key:\n  - api-key: " + fixtureKey + "\n    base-url: https://api.z.ai/api/anthropic\n    prefix: ' /zai/ '\n    headers:\n      ' X-Test ': ' value '\n      Empty: '   '\nopenai-compatibility:\n  - name: zai-coding-plan\n    base-url: https://api.z.ai/api/coding/paas/v4\n    api-key-entries:\n      - api-key: " + fixtureKey + "\n"
 	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -91,5 +92,11 @@ func TestLoadCPAConfigProjection(t *testing.T) {
 	}
 	if cfg.AuthDir != "/auth" || len(cfg.ClaudeKeys) != 1 || len(cfg.OpenAICompatibility) != 1 {
 		t.Fatalf("unexpected projection: %#v", cfg)
+	}
+	if got := cfg.ClaudeKeys[0].Prefix; got != "zai" {
+		t.Fatalf("normalized prefix = %q, want zai", got)
+	}
+	if got, want := cfg.ClaudeKeys[0].Headers, map[string]string{"X-Test": "value"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("normalized headers = %#v, want %#v", got, want)
 	}
 }
