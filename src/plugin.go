@@ -43,9 +43,15 @@ type capabilities struct {
 	ManagementAPI bool `json:"management_api"`
 }
 
-// managementStatusPath is served under the host's /v0/management/ prefix
-// once the management_api capability is registered.
-const managementStatusPath = "/plugins/zai-coding-plan/status"
+// managementStatusPath is the full Management API path the host dispatches:
+// ServeManagementHTTP forwards r.URL.Path verbatim (internal/pluginhost
+// management.go), and normalizeManagementRoute resolves this declaration to
+// the same routing key. Registration and the handler share one constant so
+// the advertised route and the served route can never drift apart.
+const managementStatusPath = "/v0/management/plugins/zai-coding-plan/status"
+
+// managementContentType is served with every management response body.
+const managementContentType = "application/json"
 
 func pluginRegistration() registration {
 	return registration{
@@ -106,8 +112,11 @@ func usageHandle(_ []byte) ([]byte, error) {
 	return okEnvelope(struct{}{})
 }
 
-// managementHandle serves the registered management routes. Requests for
-// any other path are rejected so misrouted calls surface in host logs.
+// managementHandle serves the registered management routes. The host
+// forwards ManagementRequest as-is with the full request path, and decodes
+// the envelope result as pluginapi.ManagementResponse (StatusCode, Headers,
+// base64 Body). Requests for any other path are rejected so misrouted
+// calls surface in host logs.
 func managementHandle(request []byte) ([]byte, error) {
 	var req pluginapi.ManagementRequest
 	if err := json.Unmarshal(request, &req); err != nil {
@@ -116,11 +125,26 @@ func managementHandle(request []byte) ([]byte, error) {
 	if req.Path != managementStatusPath {
 		return nil, &envelopeError{Code: "not_found", Message: "unknown management route"}
 	}
-	return okEnvelope(map[string]any{
-		"plugin":  pluginID,
-		"status":  "registered",
-		"version": pluginVersion,
+	body, err := json.Marshal(managementStatusBody{
+		Plugin:  pluginID,
+		Status:  "registered",
+		Version: pluginVersion,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return okEnvelope(pluginapi.ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{managementContentType}},
+		Body:       body,
+	})
+}
+
+// managementStatusBody is the JSON served at the status route.
+type managementStatusBody struct {
+	Plugin  string `json:"plugin"`
+	Status  string `json:"status"`
+	Version string `json:"version"`
 }
 
 func okEnvelope(value any) ([]byte, error) {

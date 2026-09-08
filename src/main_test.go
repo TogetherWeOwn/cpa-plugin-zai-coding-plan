@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -68,6 +69,8 @@ func TestManagementRegistrationRoutes(t *testing.T) {
 }
 
 func TestManagementHandleStatus(t *testing.T) {
+	// The host forwards the full request path (internal/pluginhost
+	// management.go ServeManagementHTTP passes r.URL.Path verbatim).
 	request, err := json.Marshal(pluginapi.ManagementRequest{
 		Method: "GET",
 		Path:   managementStatusPath,
@@ -83,12 +86,20 @@ func TestManagementHandleStatus(t *testing.T) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	var status struct {
-		Plugin  string `json:"plugin"`
-		Status  string `json:"status"`
-		Version string `json:"version"`
+	// The host decodes the result as pluginapi.ManagementResponse, whose
+	// fields carry no JSON tags and whose Body is base64-encoded bytes.
+	var resp pluginapi.ManagementResponse
+	if err := json.Unmarshal(envelope.Result, &resp); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(envelope.Result, &status); err != nil {
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", resp.StatusCode)
+	}
+	if got := resp.Headers.Get("Content-Type"); got != managementContentType {
+		t.Fatalf("content type = %q, want %q", got, managementContentType)
+	}
+	var status managementStatusBody
+	if err := json.Unmarshal(resp.Body, &status); err != nil {
 		t.Fatal(err)
 	}
 	if status.Plugin != pluginID || status.Status != "registered" || status.Version != pluginVersion {
