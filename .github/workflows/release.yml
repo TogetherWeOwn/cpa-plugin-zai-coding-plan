@@ -1,0 +1,48 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Resolve version
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+      - name: Verify
+        run: |
+          make fmt-check
+          make vet
+          make test
+          make lint
+      - name: Package
+        run: make package VERSION="$VERSION"
+      - name: Verify plugin-store artifact
+        run: |
+          set -euo pipefail
+          library="dist/zai-coding-plan-v${VERSION}.so"
+          archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+          nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
+          test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
+          cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
+          (cd dist && sha256sum --check checksums.txt)
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" dist/checksums.txt --verify-tag --generate-notes

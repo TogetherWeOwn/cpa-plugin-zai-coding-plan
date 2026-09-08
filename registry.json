@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "zai-coding-plan",
+      "name": "Z.AI Coding Plan",
+      "description": "CLIProxyAPI integration for Z.AI Coding Plan accounts.",
+      "author": "TogetherWeOwn",
+      "version": "0.0.1",
+      "repository": "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
+      "homepage": "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
+      "license": "MIT",
+      "tags": ["Z.AI", "Coding Plan"]
+    }
+  ]
+}
