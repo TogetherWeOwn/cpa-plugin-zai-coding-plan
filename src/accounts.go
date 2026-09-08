@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -42,13 +43,7 @@ func newStableIDGenerator() *stableIDGenerator {
 }
 
 func (g *stableIDGenerator) next(kind string, parts ...string) string {
-	hasher := sha256.New()
-	_, _ = hasher.Write([]byte(kind))
-	for _, part := range parts {
-		_, _ = hasher.Write([]byte{0})
-		_, _ = hasher.Write([]byte(strings.TrimSpace(part)))
-	}
-	short := hex.EncodeToString(hasher.Sum(nil))[:12]
+	short := stableAuthIDDigest(kind, parts...)[:12]
 	key := kind + ":" + short
 	index := g.counters[key]
 	g.counters[key] = index + 1
@@ -56,6 +51,18 @@ func (g *stableIDGenerator) next(kind string, parts ...string) string {
 		short = fmt.Sprintf("%s-%d", short, index)
 	}
 	return kind + ":" + short
+}
+
+// stableAuthIDDigest deliberately reproduces CLIProxyAPI's v7.2 stable auth-ID
+// scheme. It is an interoperability identifier, not a password hash.
+func stableAuthIDDigest(kind string, parts ...string) string {
+	hasher := sha256.New()
+	_, _ = hasher.Write([]byte(kind))
+	for _, part := range parts {
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write([]byte(strings.TrimSpace(part)))
+	}
+	return hex.EncodeToString(hasher.Sum(nil))
 }
 
 func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, error) {
@@ -299,8 +306,9 @@ func normalizedBaseURL(raw string) (string, error) {
 }
 
 func accountIdentity(key string) string {
-	digest := sha256.Sum256([]byte(strings.TrimSpace(key)))
-	return hex.EncodeToString(digest[:])
+	mac := hmac.New(sha256.New, []byte(pluginID+":account-identity:v1"))
+	_, _ = mac.Write([]byte(strings.TrimSpace(key)))
+	return hex.EncodeToString(mac.Sum(nil))
 }
 
 func displaySuffix(key string) string {

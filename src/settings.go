@@ -23,7 +23,7 @@ type settingsFile struct {
 type accountSetting struct {
 	Name            string `json:"name,omitempty"`
 	Plan            string `json:"plan,omitempty"`
-	Disabled        bool   `json:"disabled,omitempty"`
+	Disabled        *bool  `json:"disabled,omitempty"`
 	FiveHourCredits int64  `json:"five_hour_credits,omitempty"`
 	WeeklyCredits   int64  `json:"weekly_credits,omitempty"`
 }
@@ -106,7 +106,9 @@ func applyStoredSettings(accounts []account, settings settingsFile) error {
 				accounts[i].WeeklyCredits = buckets.Weekly
 			}
 		}
-		accounts[i].Disabled = stored.Disabled
+		if stored.Disabled != nil {
+			accounts[i].Disabled = *stored.Disabled
+		}
 		if stored.FiveHourCredits > 0 {
 			accounts[i].FiveHourCredits = stored.FiveHourCredits
 		}

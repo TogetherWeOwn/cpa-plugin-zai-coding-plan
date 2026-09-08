@@ -11,6 +11,10 @@ import (
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
 
+func boolPointer(value bool) *bool {
+	return &value
+}
+
 func TestSecureStorePermissionsAndReplacement(t *testing.T) {
 	authDir := filepath.Join(t.TempDir(), "auth")
 	store, err := newSecureStore(authDir)
@@ -142,6 +146,38 @@ func TestStoredSettingsValidation(t *testing.T) {
 				t.Fatal("invalid stored settings succeeded")
 			}
 		})
+	}
+}
+
+func TestStoredSettingsPreserveConfigDisabledWhenUnset(t *testing.T) {
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Plan: "pro", Disabled: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := settingsFile{Version: 1, Accounts: map[string]accountSetting{
+		accounts[0].Identity: {Name: "renamed"},
+	}}
+	if errApply := applyStoredSettings(accounts, settings); errApply != nil {
+		t.Fatal(errApply)
+	}
+	if !accounts[0].Disabled {
+		t.Fatal("stored metadata re-enabled a config-disabled account")
+	}
+}
+
+func TestStoredSettingsCanExplicitlyEnableAccount(t *testing.T) {
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Plan: "pro", Disabled: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := settingsFile{Version: 1, Accounts: map[string]accountSetting{
+		accounts[0].Identity: {Disabled: boolPointer(false)},
+	}}
+	if errApply := applyStoredSettings(accounts, settings); errApply != nil {
+		t.Fatal(errApply)
+	}
+	if accounts[0].Disabled {
+		t.Fatal("explicit stored enabled override was not applied")
 	}
 }
 

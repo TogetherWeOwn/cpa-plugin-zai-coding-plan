@@ -20,7 +20,7 @@ func TestRuntimeLoadsSettingsByStableIdentity(t *testing.T) {
 		accountIdentity(fixtureKey): {
 			Name:            "persisted-name",
 			Plan:            "custom",
-			Disabled:        true,
+			Disabled:        boolPointer(true),
 			FiveHourCredits: 77,
 			WeeklyCredits:   999,
 		},
