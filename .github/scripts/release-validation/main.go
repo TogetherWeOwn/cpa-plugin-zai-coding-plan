@@ -75,6 +75,13 @@ func run(args []string) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
 	}
+	if *root == "" {
+		workingDirectory, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get current directory: %w", err)
+		}
+		*root = workingDirectory
+	}
 
 	switch *mode {
 	case "source":
