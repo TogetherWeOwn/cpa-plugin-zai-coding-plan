@@ -2,9 +2,9 @@ module github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan
 
 go 1.26.0
 
-require github.com/router-for-me/CLIProxyAPI/v7 v7.2.67
+require github.com/router-for-me/CLIProxyAPI/v7 v7.2.151
 
 require (
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )
