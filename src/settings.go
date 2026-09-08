@@ -32,6 +32,9 @@ type accountSetting struct {
 type persistedState struct {
 	Version  int                          `json:"version"`
 	Accounts map[string]accountQuotaState `json:"accounts,omitempty"`
+	// Generation orders in-memory persistence commits; it is never written to
+	// disk (the on-disk file must stay loadable by older revisions).
+	Generation uint64 `json:"-"`
 }
 
 type secureStore struct {
@@ -116,6 +119,12 @@ func validateAccountQuotaState(state accountQuotaState) error {
 				return fmt.Errorf("invalid authoritative quota")
 			}
 		}
+		// ObservedAt is validated at read time against the live clock, but
+		// reject implausible timestamps here too so tampered state files fail
+		// closed at load instead of at first view.
+		if state.Authoritative.ObservedAt.IsZero() || state.Authoritative.ObservedAt.Year() < 2000 || state.Authoritative.ObservedAt.Year() > 2200 {
+			return fmt.Errorf("invalid authoritative quota")
+		}
 	}
 	last := time.Time{}
 	for _, event := range state.Events {
@@ -189,6 +198,9 @@ func validateStoredSetting(stored accountSetting) error {
 	if stored.FiveHourCredits < 0 || stored.WeeklyCredits < 0 {
 		return fmt.Errorf("negative credit bucket")
 	}
+	if stored.FiveHourCredits > 0 && !validCreditBucket(stored.FiveHourCredits) || stored.WeeklyCredits > 0 && !validCreditBucket(stored.WeeklyCredits) {
+		return fmt.Errorf("credit bucket exceeds supported range")
+	}
 	if plan == "custom" && (stored.FiveHourCredits <= 0 || stored.WeeklyCredits <= 0) {
 		return fmt.Errorf("custom plan requires both credit buckets")
 	}
@@ -204,8 +216,8 @@ func validateAccounts(accounts []account) error {
 		if normalizePlan(accounts[i].Plan) == "" {
 			return fmt.Errorf("account has invalid plan")
 		}
-		if accounts[i].FiveHourCredits <= 0 || accounts[i].WeeklyCredits <= 0 {
-			return fmt.Errorf("account has non-positive credit bucket")
+		if !validCreditBucket(accounts[i].FiveHourCredits) || !validCreditBucket(accounts[i].WeeklyCredits) {
+			return fmt.Errorf("account has non-positive or out-of-range credit bucket")
 		}
 		nameKey := strings.ToLower(strings.TrimSpace(accounts[i].Name))
 		if _, exists := seenNames[nameKey]; exists {

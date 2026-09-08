@@ -178,14 +178,14 @@ func validateAccountOverride(input rawAccountOverride, defaultPlan string) (acco
 
 	if input.FiveHourCredits != nil {
 		override.FiveHourCredits = *input.FiveHourCredits
-		if override.FiveHourCredits <= 0 {
-			return accountOverride{}, fmt.Errorf("five-hour-credits must be positive")
+		if !validCreditBucket(override.FiveHourCredits) {
+			return accountOverride{}, fmt.Errorf("five-hour-credits must be positive and at most %d", maxCreditBucket)
 		}
 	}
 	if input.WeeklyCredits != nil {
 		override.WeeklyCredits = *input.WeeklyCredits
-		if override.WeeklyCredits <= 0 {
-			return accountOverride{}, fmt.Errorf("weekly-credits must be positive")
+		if !validCreditBucket(override.WeeklyCredits) {
+			return accountOverride{}, fmt.Errorf("weekly-credits must be positive and at most %d", maxCreditBucket)
 		}
 	}
 

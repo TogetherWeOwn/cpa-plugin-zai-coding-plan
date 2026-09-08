@@ -107,14 +107,14 @@ func TestAuthoritativeQuotaReplacesEstimateAndFailureRetainsLastGood(t *testing.
 		}
 		return quotaHTTPResponse(503, quotaFixtureKey), nil
 	})
-	if err := runtime.pollOnce(context.Background(), item.Identity, item.key); err != nil {
+	if err := runtime.pollOnce(context.Background(), runtime.snapshot.Generation, item.Identity, item.key); err != nil {
 		t.Fatal(err)
 	}
 	view, _ := runtime.quotaView(item.Identity)
 	if view.Source != "authoritative" || view.FiveHour.ConsumedMicrocredits != 6_000*creditScale {
 		t.Fatalf("authoritative view = %#v", view)
 	}
-	if err := runtime.pollOnce(context.Background(), item.Identity, item.key); err == nil {
+	if err := runtime.pollOnce(context.Background(), runtime.snapshot.Generation, item.Identity, item.key); err == nil {
 		t.Fatal("non-200 poll succeeded")
 	}
 	view, _ = runtime.quotaView(item.Identity)

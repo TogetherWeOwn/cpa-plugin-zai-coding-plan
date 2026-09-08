@@ -289,8 +289,8 @@ func applyAccountOverride(target *account, override *accountOverride, defaultPla
 			buckets.Weekly = override.WeeklyCredits
 		}
 	}
-	if buckets.FiveHour <= 0 || buckets.Weekly <= 0 {
-		return fmt.Errorf("account %s has non-positive credit bucket", target.KeySuffix)
+	if !validCreditBucket(buckets.FiveHour) || !validCreditBucket(buckets.Weekly) {
+		return fmt.Errorf("account %s has non-positive or out-of-range credit bucket", target.KeySuffix)
 	}
 	if target.Name == "" {
 		target.Name = fmt.Sprintf("zai-%s-%d", plan, index+1)

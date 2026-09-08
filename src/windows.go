@@ -92,7 +92,10 @@ func (state *accountQuotaState) seenDedup(hash string) bool {
 }
 
 func (state accountQuotaState) view(now time.Time, item account, cfg pluginConfig) accountQuotaView {
-	fresh := state.Authoritative != nil && now.Sub(state.Authoritative.ObservedAt) <= cfg.AuthoritativeMaxAge
+	// Freshness requires a nonnegative age: a snapshot whose ObservedAt is in
+	// the future (skewed clock, tampered state file) must not stay
+	// authoritative forever.
+	fresh := state.Authoritative != nil && !state.Authoritative.ObservedAt.After(now) && now.Sub(state.Authoritative.ObservedAt) <= cfg.AuthoritativeMaxAge
 	if fresh {
 		return accountQuotaView{
 			Source:              "authoritative",
