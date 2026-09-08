@@ -48,7 +48,8 @@ import (
 func main() {}
 
 //export cliproxy_plugin_init
-func cliproxy_plugin_init(_ *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
+func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api) C.int {
+	_ = host
 	if plugin == nil {
 		return 1
 	}
@@ -60,7 +61,9 @@ func cliproxy_plugin_init(_ *C.cliproxy_host_api, plugin *C.cliproxy_plugin_api)
 }
 
 //export cliproxyPluginCall
-func cliproxyPluginCall(method *C.char, _ *C.uint8_t, _ C.size_t, response *C.cliproxy_buffer) C.int {
+func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
+	_ = request
+	_ = requestLen
 	if response != nil {
 		response.ptr = nil
 		response.len = 0
@@ -87,7 +90,8 @@ func cliproxyPluginCall(method *C.char, _ *C.uint8_t, _ C.size_t, response *C.cl
 }
 
 //export cliproxyPluginFree
-func cliproxyPluginFree(ptr unsafe.Pointer, _ C.size_t) {
+func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
+	_ = length
 	if ptr != nil {
 		C.free(ptr)
 	}
