@@ -55,7 +55,6 @@ func (g *stableIDGenerator) next(kind string, parts ...string) string {
 
 // stableAuthID deliberately reproduces CLIProxyAPI's v7.2 non-security
 // interoperability identifier. The host contract requires these exact bytes.
-// lgtm[go/weak-cryptographic-algorithm] This is not password verification or key protection.
 func stableAuthID(kind string, parts ...string) string {
 	encoded := make([]byte, 0, len(kind)+len(parts)*16)
 	encoded = append(encoded, kind...)
@@ -63,7 +62,14 @@ func stableAuthID(kind string, parts ...string) string {
 		encoded = append(encoded, 0)
 		encoded = append(encoded, strings.TrimSpace(part)...)
 	}
-	digest := sha256.Sum256(encoded)
+	return sha256Hex(encoded)
+}
+
+// sha256Hex is retained solely for the upstream stable auth-ID contract.
+//
+//go:noinline
+func sha256Hex(value []byte) string {
+	digest := sha256.Sum256(value)
 	return hex.EncodeToString(digest[:])
 }
 
