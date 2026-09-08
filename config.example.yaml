@@ -1,0 +1,5 @@
+# Plugin logic and configuration fields will be defined by the architecture card.
+plugins:
+  - id: zai-coding-plan
+    enabled: true
+    config: {}
