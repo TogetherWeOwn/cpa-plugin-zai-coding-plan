@@ -1,0 +1,255 @@
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"strings"
+	"testing"
+
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+)
+
+func exactPairFixture(key string) cpaConfigProjection {
+	return cpaConfigProjection{
+		AuthDir: "/auth",
+		ClaudeKeys: []sdkconfig.ClaudeKey{{
+			APIKey:  key,
+			BaseURL: zaiAnthropicBaseURL,
+			Prefix:  "zai",
+		}},
+		OpenAICompatibility: []sdkconfig.OpenAICompatibility{{
+			Name:    zaiCompatName,
+			BaseURL: zaiOpenAIBaseURL,
+			APIKeyEntries: []sdkconfig.OpenAICompatibilityAPIKey{{
+				APIKey: key,
+			}},
+		}},
+	}
+}
+
+func TestDiscoverAccountsExactPair(t *testing.T) {
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("len(accounts) = %d, want 1", len(accounts))
+	}
+	account := accounts[0]
+	if account.Plan != "pro" || account.FiveHourCredits != 12_000 || account.WeeklyCredits != 60_000 {
+		t.Fatalf("unexpected account: %#v", account)
+	}
+	if strings.Contains(account.Name, fixtureKey) || strings.Contains(account.KeySuffix, fixtureKey) {
+		t.Fatal("account output contains full key")
+	}
+}
+
+func TestDiscoverAccountsMultipleKeys(t *testing.T) {
+	fixture := exactPairFixture("key-one-111111")
+	fixture.ClaudeKeys = append(fixture.ClaudeKeys, sdkconfig.ClaudeKey{APIKey: "key-two-222222", BaseURL: zaiAnthropicBaseURL})
+	fixture.OpenAICompatibility[0].APIKeyEntries = append(fixture.OpenAICompatibility[0].APIKeyEntries, sdkconfig.OpenAICompatibilityAPIKey{APIKey: "key-two-222222"})
+	accounts, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "lite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 2 || accounts[0].Name != "zai-lite-1" || accounts[1].Name != "zai-lite-2" {
+		t.Fatalf("unexpected accounts: %#v", accounts)
+	}
+}
+
+func TestDiscoverAccountsPairingErrors(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*cpaConfigProjection)
+		want   string
+	}{
+		{name: "missing sibling", mutate: func(c *cpaConfigProjection) { c.OpenAICompatibility[0].APIKeyEntries = nil }, want: "missing zai-coding-plan sibling"},
+		{name: "duplicate claude", mutate: func(c *cpaConfigProjection) { c.ClaudeKeys = append(c.ClaudeKeys, c.ClaudeKeys[0]) }, want: "duplicate Z.ai Anthropic"},
+		{name: "duplicate compat", mutate: func(c *cpaConfigProjection) {
+			c.OpenAICompatibility[0].APIKeyEntries = append(c.OpenAICompatibility[0].APIKeyEntries, c.OpenAICompatibility[0].APIKeyEntries[0])
+		}, want: "duplicate zai-coding-plan"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := exactPairFixture(fixtureKey)
+			tt.mutate(&fixture)
+			_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestShortKeyIsFullyRedacted(t *testing.T) {
+	accounts, err := discoverAccounts(exactPairFixture("short"), pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accounts[0].KeySuffix != "redacted" {
+		t.Fatalf("key suffix = %q, want redacted", accounts[0].KeySuffix)
+	}
+}
+
+func TestDiscoverAccountsDoesNotPairBySuffix(t *testing.T) {
+	fixture := exactPairFixture("prefix-a-shared")
+	fixture.OpenAICompatibility[0].APIKeyEntries[0].APIKey = "prefix-b-shared"
+	_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("error = %v, want missing exact sibling", err)
+	}
+}
+
+func TestAccountOverridesAndAmbiguity(t *testing.T) {
+	fixture := exactPairFixture("key-one-abcdef")
+	cfg := pluginConfig{Accounts: []accountOverride{{
+		KeySuffix:       "abcdef",
+		Name:            "primary",
+		Plan:            "custom",
+		Disabled:        true,
+		FiveHourCredits: 100,
+		WeeklyCredits:   500,
+	}}}
+	accounts, err := discoverAccounts(fixture, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accounts[0].Name != "primary" || !accounts[0].Disabled || accounts[0].FiveHourCredits != 100 {
+		t.Fatalf("override not applied: %#v", accounts[0])
+	}
+
+	cfg.Accounts = append(cfg.Accounts, accountOverride{KeySuffix: "def", Plan: "pro"})
+	_, err = discoverAccounts(fixture, cfg)
+	if err == nil || !strings.Contains(err.Error(), "multiple overrides") {
+		t.Fatalf("error = %v, want ambiguous suffix", err)
+	}
+}
+
+func TestRenameAndKeyRotationIdentity(t *testing.T) {
+	fixture := exactPairFixture(fixtureKey)
+	base, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Name: "old", Plan: "pro"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Name: "new", Plan: "pro"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base[0].Identity != renamed[0].Identity {
+		t.Fatal("rename changed stable identity")
+	}
+	rotated, err := discoverAccounts(exactPairFixture(fixtureKey+"-rotated"), pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if base[0].Identity == rotated[0].Identity {
+		t.Fatal("key rotation preserved identity")
+	}
+}
+
+func TestDiscoverAccountsIgnoresUnrelatedEmptyBaseURL(t *testing.T) {
+	fixture := exactPairFixture(fixtureKey)
+	fixture.ClaudeKeys = append([]sdkconfig.ClaudeKey{{APIKey: "unmanaged-key"}}, fixture.ClaudeKeys...)
+	accounts, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("len(accounts) = %d, want 1", len(accounts))
+	}
+}
+
+func TestDiscoverAccountsRejectsDisabledSibling(t *testing.T) {
+	fixture := exactPairFixture(fixtureKey)
+	fixture.OpenAICompatibility[0].Disabled = true
+	_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err == nil || !strings.Contains(err.Error(), "missing zai-coding-plan sibling") {
+		t.Fatalf("error = %v, want missing sibling", err)
+	}
+}
+
+func TestOverrideSuffixMustMatchExactlyOneAccount(t *testing.T) {
+	fixture := exactPairFixture("key-one-shared")
+	fixture.ClaudeKeys = append(fixture.ClaudeKeys, sdkconfig.ClaudeKey{APIKey: "key-two-shared", BaseURL: zaiAnthropicBaseURL})
+	fixture.OpenAICompatibility[0].APIKeyEntries = append(fixture.OpenAICompatibility[0].APIKeyEntries, sdkconfig.OpenAICompatibilityAPIKey{APIKey: "key-two-shared"})
+	_, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: "shared", Plan: "pro"}}})
+	if err == nil || !strings.Contains(err.Error(), "matches multiple accounts") {
+		t.Fatalf("error = %v, want ambiguous account suffix", err)
+	}
+}
+
+func TestStableAuthIDsUseHostTrimmedRawBaseURL(t *testing.T) {
+	fixture := exactPairFixture(fixtureKey)
+	fixture.ClaudeKeys[0].BaseURL = "  HTTPS://API.Z.AI/api/anthropic/  "
+	fixture.OpenAICompatibility[0].BaseURL = "  HTTPS://API.Z.AI/api/coding/paas/v4/  "
+	accounts, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, "HTTPS://API.Z.AI/api/anthropic/"); got != want {
+		t.Fatalf("Claude auth ID = %q, want %q", got, want)
+	}
+	if got, want := accounts[0].OpenAIAuthID, upstreamStableID("openai-compatibility:zai-coding-plan", fixtureKey, "HTTPS://API.Z.AI/api/coding/paas/v4/", ""); got != want {
+		t.Fatalf("OpenAI auth ID = %q, want %q", got, want)
+	}
+}
+
+func TestStableAuthIDsPreserveHostIterationOrder(t *testing.T) {
+	fixture := exactPairFixture(fixtureKey)
+	fixture.ClaudeKeys = append([]sdkconfig.ClaudeKey{{
+		APIKey:  "unmanaged-key",
+		BaseURL: "https://api.anthropic.com",
+	}}, fixture.ClaudeKeys...)
+	fixture.OpenAICompatibility = append([]sdkconfig.OpenAICompatibility{{
+		Name:    "other-provider",
+		BaseURL: "https://other.example/v1",
+		APIKeyEntries: []sdkconfig.OpenAICompatibilityAPIKey{{
+			APIKey: "other-key",
+		}},
+	}}, fixture.OpenAICompatibility...)
+	accounts, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("len(accounts) = %d, want 1", len(accounts))
+	}
+	if got, want := accounts[0].ClaudeAuthID, upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL); got != want {
+		t.Fatalf("Claude auth ID = %q, want %q", got, want)
+	}
+	if got, want := accounts[0].OpenAIAuthID, upstreamStableID("openai-compatibility:zai-coding-plan", fixtureKey, zaiOpenAIBaseURL, ""); got != want {
+		t.Fatalf("OpenAI auth ID = %q, want %q", got, want)
+	}
+}
+
+func TestStableAuthIDsMatchUpstreamFixtures(t *testing.T) {
+	gen := newStableIDGenerator()
+	tests := []struct {
+		kind  string
+		parts []string
+		want  string
+	}{
+		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:ae1542c0f164"},
+		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:2ad86d46dbc6"},
+	}
+	for _, tt := range tests {
+		if got := gen.next(tt.kind, tt.parts...); got != tt.want {
+			t.Fatalf("stable ID = %q, want %q", got, tt.want)
+		}
+	}
+	first := gen.next("claude:apikey", "same", zaiAnthropicBaseURL)
+	second := gen.next("claude:apikey", "same", zaiAnthropicBaseURL)
+	if first == second || !strings.HasSuffix(second, "-1") {
+		t.Fatalf("duplicate counters = %q, %q", first, second)
+	}
+}
+
+func upstreamStableID(kind string, parts ...string) string {
+	hasher := sha256.New()
+	_, _ = hasher.Write([]byte(kind))
+	for _, part := range parts {
+		_, _ = hasher.Write([]byte{0})
+		_, _ = hasher.Write([]byte(strings.TrimSpace(part)))
+	}
+	return kind + ":" + hex.EncodeToString(hasher.Sum(nil))[:12]
+}

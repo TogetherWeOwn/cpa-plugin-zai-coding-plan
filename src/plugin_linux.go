@@ -40,6 +40,7 @@ extern void cliproxyPluginShutdown(void);
 import "C"
 
 import (
+	"encoding/json"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -62,8 +63,6 @@ func cliproxy_plugin_init(host *C.cliproxy_host_api, plugin *C.cliproxy_plugin_a
 
 //export cliproxyPluginCall
 func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t, response *C.cliproxy_buffer) C.int {
-	_ = request
-	_ = requestLen
 	if response != nil {
 		response.ptr = nil
 		response.len = 0
@@ -77,6 +76,25 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	var err error
 	switch C.GoString(method) {
 	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
+		var lifecycle struct {
+			ConfigYAML []byte `json:"config_yaml"`
+		}
+		if request == nil && requestLen > 0 {
+			raw = errorEnvelope("invalid_request", "request body is required")
+			break
+		}
+		var requestBytes []byte
+		if requestLen > 0 {
+			requestBytes = C.GoBytes(unsafe.Pointer(request), C.int(requestLen))
+		}
+		if errDecode := json.Unmarshal(requestBytes, &lifecycle); errDecode != nil {
+			raw = errorEnvelope("invalid_request", "request body is invalid")
+			break
+		}
+		if errConfig := runtimeState.reconfigure(lifecycle.ConfigYAML); errConfig != nil {
+			raw = errorEnvelope("invalid_config", errConfig.Error())
+			break
+		}
 		raw, err = okEnvelope(pluginRegistration())
 	default:
 		raw = errorEnvelope("unknown_method", "method is not implemented by the scaffold")
