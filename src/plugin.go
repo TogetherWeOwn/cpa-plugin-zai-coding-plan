@@ -125,10 +125,15 @@ func managementHandle(request []byte) ([]byte, error) {
 	if req.Path != managementStatusPath {
 		return nil, &envelopeError{Code: "not_found", Message: "unknown management route"}
 	}
+	status := "registered"
+	if runtimeState.validationStatus() != "" {
+		status = "reconfigure_rejected"
+	}
 	body, err := json.Marshal(managementStatusBody{
-		Plugin:  pluginID,
-		Status:  "registered",
-		Version: pluginVersion,
+		Plugin:          pluginID,
+		Status:          status,
+		Version:         pluginVersion,
+		ValidationError: runtimeState.validationStatus(),
 	})
 	if err != nil {
 		return nil, err
@@ -142,9 +147,10 @@ func managementHandle(request []byte) ([]byte, error) {
 
 // managementStatusBody is the JSON served at the status route.
 type managementStatusBody struct {
-	Plugin  string `json:"plugin"`
-	Status  string `json:"status"`
-	Version string `json:"version"`
+	Plugin          string `json:"plugin"`
+	Status          string `json:"status"`
+	Version         string `json:"version"`
+	ValidationError string `json:"validation_error,omitempty"`
 }
 
 func okEnvelope(value any) ([]byte, error) {

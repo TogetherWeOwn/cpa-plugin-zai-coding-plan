@@ -24,7 +24,9 @@ Copy the versioned shared object into CLIProxyAPI's `plugins/linux/amd64/` direc
 
 ## Configuration
 
-No provider-specific settings are accepted by this scaffold. Future settings must live under `<auth-dir>/zai-coding-plan/`, use mode `0600`, and must never contain values committed to Git.
+The plugin reads its settings from `plugins.configs.zai-coding-plan` and projects the CPA provider entries from `cpa-config-path`. It manages only exact-key pairs consisting of a Z.ai Anthropic entry and an OpenAI-compatible provider named `zai-coding-plan`; suffixes are used only for account metadata overrides. See `config.example.yaml`.
+
+Local settings and state are stored atomically under `<auth-dir>/zai-coding-plan/`. The directory is mode `0700`, files are mode `0600`, and provider keys are never persisted.
 
 ## API and security
 

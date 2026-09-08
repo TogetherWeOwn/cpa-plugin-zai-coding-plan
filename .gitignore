@@ -6,6 +6,7 @@ dist/
 # Local configuration
 config.yaml
 .env
+.tools/
 
 # Editors and operating systems
 .idea/
