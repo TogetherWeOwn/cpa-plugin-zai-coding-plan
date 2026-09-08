@@ -43,7 +43,7 @@ func newStableIDGenerator() *stableIDGenerator {
 }
 
 func (g *stableIDGenerator) next(kind string, parts ...string) string {
-	short := stableAuthIDDigest(kind, parts...)[:12]
+	short := stableAuthID(kind, parts...)[:12]
 	key := kind + ":" + short
 	index := g.counters[key]
 	g.counters[key] = index + 1
@@ -53,16 +53,18 @@ func (g *stableIDGenerator) next(kind string, parts ...string) string {
 	return kind + ":" + short
 }
 
-// stableAuthIDDigest deliberately reproduces CLIProxyAPI's v7.2 stable auth-ID
-// scheme. It is an interoperability identifier, not a password hash.
-func stableAuthIDDigest(kind string, parts ...string) string {
-	hasher := sha256.New()
-	_, _ = hasher.Write([]byte(kind))
+// stableAuthID deliberately reproduces CLIProxyAPI's v7.2 non-security
+// interoperability identifier. The host contract requires these exact bytes.
+// lgtm[go/weak-cryptographic-algorithm] This is not password verification or key protection.
+func stableAuthID(kind string, parts ...string) string {
+	encoded := make([]byte, 0, len(kind)+len(parts)*16)
+	encoded = append(encoded, kind...)
 	for _, part := range parts {
-		_, _ = hasher.Write([]byte{0})
-		_, _ = hasher.Write([]byte(strings.TrimSpace(part)))
+		encoded = append(encoded, 0)
+		encoded = append(encoded, strings.TrimSpace(part)...)
 	}
-	return hex.EncodeToString(hasher.Sum(nil))
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }
 
 func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, error) {

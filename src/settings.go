@@ -69,10 +69,6 @@ func (s *secureStore) loadState() (persistedState, error) {
 	return state, nil
 }
 
-func (s *secureStore) saveState(state persistedState) error {
-	return s.writeJSON("state.json", state)
-}
-
 func applyStoredSettings(accounts []account, settings settingsFile) error {
 	if settings.Version == 0 && len(settings.Accounts) == 0 {
 		return nil
@@ -166,7 +162,7 @@ func (s *secureStore) readJSON(name string, dst any) error {
 	if err != nil {
 		return fmt.Errorf("open %s: %w", name, err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", name, err)
@@ -331,7 +327,7 @@ func syncDirectory(dir string) error {
 	if err != nil {
 		return fmt.Errorf("open secure store directory: %w", err)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	if errSync := file.Sync(); errSync != nil {
 		return fmt.Errorf("sync secure store directory: %w", errSync)
 	}

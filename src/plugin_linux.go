@@ -46,6 +46,8 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 )
 
+var runtimeState pluginRuntime
+
 func main() {}
 
 //export cliproxy_plugin_init

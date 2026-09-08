@@ -12,8 +12,6 @@ const pluginID = "zai-coding-plan"
 // pluginVersion is stamped at build time with -ldflags.
 var pluginVersion = "0.0.0-dev"
 
-var runtimeState pluginRuntime
-
 type envelope struct {
 	OK     bool            `json:"ok"`
 	Result json.RawMessage `json:"result,omitempty"`
