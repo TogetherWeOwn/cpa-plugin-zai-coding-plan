@@ -386,8 +386,13 @@ func syncPlanFromUpstream(accounts []account, identity, plan string) {
 	}
 	for i := range accounts {
 		if accounts[i].Identity == identity {
-			// Custom accounts carry explicit credit buckets; keep them.
-			if accounts[i].Plan != "custom" && accounts[i].Plan != plan {
+			// Explicit account or stored-setting choices take precedence over
+			// upstream-derived named-plan defaults, including persisted snapshots
+			// loaded during reconfigure.
+			if accounts[i].Plan == "custom" || accounts[i].planExplicit || accounts[i].fiveHourCreditsExplicit || accounts[i].weeklyCreditsExplicit {
+				return
+			}
+			if accounts[i].Plan != plan {
 				accounts[i].Plan = plan
 				accounts[i].FiveHourCredits = buckets.FiveHour
 				accounts[i].WeeklyCredits = buckets.Weekly

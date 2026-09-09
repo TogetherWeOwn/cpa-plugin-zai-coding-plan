@@ -369,6 +369,88 @@ func TestCommitSnapshotKeepsStagedExplicitPlanOverride(t *testing.T) {
 	}
 }
 
+func TestReconfigureKeepsExplicitPlanAndBucketsOverPersistedUpstream(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name         string
+		config       string
+		setting      accountSetting
+		wantPlan     string
+		wantFiveHour int64
+		wantWeekly   int64
+	}{
+		{
+			name:         "configured plan",
+			config:       "accounts:\n  - key-suffix: " + displaySuffix(fixtureKey) + "\n    plan: max\n    disabled: true\n",
+			setting:      accountSetting{},
+			wantPlan:     "max",
+			wantFiveHour: 28_000,
+			wantWeekly:   140_000,
+		},
+		{
+			name:         "configured buckets",
+			config:       "accounts:\n  - key-suffix: " + displaySuffix(fixtureKey) + "\n    five-hour-credits: 77\n    weekly-credits: 999\n    disabled: true\n",
+			setting:      accountSetting{},
+			wantPlan:     "pro",
+			wantFiveHour: 77,
+			wantWeekly:   999,
+		},
+		{
+			name:         "stored plan",
+			setting:      accountSetting{Plan: "max", Disabled: boolPointer(true)},
+			wantPlan:     "max",
+			wantFiveHour: 28_000,
+			wantWeekly:   140_000,
+		},
+		{
+			name:         "stored buckets",
+			setting:      accountSetting{FiveHourCredits: 77, WeeklyCredits: 999, Disabled: boolPointer(true)},
+			wantPlan:     "pro",
+			wantFiveHour: 77,
+			wantWeekly:   999,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			authDir := filepath.Join(root, "auth")
+			configPath := filepath.Join(root, "config.yaml")
+			writeCPAConfigFixture(t, configPath, authDir, fixtureKey)
+
+			store, err := newSecureStore(authDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := accountIdentity(fixtureKey)
+			if test.setting != (accountSetting{}) {
+				if err := store.saveSettings(settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: test.setting}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := store.saveState(persistedState{Version: 1, Accounts: map[string]accountQuotaState{
+				identity: {Authoritative: &quotaSnapshot{
+					Plan:       "lite",
+					FiveHour:   quotaWindow{ConsumedMicrocredits: creditScale, BucketMicrocredits: 2_000 * creditScale, ResetsAt: now.Add(time.Hour)},
+					Weekly:     quotaWindow{ConsumedMicrocredits: creditScale, BucketMicrocredits: 10_000 * creditScale, ResetsAt: now.Add(24 * time.Hour)},
+					ObservedAt: now,
+				}},
+			}}); err != nil {
+				t.Fatal(err)
+			}
+
+			runtime := &pluginRuntime{clock: &fakeClock{now: now}}
+			rawConfig := "cpa-config-path: " + configPath + "\ndefault-plan: pro\n" + test.config
+			if err := runtime.reconfigure([]byte(rawConfig)); err != nil {
+				t.Fatal(err)
+			}
+			got := runtime.snapshot.Accounts[0]
+			if got.Plan != test.wantPlan || got.FiveHourCredits != test.wantFiveHour || got.WeeklyCredits != test.wantWeekly {
+				t.Fatalf("persisted upstream plan overrode explicit values: %#v", got)
+			}
+		})
+	}
+}
+
 func TestCommitSnapshotDoesNotCarryForwardDifferentStorePlan(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	identity := accountIdentity("account")
