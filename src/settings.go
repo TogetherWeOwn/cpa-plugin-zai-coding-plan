@@ -156,23 +156,19 @@ func (s *secureStore) saveSettings(settings settingsFile) error {
 		if writeErrorOutcome(err) != writeNeedsRecovery {
 			return fmt.Errorf("stage settings recovery: %w", err)
 		}
+		if flushErr := s.flush(); flushErr != nil {
+			return fmt.Errorf("stage settings recovery: %w", err)
+		}
 	}
 	if err := s.writeJSON("settings.json", settings); err != nil {
 		if writeErrorOutcome(err) == writeNeedsRecovery {
 			return nil
 		}
-		_ = s.removeJSON(settingsRecoveryName)
 		return fmt.Errorf("commit settings: %w", err)
 	}
 	if err := s.removeJSON(settingsRecoveryName); err != nil {
 		if writeErrorOutcome(err) != writeNeedsRecovery {
 			return fmt.Errorf("clear settings recovery: %w", err)
-		}
-		if err := s.flush(); err == nil {
-			return nil
-		}
-		if err := s.writeJSON(settingsRecoveryName, recovery); err != nil {
-			return fmt.Errorf("restore settings recovery: %w", err)
 		}
 	}
 	return nil

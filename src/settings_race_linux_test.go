@@ -91,7 +91,29 @@ func TestSettingsRenameSyncFailureIsRecoverablyCommitted(t *testing.T) {
 	}
 }
 
-func TestSettingsMarkerRemovalSyncFailureRequiresDurabilityBeforeSuccess(t *testing.T) {
+func TestSettingsPersistentDirectorySyncFailureRequiresDurableRecoveryMarker(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	identity := accountIdentity("persistent-sync")
+	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
+	if err := store.saveSettings(previous); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	store.dirSync = func(*os.File) error {
+		calls++
+		return errors.New("injected persistent directory sync failure")
+	}
+	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
+	if err := store.saveSettings(desired); err == nil {
+		t.Fatalf("settings were acknowledged without a durable marker after %d sync calls", calls)
+	}
+}
+
+func TestSettingsMarkerRemovalSyncFailurePreservesCommittedSettings(t *testing.T) {
 	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
 	if err != nil {
 		t.Fatal(err)
@@ -111,8 +133,45 @@ func TestSettingsMarkerRemovalSyncFailureRequiresDurabilityBeforeSuccess(t *test
 		return dir.Sync()
 	}
 	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
-	if err := store.saveSettings(desired); err == nil || !strings.Contains(err.Error(), "restore settings recovery") {
-		t.Fatalf("marker-removal durability failure = %v after %d sync calls, want rejection", err, calls)
+	if err := store.saveSettings(desired); err != nil {
+		t.Fatalf("durably committed settings were rejected after marker cleanup failure: %v", err)
+	}
+	store.dirSync = nil
+	recovered, err := store.recoverSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Accounts[identity].Name != "desired" {
+		t.Fatalf("committed settings were lost after marker cleanup failure: %#v", recovered)
+	}
+}
+
+func TestSettingsRecoveryAcceptsLegacyMarkerWithoutPreviousSnapshot(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	identity := accountIdentity("legacy-marker")
+	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
+	if err := store.saveSettings(previous); err != nil {
+		t.Fatal(err)
+	}
+	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
+	legacy := struct {
+		Version        int          `json:"version"`
+		PreviousDigest string       `json:"previous_digest"`
+		Desired        settingsFile `json:"desired"`
+	}{Version: settingsRecoveryVersion, PreviousDigest: settingsDigest(previous), Desired: desired}
+	if err := store.writeJSON(settingsRecoveryName, legacy); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.recoverSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Accounts[identity].Name != "desired" {
+		t.Fatalf("legacy marker was not rolled forward: %#v", recovered)
 	}
 }
 
