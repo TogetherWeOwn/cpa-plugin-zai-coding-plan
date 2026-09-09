@@ -65,6 +65,8 @@ type pluginRuntime struct {
 	refreshing     bool
 	refreshDone    chan struct{}
 	refreshErr     error
+	shutdownDone   chan struct{}
+	shutdownErr    error
 }
 
 func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
@@ -268,7 +270,7 @@ func (r *pluginRuntime) startPollers(ctx context.Context, snapshot *runtimeSnaps
 			continue
 		}
 		r.workers.Add(1)
-		go r.pollAccount(ctx, item.Identity, item.key, snapshot.Config.QuotaRefresh)
+		go r.pollAccount(ctx, item.Identity, item.key, snapshot.Generation, snapshot.Config.QuotaRefresh)
 	}
 }
 
@@ -307,7 +309,6 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 
 	if previousCancel != nil {
 		previousCancel()
-		r.workers.Wait()
 	}
 	r.startPollers(ctx, pollerSnapshot)
 	return nil
@@ -328,17 +329,16 @@ func (r *pluginRuntime) restartPollers() error {
 	r.mu.Unlock()
 	if previousCancel != nil {
 		previousCancel()
-		r.workers.Wait()
 	}
 	r.startPollers(ctx, snapshot)
 	return nil
 }
 
-func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, base time.Duration) {
+func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, generation uint64, base time.Duration) {
 	defer r.workers.Done()
 	attempt := 0
 	for {
-		if err := r.pollOnce(ctx, identity, key); err != nil && errors.Is(err, context.Canceled) {
+		if err := r.pollOnce(ctx, identity, key, generation); err != nil && errors.Is(err, context.Canceled) {
 			return
 		}
 		attempt++
@@ -352,13 +352,13 @@ func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, b
 	}
 }
 
-func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string) error {
+func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, generation uint64) error {
 	now := r.runtimeClock().Now()
 	attemptCtx, cancel := context.WithTimeout(ctx, defaultQuotaTimeout)
 	defer cancel()
 	snapshot, err := fetchQuota(attemptCtx, r.quotaClient(), r.quotaEndpoint(), key, now)
 	r.mu.Lock()
-	if r.stopped || r.snapshot == nil {
+	if r.stopped || r.snapshot == nil || r.snapshot.Generation != generation {
 		r.mu.Unlock()
 		return context.Canceled
 	}
@@ -572,18 +572,33 @@ func (r *pluginRuntime) quotaEndpoint() string {
 
 func (r *pluginRuntime) shutdown() error {
 	r.pollersMu.Lock()
-	defer r.pollersMu.Unlock()
 	r.mu.Lock()
-	if r.stopped {
+	if r.shutdownDone != nil {
+		done := r.shutdownDone
 		r.mu.Unlock()
-		return nil
+		r.pollersMu.Unlock()
+		<-done
+		r.mu.RLock()
+		err := r.shutdownErr
+		r.mu.RUnlock()
+		return err
+	}
+	if r.stopped {
+		err := r.shutdownErr
+		r.mu.Unlock()
+		r.pollersMu.Unlock()
+		return err
 	}
 	r.stopped = true
+	r.shutdownDone = make(chan struct{})
+	done := r.shutdownDone
 	cancel := r.cancel
 	refreshCancel := r.refreshCancel
 	r.cancel = nil
 	r.refreshCancel = nil
 	r.mu.Unlock()
+	r.pollersMu.Unlock()
+
 	if cancel != nil {
 		cancel()
 	}
@@ -601,13 +616,18 @@ func (r *pluginRuntime) shutdown() error {
 		persisted = r.persistenceSnapshotLocked()
 	}
 	r.mu.RUnlock()
-	if snapshot == nil || snapshot.Store == nil {
-		return nil
+	var err error
+	if snapshot != nil && snapshot.Store != nil {
+		if err = r.persistState(snapshot.Store, persisted); err == nil {
+			err = snapshot.Store.flush()
+		}
 	}
-	if err := r.persistState(snapshot.Store, persisted); err != nil {
-		return err
-	}
-	return snapshot.Store.flush()
+
+	r.mu.Lock()
+	r.shutdownErr = err
+	close(done)
+	r.mu.Unlock()
+	return err
 }
 
 func maxPollInterval(base time.Duration) time.Duration {

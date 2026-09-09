@@ -107,14 +107,14 @@ func TestAuthoritativeQuotaReplacesEstimateAndFailureRetainsLastGood(t *testing.
 		}
 		return quotaHTTPResponse(503, quotaFixtureKey), nil
 	})
-	if err := runtime.pollOnce(context.Background(), item.Identity, item.key); err != nil {
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation); err != nil {
 		t.Fatal(err)
 	}
 	view, _ := runtime.quotaView(item.Identity)
 	if view.Source != "authoritative" || view.FiveHour.ConsumedMicrocredits != 6_000*creditScale {
 		t.Fatalf("authoritative view = %#v", view)
 	}
-	if err := runtime.pollOnce(context.Background(), item.Identity, item.key); err == nil {
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation); err == nil {
 		t.Fatal("non-200 poll succeeded")
 	}
 	view, _ = runtime.quotaView(item.Identity)
@@ -176,6 +176,100 @@ func TestRuntimeStatePersistenceRejectsStaleSnapshot(t *testing.T) {
 	}
 }
 
+func TestRuntimePollOnceRejectsCancelledOldGenerationResponse(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("stale-generation"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	runtime.snapshot.Generation = 1
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime.httpClient = roundTripDoer(func(*http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return quotaHTTPResponse(200, quotaFixture("pro", []string{
+			quotaLimitFixture(3, 5, 12_000, 6_000, 6_000, now.Add(time.Hour).UnixMilli()),
+			quotaLimitFixture(6, 1, 60_000, 18_000, 42_000, now.Add(24*time.Hour).UnixMilli()),
+		})), nil
+	})
+	var persisted int
+	runtime.persistWrite = func(*secureStore, persistedState) error {
+		persisted++
+		return nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	pollDone := make(chan error, 1)
+	go func() { pollDone <- runtime.pollOnce(ctx, item.Identity, item.key, 1) }()
+	<-started
+	cancel()
+	runtime.mu.Lock()
+	replacement := cloneRuntimeSnapshot(runtime.snapshot)
+	replacement.Generation = 2
+	replacementState := replacement.Quota[item.Identity]
+	replacementState.LastPollError = "replacement"
+	replacement.Quota[item.Identity] = replacementState
+	runtime.snapshot = replacement
+	runtime.mu.Unlock()
+	close(release)
+
+	if err := <-pollDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("old-generation poll error = %v, want context canceled", err)
+	}
+	state := runtime.snapshot.Quota[item.Identity]
+	if state.Authoritative != nil || state.LastPollAttempt != (time.Time{}) || state.LastPollError != "replacement" {
+		t.Fatalf("old-generation response mutated replacement snapshot: %#v", state)
+	}
+	if persisted != 0 {
+		t.Fatalf("old-generation response persisted %d snapshots", persisted)
+	}
+}
+
+func TestRuntimeForcedRefreshRejectsReconfiguredGeneration(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("refresh-generation"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	runtime.snapshot.Generation = 1
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime.httpClient = roundTripDoer(func(*http.Request) (*http.Response, error) {
+		close(started)
+		<-release
+		return quotaHTTPResponse(200, quotaFixture("pro", []string{
+			quotaLimitFixture(3, 5, 12_000, 6_000, 6_000, now.Add(time.Hour).UnixMilli()),
+			quotaLimitFixture(6, 1, 60_000, 18_000, 42_000, now.Add(24*time.Hour).UnixMilli()),
+		})), nil
+	})
+	var persisted int
+	runtime.persistWrite = func(*secureStore, persistedState) error {
+		persisted++
+		return nil
+	}
+
+	refreshDone := make(chan error, 1)
+	go func() { refreshDone <- runtime.forceRefresh(context.Background()) }()
+	<-started
+	runtime.mu.Lock()
+	replacement := cloneRuntimeSnapshot(runtime.snapshot)
+	replacement.Generation = 2
+	replacementState := replacement.Quota[item.Identity]
+	replacementState.LastPollError = "replacement"
+	replacement.Quota[item.Identity] = replacementState
+	runtime.snapshot = replacement
+	runtime.mu.Unlock()
+	close(release)
+
+	if err := <-refreshDone; err == nil || !strings.Contains(err.Error(), context.Canceled.Error()) {
+		t.Fatalf("stale forced refresh error = %v, want context canceled", err)
+	}
+	state := runtime.snapshot.Quota[item.Identity]
+	if state.Authoritative != nil || state.LastPollAttempt != (time.Time{}) || state.LastPollError != "replacement" {
+		t.Fatalf("stale forced refresh mutated replacement snapshot: %#v", state)
+	}
+	if persisted != 0 {
+		t.Fatalf("stale forced refresh persisted %d snapshots", persisted)
+	}
+}
+
 func TestRuntimeShutdownCancelsAndJoinsForcedRefresh(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("refresh-shutdown"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
@@ -206,6 +300,37 @@ func TestRuntimeShutdownCancelsAndJoinsForcedRefresh(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("forced refresh did not finish during shutdown")
+	}
+}
+
+func TestRuntimeConcurrentReconfigureAndShutdownReturns(t *testing.T) {
+	for range 100 {
+		now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+		item := account{Identity: accountIdentity("reconfigure-shutdown"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+		runtime := quotaTestRuntime(t, now, []account{item})
+		runtime.snapshot.Generation = 1
+		runtime.reconfigures.Add(1)
+		reconfigureDone := make(chan error, 1)
+		go func() {
+			defer runtime.reconfigures.Done()
+			staged := cloneRuntimeSnapshot(runtime.snapshot)
+			reconfigureDone <- runtime.commitSnapshot(staged)
+		}()
+		shutdownDone := make(chan error, 1)
+		go func() { shutdownDone <- runtime.shutdown() }()
+		for name, done := range map[string]<-chan error{"reconfigure": reconfigureDone, "shutdown": shutdownDone} {
+			select {
+			case err := <-done:
+				if name == "reconfigure" && err != nil && !strings.Contains(err.Error(), "shutting down") {
+					t.Fatalf("reconfigure error = %v", err)
+				}
+				if name == "shutdown" && err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(time.Second):
+				t.Fatalf("concurrent %s did not return", name)
+			}
+		}
 	}
 }
 

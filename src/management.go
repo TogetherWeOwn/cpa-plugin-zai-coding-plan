@@ -235,6 +235,7 @@ func (r *pluginRuntime) beginRefresh() (<-chan struct{}, bool, error) {
 func (r *pluginRuntime) runRefresh(ctx context.Context) error {
 	r.mu.RLock()
 	accounts := append([]account(nil), r.snapshot.Accounts...)
+	generation := r.snapshot.Generation
 	timeout := r.snapshot.Config.QuotaTimeout
 	r.mu.RUnlock()
 	if timeout == 0 {
@@ -252,7 +253,7 @@ func (r *pluginRuntime) runRefresh(ctx context.Context) error {
 		}
 		launched++
 		go func(item account) {
-			results <- pollResult{err: r.pollOnce(refreshCtx, item.Identity, item.key)}
+			results <- pollResult{err: r.pollOnce(refreshCtx, item.Identity, item.key, generation)}
 		}(item)
 	}
 	var failures int
