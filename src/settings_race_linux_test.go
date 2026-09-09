@@ -91,25 +91,23 @@ func TestSettingsRenameSyncFailureIsRecoverablyCommitted(t *testing.T) {
 	}
 }
 
-func TestSettingsPersistentDirectorySyncFailureRequiresDurableRecoveryMarker(t *testing.T) {
+func TestSettingsFirstDirectorySyncFailureRejectsBeforeDesiredMarker(t *testing.T) {
 	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _ = store.close() }()
-	identity := accountIdentity("persistent-sync")
+	identity := accountIdentity("first-sync")
 	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
 	if err := store.saveSettings(previous); err != nil {
 		t.Fatal(err)
 	}
-	calls := 0
 	store.dirSync = func(*os.File) error {
-		calls++
-		return errors.New("injected persistent directory sync failure")
+		return errors.New("injected directory sync failure")
 	}
 	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
 	if err := store.saveSettings(desired); err == nil {
-		t.Fatalf("settings were acknowledged without a durable marker after %d sync calls", calls)
+		t.Fatal("settings were acknowledged before the intent marker became durable")
 	}
 	store.dirSync = nil
 	recovered, err := store.recoverSettings()
@@ -118,6 +116,39 @@ func TestSettingsPersistentDirectorySyncFailureRequiresDurableRecoveryMarker(t *
 	}
 	if recovered.Accounts[identity].Name != "previous" {
 		t.Fatalf("rejected settings became active after recovery: %#v", recovered)
+	}
+}
+
+func TestSettingsSecondDirectorySyncFailureAcknowledgesDesiredMarker(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	identity := accountIdentity("second-sync")
+	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
+	if err := store.saveSettings(previous); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	store.dirSync = func(dir *os.File) error {
+		calls++
+		if calls >= 2 {
+			return errors.New("injected persistent directory sync failure")
+		}
+		return dir.Sync()
+	}
+	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
+	if err := store.saveSettings(desired); err != nil {
+		t.Fatalf("desired marker survived rename and must be acknowledged: %v", err)
+	}
+	store.dirSync = nil
+	recovered, err := store.recoverSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Accounts[identity].Name != "desired" {
+		t.Fatalf("acknowledged settings were not activated after recovery: %#v", recovered)
 	}
 }
 
@@ -213,6 +244,50 @@ func TestSettingsRecoveryRollsAcknowledgedUpdateForwardFromPreviousDigest(t *tes
 	}
 	if loaded.Accounts[identity].Name != "desired" {
 		t.Fatalf("roll-forward was not persisted: %#v", loaded)
+	}
+}
+
+func TestSecureStoreReadConfinedDuringDirectoryReplacement(t *testing.T) {
+	root := t.TempDir()
+	store, err := newSecureStore(filepath.Join(root, "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	trusted := settingsFile{Version: 1}
+	if err := store.writeJSON("settings.json", trusted); err != nil {
+		t.Fatal(err)
+	}
+
+	original := store.dir + ".original"
+	attacker := filepath.Join(t.TempDir(), "attacker")
+	if err := os.Mkdir(attacker, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	malicious := []byte(`{"version":1,"threshold_percent":99}` + "\n")
+	if err := os.WriteFile(filepath.Join(attacker, "settings.json"), malicious, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.fileOpen = func(dir *os.File, name string) (*os.File, error) {
+		if err := os.Rename(store.dir, original); err != nil {
+			return nil, err
+		}
+		if err := os.Symlink(attacker, store.dir); err != nil {
+			return nil, err
+		}
+		return openFileAt(dir, name)
+	}
+
+	var loaded settingsFile
+	found, err := store.readJSONIfExists("settings.json", &loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("trusted settings were not found")
+	}
+	if loaded.ThresholdPercent != nil {
+		t.Fatalf("read followed replacement path and loaded attacker settings: %#v", loaded)
 	}
 }
 

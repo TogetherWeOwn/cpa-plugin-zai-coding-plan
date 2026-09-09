@@ -564,7 +564,7 @@ func TestShutdownFlushPersistsAcceptedEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.close()
+	defer func() { _ = store.close() }()
 	persisted, err := store.loadState()
 	if err != nil {
 		t.Fatal(err)

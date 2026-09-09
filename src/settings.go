@@ -89,6 +89,7 @@ type secureStore struct {
 	dir       string
 	dirHandle *os.File
 	dirSync   func(*os.File) error
+	fileOpen  func(*os.File, string) (*os.File, error)
 	closed    bool
 }
 
@@ -160,7 +161,7 @@ func (s *secureStore) saveSettings(settings settingsFile) error {
 			return fmt.Errorf("prepare settings recovery: %w", err)
 		}
 		if flushErr := s.flush(); flushErr != nil {
-			return fmt.Errorf("prepare settings recovery: %w", err)
+			return nil
 		}
 	}
 	if err := s.writeJSON("settings.json", settings); err != nil {
@@ -480,14 +481,13 @@ func (s *secureStore) readJSON(name string, dst any) error {
 func (s *secureStore) readJSONIfExists(name string, dst any) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if _, err := s.securePathLocked(name); err != nil {
+		return false, err
+	}
 	if err := s.validateDirectoryLocked(); err != nil {
 		return false, err
 	}
-	path, err := s.securePathLocked(name)
-	if err != nil {
-		return false, err
-	}
-	file, err := os.OpenFile(path, os.O_RDONLY|syscallNoFollow, 0)
+	file, err := s.openFileLocked(name)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -564,12 +564,6 @@ func (s *secureStore) removeJSON(name string) error {
 	return s.validateDirectoryLocked()
 }
 
-func (s *secureStore) securePath(name string) (string, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.securePathLocked(name)
-}
-
 func (s *secureStore) securePathLocked(name string) (string, error) {
 	if s == nil || s.dir == "" || s.closed {
 		return "", fmt.Errorf("secure store is not initialized")
@@ -611,6 +605,13 @@ func (s *secureStore) validateDirectoryLocked() error {
 		return err
 	}
 	return nil
+}
+
+func (s *secureStore) openFileLocked(name string) (*os.File, error) {
+	if s.fileOpen != nil {
+		return s.fileOpen(s.dirHandle, name)
+	}
+	return openFileAt(s.dirHandle, name)
 }
 
 func (s *secureStore) syncDirLocked(dir *os.File) error {
@@ -703,33 +704,4 @@ func rejectSymlinkPathComponents(path string) error {
 		}
 		clean = parent
 	}
-}
-
-func rejectExistingSymlink(path string) error {
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect target: %w", err)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("refusing symlink target")
-	}
-	if !info.Mode().IsRegular() {
-		return fmt.Errorf("target is not a regular file")
-	}
-	return nil
-}
-
-func syncDirectory(dir string) error {
-	file, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open secure store directory: %w", err)
-	}
-	defer func() { _ = file.Close() }()
-	if errSync := file.Sync(); errSync != nil {
-		return fmt.Errorf("sync secure store directory: %w", errSync)
-	}
-	return nil
 }

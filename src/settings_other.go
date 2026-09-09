@@ -7,14 +7,16 @@ import (
 	"os"
 )
 
-const syscallNoFollow = 0
-
 func openSecureDirectory(path string) (*os.File, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open secure store directory: %w", err)
 	}
 	return file, nil
+}
+
+func openFileAt(_ *os.File, name string) (*os.File, error) {
+	return nil, fmt.Errorf("secure descriptor-relative read for %s is unsupported on this platform", name)
 }
 
 func writeJSONAt(_ *os.File, name string, _ []byte, _ func(*os.File) error) error {

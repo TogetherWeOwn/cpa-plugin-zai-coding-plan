@@ -486,26 +486,6 @@ func (r *pluginRuntime) commitSnapshotAfter(staged *runtimeSnapshot, beforeCommi
 	return nil
 }
 
-func (r *pluginRuntime) restartPollers() error {
-	r.pollersMu.Lock()
-	defer r.pollersMu.Unlock()
-	r.mu.Lock()
-	if r.stopped || r.snapshot == nil {
-		r.mu.Unlock()
-		return fmt.Errorf("plugin is shutting down")
-	}
-	previousCancel := r.cancel
-	ctx, cancel := context.WithCancel(context.Background())
-	r.cancel = cancel
-	snapshot := cloneRuntimeSnapshot(r.snapshot)
-	r.mu.Unlock()
-	if previousCancel != nil {
-		previousCancel()
-	}
-	r.startPollers(ctx, snapshot)
-	return nil
-}
-
 func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, generation uint64, base, timeout time.Duration) {
 	defer r.workers.Done()
 	attempt := 0
