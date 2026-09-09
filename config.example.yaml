@@ -16,6 +16,7 @@ plugins:
   configs:
     zai-coding-plan:
       enabled: true
+      priority: 1000
       cpa-config-path: /app/config.yaml
       threshold-percent: 97
       suspend-duration: 30m

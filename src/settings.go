@@ -14,7 +14,11 @@ import (
 	"time"
 )
 
-const maxStateFileSize = 8 << 20
+const (
+	maxStateFileSize            = 8 << 20
+	persistedStateVersion       = 2
+	legacyPersistedStateVersion = 1
+)
 
 type settingsFile struct {
 	Version  int                       `json:"version"`
@@ -30,11 +34,18 @@ type accountSetting struct {
 }
 
 type persistedState struct {
-	Version  int                          `json:"version"`
-	Accounts map[string]accountQuotaState `json:"accounts,omitempty"`
+	Version  int                             `json:"version"`
+	Accounts map[string]accountQuotaState    `json:"accounts,omitempty"`
+	Health   map[string]persistedHealthState `json:"health,omitempty"`
 	// Generation orders in-memory persistence commits; it is never written to
-	// disk (the on-disk file must stay loadable by older revisions).
+	// disk.
 	Generation uint64 `json:"-"`
+}
+
+type persistedHealthState struct {
+	SuspendedUntil  time.Time `json:"suspended_until,omitempty"`
+	ExhaustedUntil  time.Time `json:"exhausted_until,omitempty"`
+	ExhaustedReason string    `json:"exhausted_reason,omitempty"`
 }
 
 type secureStore struct {
@@ -89,22 +100,52 @@ func (s *secureStore) saveState(state persistedState) error {
 }
 
 func validatePersistedState(state persistedState) error {
-	if state.Version == 0 && len(state.Accounts) == 0 {
+	if state.Version == 0 && len(state.Accounts) == 0 && len(state.Health) == 0 {
 		return nil
 	}
-	if state.Version != 1 {
+	if state.Version != legacyPersistedStateVersion && state.Version != persistedStateVersion {
 		return fmt.Errorf("state.json has unsupported version")
 	}
+	if state.Version == legacyPersistedStateVersion && len(state.Health) != 0 {
+		return fmt.Errorf("state.json has unsupported health data")
+	}
 	for identity, accountState := range state.Accounts {
-		if len(identity) != sha256.Size*2 {
-			return fmt.Errorf("state.json contains invalid account identity")
-		}
-		if _, err := hex.DecodeString(identity); err != nil {
-			return fmt.Errorf("state.json contains invalid account identity")
+		if err := validateAccountIdentity(identity); err != nil {
+			return err
 		}
 		if err := validateAccountQuotaState(accountState); err != nil {
 			return fmt.Errorf("state.json contains invalid account state")
 		}
+	}
+	for identity, healthState := range state.Health {
+		if err := validateAccountIdentity(identity); err != nil {
+			return err
+		}
+		if err := validatePersistedHealthState(healthState); err != nil {
+			return fmt.Errorf("state.json contains invalid health state")
+		}
+	}
+	return nil
+}
+
+func validateAccountIdentity(identity string) error {
+	if len(identity) != sha256.Size*2 {
+		return fmt.Errorf("state.json contains invalid account identity")
+	}
+	if _, err := hex.DecodeString(identity); err != nil {
+		return fmt.Errorf("state.json contains invalid account identity")
+	}
+	return nil
+}
+
+func validatePersistedHealthState(state persistedHealthState) error {
+	for _, resetAt := range []time.Time{state.SuspendedUntil, state.ExhaustedUntil} {
+		if !resetAt.IsZero() && (resetAt.Year() < 2000 || resetAt.Year() > 2200) {
+			return fmt.Errorf("invalid reset time")
+		}
+	}
+	if state.ExhaustedReason != boundedHealthReason(state.ExhaustedReason) || state.ExhaustedUntil.IsZero() != (state.ExhaustedReason == "") {
+		return fmt.Errorf("invalid exhaustion reason")
 	}
 	return nil
 }

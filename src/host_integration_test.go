@@ -187,7 +187,7 @@ func TestHostRegistersPlugin(t *testing.T) {
 		Dir:     filepath.Join(root, "plugins"),
 		AuthDir: authDir,
 		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled, Raw: *configNode.Content[0]},
+			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: *configNode.Content[0]},
 		},
 	})
 	defer host.ShutdownAll()
@@ -210,14 +210,22 @@ func TestHostRegistersPlugin(t *testing.T) {
 		t.Fatalf("plugin %s absent from host registration snapshot; plugins = %#v", pluginID, registered)
 	}
 
-	// The scheduler capability must decline rather than select, so the
-	// host's native scheduler stays in control (docs/ARCHITECTURE.md).
-	resp, handled, errPick := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{})
+	// Healthy managed traffic explicitly delegates to the native round-robin
+	// scheduler; returning unhandled would permit an accidental fallback path.
+	cpa, err := loadCPAConfig(cpaConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := discoverAccounts(cpa, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, handled, errPick := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: accounts[0].ClaudeAuthID}}})
 	if errPick != nil {
 		t.Fatalf("PickAuth() error = %v", errPick)
 	}
-	if handled {
-		t.Fatalf("PickAuth() handled = true, want scaffold scheduler to decline: %#v", resp)
+	if !handled || !resp.Handled || resp.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+		t.Fatalf("PickAuth() = %#v, handled %v, want explicit round-robin delegation", resp, handled)
 	}
 
 	if !host.HasScheduler() {
@@ -254,7 +262,7 @@ func buildTestPlugin(t *testing.T) (string, error) {
 	return out, nil
 }
 
-func TestInvalidReconfigureRetainsHostRegistration(t *testing.T) {
+func TestHostPropagatesAllImpairedSchedulerError(t *testing.T) {
 	binary, err := buildTestPlugin(t)
 	if err != nil {
 		t.Fatalf("build plugin: %v", err)
@@ -268,50 +276,112 @@ func TestInvalidReconfigureRetainsHostRegistration(t *testing.T) {
 	root := t.TempDir()
 	cpaConfigPath := filepath.Join(root, "config.yaml")
 	writeCPAConfigFixture(t, cpaConfigPath, filepath.Join(root, "auth"), fixtureKey)
-	valid := []byte("cpa-config-path: " + cpaConfigPath + "\ndefault-plan: pro\n")
+	registerRequest, err := json.Marshal(map[string]any{"config_yaml": []byte("cpa-config-path: " + cpaConfigPath + "\ndefault-plan: pro\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Call(pluginabi.MethodPluginRegister, registerRequest); err != nil {
+		t.Fatal(err)
+	}
+	cpa, err := loadCPAConfig(cpaConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := discoverAccounts(cpa, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := json.Marshal(pluginapi.UsageRecord{AuthID: accounts[0].OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Call(pluginabi.MethodUsageHandle, usage); err != nil {
+		t.Fatal(err)
+	}
+	pick, err := json.Marshal(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: accounts[0].ClaudeAuthID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, callErr := client.Call(pluginabi.MethodSchedulerPick, pick)
+	if callErr == nil {
+		t.Fatal("all-impaired scheduler call succeeded")
+	}
+	var result envelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error == nil || result.Error.Code != "zai_no_capacity" || result.Error.Retryable {
+		t.Fatalf("scheduler error envelope = %#v", result.Error)
+	}
+}
 
-	registerRequest, err := json.Marshal(map[string]any{"config_yaml": valid})
+func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
+	binary, err := buildTestPlugin(t)
 	if err != nil {
-		t.Fatal(err)
-	}
-	registeredRaw, err := client.Call(pluginabi.MethodPluginRegister, registerRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	registered := decodeEnvelopeResult[registration](t, registeredRaw, pluginabi.MethodPluginRegister)
-
-	invalidRequest, err := json.Marshal(map[string]any{"config_yaml": []byte("threshold-percent: 0\n")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reconfiguredRaw, err := client.Call(pluginabi.MethodPluginReconfigure, invalidRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reconfigured := decodeEnvelopeResult[registration](t, reconfiguredRaw, pluginabi.MethodPluginReconfigure)
-	if reconfigured.SchemaVersion != registered.SchemaVersion || reconfigured.Metadata.Name != registered.Metadata.Name || reconfigured.Capabilities != registered.Capabilities {
-		t.Fatalf("retained registration changed: before %#v after %#v", registered, reconfigured)
+		t.Fatalf("build plugin: %v", err)
 	}
 
-	statusRequest, err := json.Marshal(pluginapi.ManagementRequest{Method: http.MethodGet, Path: managementStatusPath})
+	root := t.TempDir()
+	pluginDir := filepath.Join(root, "plugins", "linux", "amd64")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versioned := filepath.Join(pluginDir, pluginID+"-v0.0.0-test.so")
+	if err := copyFile(versioned, binary); err != nil {
+		t.Fatal(err)
+	}
+
+	authDir := filepath.Join(root, "auth")
+	cpaConfigPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
+	enabled := true
+	configNode := pluginConfigNode(t, cpaConfigPath)
+	host := pluginhost.New()
+	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
+		Enabled: true,
+		Dir:     filepath.Join(root, "plugins"),
+		AuthDir: authDir,
+		Configs: map[string]pluginhost.PluginInstanceConfig{
+			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: configNode},
+		},
+	})
+	defer host.ShutdownAll()
+	if !host.HasScheduler() {
+		t.Fatal("initial exclusive configuration did not register scheduler")
+	}
+
+	raw, err := os.ReadFile(cpaConfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusRaw, err := client.Call(pluginabi.MethodManagementHandle, statusRequest)
-	if err != nil {
+	raw = []byte(strings.Replace(string(raw), "      priority: 1000\n", "      priority: 1000\n    competitor:\n      enabled: true\n      priority: 2000\n", 1))
+	if err = os.WriteFile(cpaConfigPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	statusResponse := decodeEnvelopeResult[pluginapi.ManagementResponse](t, statusRaw, pluginabi.MethodManagementHandle)
-	var status managementStatusBody
-	if err := json.Unmarshal(statusResponse.Body, &status); err != nil {
+	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
+		Enabled: true,
+		Dir:     filepath.Join(root, "plugins"),
+		AuthDir: authDir,
+		Configs: map[string]pluginhost.PluginInstanceConfig{
+			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: configNode},
+		},
+	})
+
+	if host.HasScheduler() {
+		t.Fatal("invalid live reconfigure retained scheduler capability")
+	}
+	if plugins := host.RegisteredPlugins(); len(plugins) != 0 {
+		t.Fatalf("registered plugins = %#v, want none after rejected reconfigure", plugins)
+	}
+}
+
+func pluginConfigNode(t *testing.T, cpaConfigPath string) yaml.Node {
+	t.Helper()
+	var configNode yaml.Node
+	if err := yaml.Unmarshal([]byte("enabled: true\npriority: 1000\ncpa-config-path: "+cpaConfigPath+"\ndefault-plan: pro\n"), &configNode); err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != "reconfigure_rejected" || status.ValidationError == "" {
-		t.Fatalf("status = %#v, want retained registration diagnostic", status)
-	}
-	if strings.Contains(status.ValidationError, fixtureKey) {
-		t.Fatal("validation status leaked provider key")
-	}
+	return *configNode.Content[0]
 }
 
 func copyFile(dst, src string) error {
