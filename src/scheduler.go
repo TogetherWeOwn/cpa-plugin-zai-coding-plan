@@ -36,6 +36,19 @@ func (state *routingState) next(scope string, candidates []pluginapi.SchedulerAu
 	return selected
 }
 
+func (state *routingState) sticky(scope, sessionID string, candidates []pluginapi.SchedulerAuthCandidate) string {
+	selected := candidates[0].ID
+	highest := stableHash(scope + "\x00" + selected + "\x00" + sessionID)
+	for _, candidate := range candidates[1:] {
+		score := stableHash(scope + "\x00" + candidate.ID + "\x00" + sessionID)
+		if score > highest {
+			selected = candidate.ID
+			highest = score
+		}
+	}
+	return selected
+}
+
 func validateSchedulerDeployment(plugins cpaPluginsProjection) error {
 	if !plugins.Enabled {
 		return fmt.Errorf("plugins must be enabled")
@@ -99,7 +112,7 @@ func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Sche
 
 	scope := schedulerScope(req)
 	if sessionID := schedulerSessionID(req.Options.Headers); sessionID != "" {
-		return pluginapi.SchedulerPickResponse{Handled: true, AuthID: healthy[stableIndex(sessionID, len(healthy))].ID}, nil
+		return pluginapi.SchedulerPickResponse{Handled: true, AuthID: r.snapshot.Routing.sticky(scope, sessionID, healthy)}, nil
 	}
 	return pluginapi.SchedulerPickResponse{Handled: true, AuthID: r.snapshot.Routing.next(scope, healthy)}, nil
 }
@@ -140,11 +153,8 @@ func schedulerSessionID(headers map[string][]string) string {
 	return ""
 }
 
-func stableIndex(value string, length int) int {
-	if length <= 1 {
-		return 0
-	}
+func stableHash(value string) uint64 {
 	hash := fnv.New64a()
 	_, _ = hash.Write([]byte(value))
-	return int(hash.Sum64() % uint64(length))
+	return hash.Sum64()
 }

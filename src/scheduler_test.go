@@ -152,24 +152,26 @@ func TestSchedulerDegradedExcludesSiblingsAndRoundRobinsHealthy(t *testing.T) {
 
 func TestSchedulerStickinessSurvivesUntilCandidateIsImpaired(t *testing.T) {
 	bad := schedulerAccount("bad", "claude-bad", "openai-bad")
-	first := schedulerAccount("first", "claude-one", "openai-one")
-	second := schedulerAccount("second", "claude-two", "openai-two")
-	runtime := schedulerTestRuntime(schedulerNow, bad, first, second)
+	first := schedulerAccount("first", "claude-first", "openai-first")
+	second := schedulerAccount("second", "claude-second", "openai-second")
+	sticky := schedulerAccount("sticky", "claude-sticky", "openai-sticky")
+	runtime := schedulerTestRuntime(schedulerNow, bad, first, second, sticky)
 	runtime.handleUsage(pluginapi.UsageRecord{AuthID: bad.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusForbidden}})
-	req := schedulerRequest(bad.ClaudeAuthID, first.ClaudeAuthID, second.ClaudeAuthID)
-	req.Options.Headers = map[string][]string{"session_id": []string{"sticky"}}
+	req := schedulerRequest(bad.ClaudeAuthID, first.ClaudeAuthID, second.ClaudeAuthID, sticky.ClaudeAuthID)
+	req.Options.Headers = map[string][]string{"session_id": []string{"s6"}}
 
 	one, err := runtime.pick(req)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || one.AuthID != sticky.ClaudeAuthID {
+		t.Fatalf("initial sticky pick = %#v, err = %v", one, err)
 	}
+	runtime.handleUsage(pluginapi.UsageRecord{AuthID: first.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 	two, err := runtime.pick(req)
-	if err != nil || two.AuthID != one.AuthID {
-		t.Fatalf("sticky picks = %#v / %#v, err = %v", one, two, err)
+	if err != nil || two.AuthID != sticky.ClaudeAuthID {
+		t.Fatalf("unrelated impairment changed sticky pick = %#v, err = %v", two, err)
 	}
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: one.AuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	runtime.handleUsage(pluginapi.UsageRecord{AuthID: sticky.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 	three, err := runtime.pick(req)
-	if err != nil || three.AuthID == one.AuthID || three.AuthID == bad.ClaudeAuthID {
+	if err != nil || three.AuthID == sticky.ClaudeAuthID || three.AuthID == bad.ClaudeAuthID || three.AuthID == first.ClaudeAuthID {
 		t.Fatalf("failover pick = %#v, err = %v", three, err)
 	}
 }
