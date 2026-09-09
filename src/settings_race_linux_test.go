@@ -55,7 +55,7 @@ func TestSecureStoreCloseWaitsForActiveWrite(t *testing.T) {
 }
 
 func TestSettingsRenameSyncFailureIsRecoverablyCommitted(t *testing.T) {
-	for _, failCall := range []int{1, 2, 3} {
+	for _, failCall := range []int{2, 3, 4} {
 		t.Run(fmt.Sprintf("directory_sync_%d", failCall), func(t *testing.T) {
 			store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
 			if err != nil {
@@ -111,6 +111,14 @@ func TestSettingsPersistentDirectorySyncFailureRequiresDurableRecoveryMarker(t *
 	if err := store.saveSettings(desired); err == nil {
 		t.Fatalf("settings were acknowledged without a durable marker after %d sync calls", calls)
 	}
+	store.dirSync = nil
+	recovered, err := store.recoverSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Accounts[identity].Name != "previous" {
+		t.Fatalf("rejected settings became active after recovery: %#v", recovered)
+	}
 }
 
 func TestSettingsMarkerRemovalSyncFailurePreservesCommittedSettings(t *testing.T) {
@@ -127,7 +135,7 @@ func TestSettingsMarkerRemovalSyncFailurePreservesCommittedSettings(t *testing.T
 	calls := 0
 	store.dirSync = func(dir *os.File) error {
 		calls++
-		if calls >= 3 {
+		if calls >= 4 {
 			return errors.New("injected directory sync failure")
 		}
 		return dir.Sync()
@@ -187,7 +195,7 @@ func TestSettingsRecoveryRollsAcknowledgedUpdateForwardFromPreviousDigest(t *tes
 		t.Fatal(err)
 	}
 	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
-	recovery := settingsRecovery{Version: settingsRecoveryVersion, PreviousDigest: settingsDigest(previous), Desired: desired}
+	recovery := settingsRecovery{Version: settingsRecoveryVersion, PreviousDigest: settingsDigest(previous), Desired: &desired}
 	if err := store.writeJSON(settingsRecoveryName, recovery); err != nil {
 		t.Fatal(err)
 	}

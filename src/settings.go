@@ -79,9 +79,9 @@ type persistedHealthState struct {
 }
 
 type settingsRecovery struct {
-	Version        int          `json:"version"`
-	PreviousDigest string       `json:"previous_digest"`
-	Desired        settingsFile `json:"desired"`
+	Version        int           `json:"version"`
+	PreviousDigest string        `json:"previous_digest"`
+	Desired        *settingsFile `json:"desired,omitempty"`
 }
 
 type secureStore struct {
@@ -150,14 +150,17 @@ func (s *secureStore) saveSettings(settings settingsFile) error {
 	recovery := settingsRecovery{
 		Version:        settingsRecoveryVersion,
 		PreviousDigest: settingsDigest(previous),
-		Desired:        settings,
 	}
 	if err := s.writeJSON(settingsRecoveryName, recovery); err != nil {
+		return fmt.Errorf("stage settings recovery: %w", err)
+	}
+	recovery.Desired = &settings
+	if err := s.writeJSON(settingsRecoveryName, recovery); err != nil {
 		if writeErrorOutcome(err) != writeNeedsRecovery {
-			return fmt.Errorf("stage settings recovery: %w", err)
+			return fmt.Errorf("prepare settings recovery: %w", err)
 		}
 		if flushErr := s.flush(); flushErr != nil {
-			return fmt.Errorf("stage settings recovery: %w", err)
+			return fmt.Errorf("prepare settings recovery: %w", err)
 		}
 	}
 	if err := s.writeJSON("settings.json", settings); err != nil {
@@ -187,21 +190,31 @@ func (s *secureStore) recoverSettings() (settingsFile, error) {
 	if !found {
 		return settings, nil
 	}
-	if recovery.Version != settingsRecoveryVersion || validateSettingsFile(recovery.Desired) != nil {
+	if recovery.Version != settingsRecoveryVersion {
 		return settingsFile{}, fmt.Errorf("settings recovery marker is invalid")
 	}
 	currentDigest := settingsDigest(settings)
-	desiredDigest := settingsDigest(recovery.Desired)
+	if recovery.Desired == nil {
+		if currentDigest != recovery.PreviousDigest {
+			return settingsFile{}, fmt.Errorf("settings recovery marker does not match settings.json")
+		}
+		_ = s.removeJSON(settingsRecoveryName)
+		return settings, nil
+	}
+	if validateSettingsFile(*recovery.Desired) != nil {
+		return settingsFile{}, fmt.Errorf("settings recovery marker is invalid")
+	}
+	desiredDigest := settingsDigest(*recovery.Desired)
 	switch currentDigest {
 	case recovery.PreviousDigest:
-		if err := s.writeJSON("settings.json", recovery.Desired); err != nil && writeErrorOutcome(err) != writeNeedsRecovery {
+		if err := s.writeJSON("settings.json", *recovery.Desired); err != nil && writeErrorOutcome(err) != writeNeedsRecovery {
 			return settingsFile{}, fmt.Errorf("roll forward settings recovery: %w", err)
 		}
 		_ = s.removeJSON(settingsRecoveryName)
-		return recovery.Desired, nil
+		return *recovery.Desired, nil
 	case desiredDigest:
 		_ = s.removeJSON(settingsRecoveryName)
-		return recovery.Desired, nil
+		return *recovery.Desired, nil
 	default:
 		return settingsFile{}, fmt.Errorf("settings recovery marker does not match settings.json")
 	}
