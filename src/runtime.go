@@ -243,6 +243,9 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 		return nil
 	}
 
+	if r.snapshot.Health == nil {
+		r.snapshot.Health = make(map[string]accountHealthState)
+	}
 	health := r.snapshot.Health[identity]
 	if record.Failed {
 		switch record.Failure.StatusCode {
@@ -255,6 +258,10 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 			health.exhaustUntil(resetAt, resetReason)
 		}
 		r.snapshot.Health[identity] = health
+	}
+	if r.snapshot.Quota == nil || r.snapshot.Store == nil {
+		r.mu.Unlock()
+		return nil
 	}
 
 	state := r.snapshot.Quota[identity]
@@ -455,6 +462,9 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, generation uint64, identit
 	}
 	r.snapshot.Quota[identity] = state
 	view := state.view(now, accountByIdentity(r.snapshot.Accounts, identity), r.snapshot.Config)
+	if r.snapshot.Health == nil {
+		r.snapshot.Health = make(map[string]accountHealthState)
+	}
 	health := r.snapshot.Health[identity]
 	health.CapacityExhausted = atOrAboveThreshold(view.FiveHour.ConsumedMicrocredits, view.FiveHour.BucketMicrocredits, r.snapshot.Config.ThresholdPercent) ||
 		atOrAboveThreshold(view.Weekly.ConsumedMicrocredits, view.Weekly.BucketMicrocredits, r.snapshot.Config.ThresholdPercent)
@@ -824,10 +834,13 @@ func redactError(err error, secrets ...string) error {
 }
 
 func boundedStatus(message string) string {
-	const maxStatusLength = 240
+	return boundedText(message, 240)
+}
+
+func boundedText(message string, limit int) string {
 	clean := strings.Join(strings.Fields(message), " ")
-	if len(clean) > maxStatusLength {
-		clean = clean[:maxStatusLength]
+	if len(clean) > limit {
+		clean = clean[:limit]
 	}
 	return clean
 }

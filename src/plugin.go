@@ -22,11 +22,19 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
 func (e *envelopeError) Error() string { return e.Code + ": " + e.Message }
+
+func (e *envelopeError) WireError() envelopeError { return *e }
+
+func newSchedulerError(code, message string) error {
+	return &envelopeError{Code: code, Message: message, Retryable: false}
+}
 
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`
@@ -199,4 +207,18 @@ func okEnvelope(value any) ([]byte, error) {
 func errorEnvelope(code, message string) []byte {
 	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
 	return raw
+}
+
+type wireError interface {
+	error
+	WireError() envelopeError
+}
+
+func errorEnvelopeFor(err error) []byte {
+	if typed, ok := err.(wireError); ok {
+		wire := typed.WireError()
+		raw, _ := json.Marshal(envelope{OK: false, Error: &wire})
+		return raw
+	}
+	return errorEnvelope("plugin_error", err.Error())
 }
