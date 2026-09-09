@@ -315,64 +315,73 @@ func TestHostPropagatesAllImpairedSchedulerError(t *testing.T) {
 	}
 }
 
-func TestInvalidReconfigureRetainsHostRegistration(t *testing.T) {
+func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
 	binary, err := buildTestPlugin(t)
 	if err != nil {
 		t.Fatalf("build plugin: %v", err)
 	}
-	client, err := abiclient.Open(binary)
-	if err != nil {
-		t.Fatalf("open plugin: %v", err)
-	}
-	defer client.Close()
 
 	root := t.TempDir()
+	pluginDir := filepath.Join(root, "plugins", "linux", "amd64")
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versioned := filepath.Join(pluginDir, pluginID+"-v0.0.0-test.so")
+	if err := copyFile(versioned, binary); err != nil {
+		t.Fatal(err)
+	}
+
+	authDir := filepath.Join(root, "auth")
 	cpaConfigPath := filepath.Join(root, "config.yaml")
-	writeCPAConfigFixture(t, cpaConfigPath, filepath.Join(root, "auth"), fixtureKey)
-	valid := []byte("cpa-config-path: " + cpaConfigPath + "\ndefault-plan: pro\n")
-
-	registerRequest, err := json.Marshal(map[string]any{"config_yaml": valid})
-	if err != nil {
-		t.Fatal(err)
-	}
-	registeredRaw, err := client.Call(pluginabi.MethodPluginRegister, registerRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	registered := decodeEnvelopeResult[registration](t, registeredRaw, pluginabi.MethodPluginRegister)
-
-	invalidRequest, err := json.Marshal(map[string]any{"config_yaml": []byte("threshold-percent: 0\n")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reconfiguredRaw, err := client.Call(pluginabi.MethodPluginReconfigure, invalidRequest)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reconfigured := decodeEnvelopeResult[registration](t, reconfiguredRaw, pluginabi.MethodPluginReconfigure)
-	if reconfigured.SchemaVersion != registered.SchemaVersion || reconfigured.Metadata.Name != registered.Metadata.Name || reconfigured.Capabilities != registered.Capabilities {
-		t.Fatalf("retained registration changed: before %#v after %#v", registered, reconfigured)
+	writeCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
+	enabled := true
+	configNode := pluginConfigNode(t, cpaConfigPath)
+	host := pluginhost.New()
+	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
+		Enabled: true,
+		Dir:     filepath.Join(root, "plugins"),
+		AuthDir: authDir,
+		Configs: map[string]pluginhost.PluginInstanceConfig{
+			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: configNode},
+		},
+	})
+	defer host.ShutdownAll()
+	if !host.HasScheduler() {
+		t.Fatal("initial exclusive configuration did not register scheduler")
 	}
 
-	statusRequest, err := json.Marshal(pluginapi.ManagementRequest{Method: http.MethodGet, Path: managementStatusPath})
+	raw, err := os.ReadFile(cpaConfigPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	statusRaw, err := client.Call(pluginabi.MethodManagementHandle, statusRequest)
-	if err != nil {
+	raw = []byte(strings.Replace(string(raw), "      priority: 1000\n", "      priority: 1000\n    competitor:\n      enabled: true\n      priority: 2000\n", 1))
+	if err = os.WriteFile(cpaConfigPath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	statusResponse := decodeEnvelopeResult[pluginapi.ManagementResponse](t, statusRaw, pluginabi.MethodManagementHandle)
-	var status managementStatusBody
-	if err := json.Unmarshal(statusResponse.Body, &status); err != nil {
+	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
+		Enabled: true,
+		Dir:     filepath.Join(root, "plugins"),
+		AuthDir: authDir,
+		Configs: map[string]pluginhost.PluginInstanceConfig{
+			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: configNode},
+		},
+	})
+
+	if host.HasScheduler() {
+		t.Fatal("invalid live reconfigure retained scheduler capability")
+	}
+	if plugins := host.RegisteredPlugins(); len(plugins) != 0 {
+		t.Fatalf("registered plugins = %#v, want none after rejected reconfigure", plugins)
+	}
+}
+
+func pluginConfigNode(t *testing.T, cpaConfigPath string) yaml.Node {
+	t.Helper()
+	var configNode yaml.Node
+	if err := yaml.Unmarshal([]byte("enabled: true\npriority: 1000\ncpa-config-path: "+cpaConfigPath+"\ndefault-plan: pro\n"), &configNode); err != nil {
 		t.Fatal(err)
 	}
-	if status.Status != "reconfigure_rejected" || status.ValidationError == "" {
-		t.Fatalf("status = %#v, want retained registration diagnostic", status)
-	}
-	if strings.Contains(status.ValidationError, fixtureKey) {
-		t.Fatal("validation status leaked provider key")
-	}
+	return *configNode.Content[0]
 }
 
 func copyFile(dst, src string) error {
