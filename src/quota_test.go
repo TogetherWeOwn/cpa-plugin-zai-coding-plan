@@ -126,13 +126,20 @@ func TestFetchQuotaSelectsFallbackOnNon200MalformedAndTimeout(t *testing.T) {
 }
 
 func TestQuotaHTTPClientRejectsRedirectsAndAmbientProxy(t *testing.T) {
-	client := newQuotaHTTPClient()
+	client := newQuotaHTTPClient(0)
 	if err := client.CheckRedirect(&http.Request{}, nil); !errors.Is(err, http.ErrUseLastResponse) {
 		t.Fatalf("redirect error = %v", err)
 	}
 	transport, ok := client.Transport.(*http.Transport)
 	if !ok || transport.Proxy != nil {
 		t.Fatalf("transport = %#v, ambient proxy must be disabled", client.Transport)
+	}
+}
+
+func TestQuotaHTTPClientHonorsConfiguredTimeoutAboveDefault(t *testing.T) {
+	client := newQuotaHTTPClient(30 * time.Second)
+	if client.Timeout != 30*time.Second {
+		t.Fatalf("client timeout = %s, want 30s", client.Timeout)
 	}
 }
 

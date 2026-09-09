@@ -45,6 +45,8 @@ type refreshGeneration struct {
 	done       chan struct{}
 	err        error
 	generation uint64
+	accounts   []account
+	timeout    time.Duration
 }
 
 type pluginRuntime struct {
@@ -55,6 +57,7 @@ type pluginRuntime struct {
 	reconfigures   sync.WaitGroup
 	workers        sync.WaitGroup
 	refreshWorkers sync.WaitGroup
+	settingsWrites sync.WaitGroup
 	cancel         context.CancelFunc
 	refreshContext context.Context
 	refreshCancel  context.CancelFunc
@@ -62,6 +65,7 @@ type pluginRuntime struct {
 	httpClient     httpDoer
 	endpoint       string
 	persist        func(*secureStore, persistedState) error
+	saveSettings   func(*secureStore, settingsFile) error
 	settingsMu     sync.Mutex
 	pollersMu      sync.Mutex
 	persistMu      sync.Mutex
@@ -279,6 +283,10 @@ func (r *pluginRuntime) startPollers(ctx context.Context, snapshot *runtimeSnaps
 }
 
 func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
+	return r.commitSnapshotAfter(staged, nil)
+}
+
+func (r *pluginRuntime) commitSnapshotAfter(staged *runtimeSnapshot, beforeCommit func() error) error {
 	r.pollersMu.Lock()
 	defer r.pollersMu.Unlock()
 
@@ -301,6 +309,13 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 		}
 	} else {
 		staged.Generation = 1
+	}
+	if beforeCommit != nil {
+		if err := beforeCommit(); err != nil {
+			r.mu.Unlock()
+			cancel()
+			return err
+		}
 	}
 	r.cancel = cancel
 	if r.refreshContext == nil {
@@ -360,7 +375,7 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, gene
 	now := r.runtimeClock().Now()
 	attemptCtx, cancel := context.WithTimeout(ctx, quotaTimeout(timeout))
 	defer cancel()
-	snapshot, err := fetchQuota(attemptCtx, r.quotaClient(), r.quotaEndpoint(), key, now)
+	snapshot, err := fetchQuota(attemptCtx, r.quotaClient(timeout), r.quotaEndpoint(), key, now)
 	r.mu.Lock()
 	if r.stopped || r.snapshot == nil || r.snapshot.Generation != generation {
 		r.mu.Unlock()
@@ -560,11 +575,11 @@ func (r *pluginRuntime) runtimeClock() clock {
 	return realClock{}
 }
 
-func (r *pluginRuntime) quotaClient() httpDoer {
+func (r *pluginRuntime) quotaClient(timeout time.Duration) httpDoer {
 	if r.httpClient != nil {
 		return r.httpClient
 	}
-	return newQuotaHTTPClient()
+	return newQuotaHTTPClient(timeout)
 }
 
 func (r *pluginRuntime) quotaEndpoint() string {
@@ -612,6 +627,7 @@ func (r *pluginRuntime) shutdown() error {
 	r.reconfigures.Wait()
 	r.workers.Wait()
 	r.refreshWorkers.Wait()
+	r.settingsWrites.Wait()
 
 	r.mu.RLock()
 	snapshot := r.snapshot

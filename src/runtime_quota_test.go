@@ -247,6 +247,39 @@ func TestRuntimePollOnceRejectsCancelledOldGenerationResponse(t *testing.T) {
 	}
 }
 
+func TestRuntimeForcedRefreshCapturesGenerationAndAccountsAtomically(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	first := account{Identity: accountIdentity("refresh-first"), Name: "first", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: "first-key"}
+	second := account{Identity: accountIdentity("refresh-second"), Name: "second", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: "second-key"}
+	runtime := quotaTestRuntime(t, now, []account{first})
+	runtime.snapshot.Generation = 1
+	refresh, leader, err := runtime.beginRefresh()
+	if err != nil || !leader {
+		t.Fatalf("begin refresh: leader=%t err=%v", leader, err)
+	}
+	defer runtime.refreshWorkers.Done()
+
+	runtime.mu.Lock()
+	replacement := cloneRuntimeSnapshot(runtime.snapshot)
+	replacement.Generation = 2
+	replacement.Accounts = []account{second}
+	replacement.Quota = map[string]accountQuotaState{second.Identity: {CompleteSince: now}}
+	runtime.snapshot = replacement
+	runtime.mu.Unlock()
+
+	var requestedKey string
+	runtime.httpClient = roundTripDoer(func(request *http.Request) (*http.Response, error) {
+		requestedKey = strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		return quotaHTTPResponse(http.StatusBadGateway, quotaFixtureKey), nil
+	})
+	if err := runtime.runRefresh(context.Background(), refresh); err == nil {
+		t.Fatal("stale refresh unexpectedly succeeded")
+	}
+	if requestedKey != first.key {
+		t.Fatalf("refresh mixed generation 1 with account key %q, want %q", requestedKey, first.key)
+	}
+}
+
 func TestRuntimeForcedRefreshRejectsReconfiguredGeneration(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("refresh-generation"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}

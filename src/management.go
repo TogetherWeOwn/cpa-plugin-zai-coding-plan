@@ -228,28 +228,28 @@ func (r *pluginRuntime) beginRefresh() (*refreshGeneration, bool, error) {
 		r.refreshContext, r.refreshCancel = context.WithCancel(context.Background())
 	}
 	r.refreshWorkers.Add(1)
-	r.refresh = &refreshGeneration{done: make(chan struct{}), generation: r.snapshot.Generation}
+	r.refresh = &refreshGeneration{
+		done:       make(chan struct{}),
+		generation: r.snapshot.Generation,
+		accounts:   append([]account(nil), r.snapshot.Accounts...),
+		timeout:    quotaTimeout(r.snapshot.Config.QuotaTimeout),
+	}
 	return r.refresh, true, nil
 }
 
 func (r *pluginRuntime) runRefresh(ctx context.Context, refresh *refreshGeneration) error {
-	r.mu.RLock()
-	accounts := append([]account(nil), r.snapshot.Accounts...)
-	timeout := quotaTimeout(r.snapshot.Config.QuotaTimeout)
-	r.mu.RUnlock()
-
-	refreshCtx, cancel := context.WithTimeout(ctx, timeout)
+	refreshCtx, cancel := context.WithTimeout(ctx, refresh.timeout)
 	defer cancel()
 	type pollResult struct{ err error }
-	results := make(chan pollResult, len(accounts))
+	results := make(chan pollResult, len(refresh.accounts))
 	launched := 0
-	for _, item := range accounts {
+	for _, item := range refresh.accounts {
 		if item.Disabled {
 			continue
 		}
 		launched++
 		go func(item account) {
-			results <- pollResult{err: r.pollOnce(refreshCtx, item.Identity, item.key, refresh.generation, timeout)}
+			results <- pollResult{err: r.pollOnce(refreshCtx, item.Identity, item.key, refresh.generation, refresh.timeout)}
 		}(item)
 	}
 	var failures int
@@ -420,13 +420,24 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 	if err := validateAccounts(updated.Accounts); err != nil {
 		return err
 	}
-	if err := r.commitSnapshot(updated); err != nil {
-		return err
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return fmt.Errorf("plugin is shutting down")
 	}
-	if err := updated.Store.saveSettings(settings); err != nil {
-		return fmt.Errorf("save account settings: %w", err)
-	}
-	return nil
+	r.settingsWrites.Add(1)
+	r.mu.Unlock()
+	defer r.settingsWrites.Done()
+	return r.commitSnapshotAfter(updated, func() error {
+		save := r.saveSettings
+		if save == nil {
+			save = func(store *secureStore, settings settingsFile) error { return store.saveSettings(settings) }
+		}
+		if err := save(updated.Store, settings); err != nil {
+			return fmt.Errorf("save account settings: %w", err)
+		}
+		return nil
+	})
 }
 
 func applySettingToAccount(item *account, setting accountSetting) {

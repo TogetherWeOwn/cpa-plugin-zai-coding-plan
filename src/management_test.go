@@ -199,6 +199,66 @@ func TestManagementConcurrentAccountConfigPreservesBothUpdates(t *testing.T) {
 	}
 }
 
+func TestManagementAccountConfigPersistenceFailureLeavesRuntimeUnchanged(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("persist-failure"), Name: "account", KeySuffix: "persist", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	runtime.snapshot.Generation = 7
+	runtime.saveSettings = func(*secureStore, settingsFile) error { return errors.New("disk unavailable") }
+
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Name: "failed"}); err == nil {
+		t.Fatal("persistence failure unexpectedly succeeded")
+	}
+	snapshot, err := runtime.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Generation != 7 || snapshot.Accounts[0].Name != "account" {
+		t.Fatalf("failed settings became live: generation=%d account=%#v", snapshot.Generation, snapshot.Accounts[0])
+	}
+}
+
+func TestManagementAccountConfigShutdownJoinsWriteAndRejectsNewWrites(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("shutdown-write"), Name: "account", KeySuffix: "write", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime.saveSettings = func(*secureStore, settingsFile) error {
+		close(started)
+		<-release
+		return nil
+	}
+
+	updateDone := make(chan error, 1)
+	go func() {
+		updateDone <- runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Name: "saved"})
+	}()
+	<-started
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- runtime.shutdown() }()
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown returned before settings write completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-updateDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not join completed settings write")
+	}
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Name: "rejected"}); err == nil {
+		t.Fatal("post-stop settings write unexpectedly succeeded")
+	}
+}
+
 func TestManagementAccountConfigShutdownErrorDoesNotPersist(t *testing.T) {
 	root := t.TempDir()
 	authDir := filepath.Join(root, "auth")
@@ -210,22 +270,16 @@ func TestManagementAccountConfigShutdownErrorDoesNotPersist(t *testing.T) {
 	if err := runtime.reconfigure(rawConfig); err != nil {
 		t.Fatal(err)
 	}
-	runtime.settingsMu.Lock()
-	updateDone := make(chan pluginapi.ManagementResponse, 1)
-	go func() {
-		updateDone <- runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{
-			Method: http.MethodPost,
-			Path:   managementAccountConfigPath,
-			Body:   []byte(`{"account":"zai-pro-1","name":"must-not-persist"}`),
-		})
-	}()
 	if err := runtime.shutdown(); err != nil {
 		t.Fatal(err)
 	}
-	runtime.settingsMu.Unlock()
-	response := <-updateDone
+	response := runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{
+		Method: http.MethodPost,
+		Path:   managementAccountConfigPath,
+		Body:   []byte(`{"account":"zai-pro-1","name":"must-not-persist"}`),
+	})
 	if response.StatusCode == http.StatusOK {
-		t.Fatalf("shutdown-losing config update succeeded: %s", response.Body)
+		t.Fatalf("post-shutdown config update succeeded: %s", response.Body)
 	}
 
 	var reloaded pluginRuntime
