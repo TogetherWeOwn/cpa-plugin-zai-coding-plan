@@ -16,16 +16,19 @@ const (
 )
 
 type account struct {
-	Identity        string `json:"-"`
-	Name            string `json:"name"`
-	KeySuffix       string `json:"key_suffix"`
-	Plan            string `json:"plan"`
-	Disabled        bool   `json:"disabled,omitempty"`
-	FiveHourCredits int64  `json:"five_hour_credits"`
-	WeeklyCredits   int64  `json:"weekly_credits"`
-	ClaudeAuthID    string `json:"claude_auth_id"`
-	OpenAIAuthID    string `json:"openai_auth_id"`
-	key             string
+	Identity                string `json:"-"`
+	Name                    string `json:"name"`
+	KeySuffix               string `json:"key_suffix"`
+	Plan                    string `json:"plan"`
+	Disabled                bool   `json:"disabled,omitempty"`
+	FiveHourCredits         int64  `json:"five_hour_credits"`
+	WeeklyCredits           int64  `json:"weekly_credits"`
+	ClaudeAuthID            string `json:"claude_auth_id"`
+	OpenAIAuthID            string `json:"openai_auth_id"`
+	key                     string
+	planExplicit            bool
+	fiveHourCreditsExplicit bool
+	weeklyCreditsExplicit   bool
 }
 
 type pairCandidate struct {
@@ -282,10 +285,13 @@ func applyAccountOverride(target *account, override *accountOverride, defaultPla
 			target.Name = override.Name
 		}
 		target.Disabled = override.Disabled
-		if override.FiveHourCredits > 0 {
+		target.planExplicit = override.Plan != ""
+		target.fiveHourCreditsExplicit = override.FiveHourCredits > 0
+		target.weeklyCreditsExplicit = override.WeeklyCredits > 0
+		if target.fiveHourCreditsExplicit {
 			buckets.FiveHour = override.FiveHourCredits
 		}
-		if override.WeeklyCredits > 0 {
+		if target.weeklyCreditsExplicit {
 			buckets.Weekly = override.WeeklyCredits
 		}
 	}

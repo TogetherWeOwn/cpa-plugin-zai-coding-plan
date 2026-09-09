@@ -323,6 +323,77 @@ func TestReconfigureKeepsUsageAcceptedDuringStaging(t *testing.T) {
 	}
 }
 
+func TestCommitSnapshotCarriesForwardSameStoreNamedPlan(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	identity := accountIdentity("account")
+	live := account{Identity: identity, Name: "account", Plan: "lite", FiveHourCredits: 2_000, WeeklyCredits: 10_000, ClaudeAuthID: "auth", Disabled: true}
+	runtime := quotaTestRuntime(t, now, []account{live})
+
+	staged := cloneRuntimeSnapshot(runtime.snapshot)
+	staged.Accounts[0].Plan = "max"
+	staged.Accounts[0].FiveHourCredits = 28_000
+	staged.Accounts[0].WeeklyCredits = 140_000
+	if err := runtime.commitSnapshot(staged); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runtime.snapshot.Accounts[0]
+	if got.Plan != "lite" || got.FiveHourCredits != 2_000 || got.WeeklyCredits != 10_000 {
+		t.Fatalf("same-store commit reverted live plan: %#v", got)
+	}
+}
+
+func TestCommitSnapshotKeepsStagedExplicitPlanOverride(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, configPath, authDir, fixtureKey)
+
+	runtime := &pluginRuntime{clock: &fakeClock{now: now}}
+	proConfig := []byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")
+	if err := runtime.reconfigure(proConfig); err != nil {
+		t.Fatal(err)
+	}
+	identity := runtime.snapshot.Accounts[0].Identity
+	syncPlanFromUpstream(runtime.snapshot.Accounts, identity, "lite")
+
+	explicitConfig := []byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\naccounts:\n  - key-suffix: " + displaySuffix(fixtureKey) + "\n    plan: max\n")
+	if err := runtime.reconfigure(explicitConfig); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runtime.snapshot.Accounts[0]
+	if got.Plan != "max" || got.FiveHourCredits != 28_000 || got.WeeklyCredits != 140_000 {
+		t.Fatalf("same-store commit overrode explicit staged plan: %#v", got)
+	}
+}
+
+func TestCommitSnapshotDoesNotCarryForwardDifferentStorePlan(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	identity := accountIdentity("account")
+	live := account{Identity: identity, Name: "account", Plan: "lite", FiveHourCredits: 2_000, WeeklyCredits: 10_000, ClaudeAuthID: "auth", Disabled: true}
+	runtime := quotaTestRuntime(t, now, []account{live})
+
+	staged := cloneRuntimeSnapshot(runtime.snapshot)
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "other-auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged.Store = store
+	staged.Accounts[0].Plan = "max"
+	staged.Accounts[0].FiveHourCredits = 28_000
+	staged.Accounts[0].WeeklyCredits = 140_000
+	if err := runtime.commitSnapshot(staged); err != nil {
+		t.Fatal(err)
+	}
+
+	got := runtime.snapshot.Accounts[0]
+	if got.Plan != "max" || got.FiveHourCredits != 28_000 || got.WeeklyCredits != 140_000 {
+		t.Fatalf("different-store commit carried live plan: %#v", got)
+	}
+}
+
 // TestConcurrentUsageAndReconfigureStress drives handleUsage against
 // reconfigure with the race detector: all accepted events must survive every
 // completed reconfigure cycle.

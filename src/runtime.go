@@ -281,6 +281,7 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 					staged.Quota[identity] = state
 				}
 			}
+			carryForwardNamedPlans(r.snapshot, staged)
 		}
 	} else {
 		staged.Generation = 1
@@ -393,6 +394,33 @@ func syncPlanFromUpstream(accounts []account, identity, plan string) {
 			}
 			return
 		}
+	}
+}
+
+// carryForwardNamedPlans preserves an upstream-discovered named plan across a
+// same-store reconfigure that staged before the poll completed. Explicit plan
+// or bucket overrides on either side remain authoritative and are never
+// mistaken for upstream-derived state.
+func carryForwardNamedPlans(live, staged *runtimeSnapshot) {
+	liveAccounts := make(map[string]account, len(live.Accounts))
+	for _, item := range live.Accounts {
+		liveAccounts[item.Identity] = item
+	}
+	for i := range staged.Accounts {
+		liveAccount, exists := liveAccounts[staged.Accounts[i].Identity]
+		if !exists || liveAccount.Plan == "custom" || liveAccount.planExplicit || liveAccount.fiveHourCreditsExplicit || liveAccount.weeklyCreditsExplicit {
+			continue
+		}
+		if staged.Accounts[i].planExplicit || staged.Accounts[i].fiveHourCreditsExplicit || staged.Accounts[i].weeklyCreditsExplicit {
+			continue
+		}
+		buckets, known := planBuckets[liveAccount.Plan]
+		if !known {
+			continue
+		}
+		staged.Accounts[i].Plan = liveAccount.Plan
+		staged.Accounts[i].FiveHourCredits = buckets.FiveHour
+		staged.Accounts[i].WeeklyCredits = buckets.Weekly
 	}
 }
 

@@ -172,6 +172,7 @@ func applyStoredSettings(accounts []account, settings settingsFile) error {
 		}
 		if plan := normalizePlan(stored.Plan); plan != "" {
 			accounts[i].Plan = plan
+			accounts[i].planExplicit = true
 			if buckets, known := planBuckets[plan]; known {
 				accounts[i].FiveHourCredits = buckets.FiveHour
 				accounts[i].WeeklyCredits = buckets.Weekly
@@ -182,9 +183,11 @@ func applyStoredSettings(accounts []account, settings settingsFile) error {
 		}
 		if stored.FiveHourCredits > 0 {
 			accounts[i].FiveHourCredits = stored.FiveHourCredits
+			accounts[i].fiveHourCreditsExplicit = true
 		}
 		if stored.WeeklyCredits > 0 {
 			accounts[i].WeeklyCredits = stored.WeeklyCredits
+			accounts[i].weeklyCreditsExplicit = true
 		}
 	}
 	return validateAccounts(accounts)
