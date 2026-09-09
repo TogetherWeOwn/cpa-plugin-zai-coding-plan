@@ -16,7 +16,7 @@ var schedulerNow = time.Date(2026, time.September, 9, 1, 0, 0, 0, time.UTC)
 func TestUsageFailureImpairsBothPairedCredentials(t *testing.T) {
 	account := schedulerAccount("one", "claude-one", "openai-one")
 	runtime := schedulerTestRuntime(schedulerNow, account)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 
 	for _, authID := range []string{account.ClaudeAuthID, account.OpenAIAuthID} {
 		_, err := runtime.pick(schedulerRequest(authID))
@@ -31,14 +31,14 @@ func TestUsageFailureImpairsBothPairedCredentials(t *testing.T) {
 func TestRepeatedFailuresExtendNeverShortenBlocks(t *testing.T) {
 	account := schedulerAccount("one", "claude-one", "openai-one")
 	runtime := schedulerTestRuntime(schedulerNow, account)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"3600"}}})
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"60"}}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"3600"}}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"60"}}})
 	health, _ := runtime.health(account.Identity)
 	if !health.ResetAt.Equal(schedulerNow.Add(time.Hour)) {
 		t.Fatalf("rate-limit reset = %v, want %v", health.ResetAt, schedulerNow.Add(time.Hour))
 	}
 
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"7200"}}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"7200"}}})
 	health, _ = runtime.health(account.Identity)
 	if !health.ResetAt.Equal(schedulerNow.Add(2 * time.Hour)) {
 		t.Fatalf("extended reset = %v, want %v", health.ResetAt, schedulerNow.Add(2*time.Hour))
@@ -52,7 +52,7 @@ func TestResetHintsAreBoundedAndUseAuthoritativeThenFallback(t *testing.T) {
 	if !runtime.updateCapacity(generation, account.Identity, capacityUpdate{ResetAt: schedulerNow.Add(3 * time.Hour), Source: "authoritative quota"}) {
 		t.Fatal("capacity update rejected")
 	}
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `{"retry_after":999999999999}`}, ResponseHeaders: http.Header{"Retry-After": []string{"999999999999"}}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `{"retry_after":999999999999}`}, ResponseHeaders: http.Header{"Retry-After": []string{"999999999999"}}})
 	health, _ := runtime.health(account.Identity)
 	if !health.ResetAt.Equal(schedulerNow.Add(3*time.Hour)) || health.Reason != "authoritative quota reset" {
 		t.Fatalf("authoritative reset not chosen: %#v", health)
@@ -60,7 +60,7 @@ func TestResetHintsAreBoundedAndUseAuthoritativeThenFallback(t *testing.T) {
 
 	other := schedulerAccount("two", "claude-two", "openai-two")
 	runtime = schedulerTestRuntime(schedulerNow, other)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: other.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: strings.Repeat("x", maxFailureBodyBytes+1)}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: other.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: strings.Repeat("x", maxFailureBodyBytes+1)}})
 	health, _ = runtime.health(other.Identity)
 	if !health.ResetAt.Equal(schedulerNow.Add(defaultFallback)) || health.Reason != "conservative rate-limit cooldown" {
 		t.Fatalf("fallback reset = %#v", health)
@@ -70,7 +70,7 @@ func TestResetHintsAreBoundedAndUseAuthoritativeThenFallback(t *testing.T) {
 func TestRetryAfterMillisecondsUsesRelativeDuration(t *testing.T) {
 	account := schedulerAccount("one", "claude-one", "openai-one")
 	runtime := schedulerTestRuntime(schedulerNow, account)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `{"retry_after_ms":1800000}`}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `{"retry_after_ms":1800000}`}})
 	health, _ := runtime.health(account.Identity)
 	if !health.ResetAt.Equal(schedulerNow.Add(30 * time.Minute)) {
 		t.Fatalf("rate-limit reset = %v, want %v", health.ResetAt, schedulerNow.Add(30*time.Minute))
@@ -80,8 +80,8 @@ func TestRetryAfterMillisecondsUsesRelativeDuration(t *testing.T) {
 func TestAuthSuspensionPrecedesExhaustionAndBothRecover(t *testing.T) {
 	account := schedulerAccount("one", "claude-one", "openai-one")
 	runtime := schedulerTestRuntime(schedulerNow, account)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"7200"}}})
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusForbidden}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}, ResponseHeaders: http.Header{"Retry-After": []string{"7200"}}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusForbidden}})
 	health, _ := runtime.health(account.Identity)
 	if health.Status != healthSuspended {
 		t.Fatalf("health = %#v, want suspension precedence", health)
@@ -141,7 +141,7 @@ func TestSchedulerDegradedExcludesSiblingsAndRoundRobinsHealthy(t *testing.T) {
 	first := schedulerAccount("first", "claude-one", "openai-one")
 	second := schedulerAccount("second", "claude-two", "openai-two")
 	runtime := schedulerTestRuntime(schedulerNow, impaired, first, second)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: impaired.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: impaired.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 	req := schedulerRequest(impaired.ClaudeAuthID, impaired.OpenAIAuthID, first.ClaudeAuthID, second.ClaudeAuthID)
 
 	one, err := runtime.pick(req)
@@ -167,7 +167,7 @@ func TestSchedulerStickinessSurvivesUntilCandidateIsImpaired(t *testing.T) {
 	second := schedulerAccount("second", "claude-second", "openai-second")
 	sticky := schedulerAccount("sticky", "claude-sticky", "openai-sticky")
 	runtime := schedulerTestRuntime(schedulerNow, bad, first, second, sticky)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: bad.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusForbidden}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: bad.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusForbidden}})
 	req := schedulerRequest(bad.ClaudeAuthID, first.ClaudeAuthID, second.ClaudeAuthID, sticky.ClaudeAuthID)
 	req.Options.Headers = map[string][]string{"session_id": []string{"s6"}}
 
@@ -175,12 +175,12 @@ func TestSchedulerStickinessSurvivesUntilCandidateIsImpaired(t *testing.T) {
 	if err != nil || one.AuthID != sticky.ClaudeAuthID {
 		t.Fatalf("initial sticky pick = %#v, err = %v", one, err)
 	}
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: first.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: first.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 	two, err := runtime.pick(req)
 	if err != nil || two.AuthID != sticky.ClaudeAuthID {
 		t.Fatalf("unrelated impairment changed sticky pick = %#v, err = %v", two, err)
 	}
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: sticky.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: sticky.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 	three, err := runtime.pick(req)
 	if err != nil || three.AuthID == sticky.ClaudeAuthID || three.AuthID == bad.ClaudeAuthID || three.AuthID == first.ClaudeAuthID {
 		t.Fatalf("failover pick = %#v, err = %v", three, err)
@@ -198,7 +198,7 @@ func TestSchedulerUnmanagedAndAllImpairedPaths(t *testing.T) {
 	_, err = runtime.pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "unknown-zai", Attributes: map[string]string{"base_url": zaiAnthropicBaseURL}}}})
 	assertSchedulerError(t, err, "zai_unmanaged_candidate")
 
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests}})
 	response, err = runtime.pick(schedulerRequest(account.ClaudeAuthID, "unmanaged"))
 	if response.Handled {
 		t.Fatalf("hard error returned handled response: %#v", response)
@@ -210,7 +210,7 @@ func TestSchedulerPickNeverCallsExternalDependencies(t *testing.T) {
 	bad := schedulerAccount("bad", "claude-bad", "openai-bad")
 	good := schedulerAccount("good", "claude-good", "openai-good")
 	runtime := schedulerTestRuntime(schedulerNow, bad, good)
-	runtime.handleUsage(pluginapi.UsageRecord{AuthID: bad.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	mustHandleUsage(t, runtime, pluginapi.UsageRecord{AuthID: bad.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 
 	done := make(chan error, 1)
 	go func() {
@@ -352,6 +352,13 @@ func schedulerRequest(authIDs ...string) pluginapi.SchedulerPickRequest {
 		req.Candidates = append(req.Candidates, pluginapi.SchedulerAuthCandidate{ID: authID})
 	}
 	return req
+}
+
+func mustHandleUsage(t *testing.T, runtime *pluginRuntime, record pluginapi.UsageRecord) {
+	t.Helper()
+	if err := runtime.handleUsage(record); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertSchedulerError(t *testing.T, err error, code string) {

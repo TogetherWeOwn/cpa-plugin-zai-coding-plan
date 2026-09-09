@@ -688,16 +688,6 @@ func maxInt64(left, right int64) int64 {
 	return right
 }
 
-func earliestReset(left, right time.Time) time.Time {
-	if left.IsZero() {
-		return right.UTC()
-	}
-	if right.IsZero() || left.Before(right) {
-		return left.UTC()
-	}
-	return right.UTC()
-}
-
 func (r *pluginRuntime) runtimeClock() clock {
 	if r.clock != nil {
 		return r.clock
