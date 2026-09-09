@@ -181,6 +181,10 @@ func cloneRuntimeSnapshot(source *runtimeSnapshot) *runtimeSnapshot {
 	return &copySnapshot
 }
 
+// hasSnapshot is called from the linux/cgo ABI boundary, which is excluded
+// from the default non-CGO lint build.
+//
+//nolint:unused
 func (r *pluginRuntime) hasSnapshot() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

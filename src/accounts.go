@@ -87,7 +87,7 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 			continue
 		}
 		if key == "" {
-			return nil, fmt.Errorf("z.ai anthropic entry has no API key")
+			return nil, fmt.Errorf("z.ai Anthropic entry has no API key")
 		}
 		pair := pairs[key]
 		if pair == nil {
