@@ -226,6 +226,42 @@ func TestManagementAccountConfigClearAppliesBaseConfigurationLive(t *testing.T) 
 	}
 }
 
+func TestManagementAccountPlanAndClearSurviveCarryForward(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("managed-plan"), Name: "account", KeySuffix: "plan", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	runtime.snapshot.Accounts[0].Plan = "lite"
+	runtime.snapshot.Accounts[0].FiveHourCredits = planBuckets["lite"].FiveHour
+	runtime.snapshot.Accounts[0].WeeklyCredits = planBuckets["lite"].Weekly
+
+	five := int64(20_000)
+	weekly := int64(100_000)
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Plan: "custom", FiveHourCredits: &five, WeeklyCredits: &weekly}); err != nil {
+		t.Fatal(err)
+	}
+	configured, err := runtime.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configured.Accounts[0].Plan != "custom" || configured.Accounts[0].FiveHourCredits != five || configured.Accounts[0].WeeklyCredits != weekly {
+		t.Fatalf("managed custom plan was overwritten by carry-forward: %#v", configured.Accounts[0])
+	}
+	if !configured.Accounts[0].planExplicit || !configured.Accounts[0].fiveHourCreditsExplicit || !configured.Accounts[0].weeklyCreditsExplicit {
+		t.Fatalf("managed plan did not retain explicit flags: %#v", configured.Accounts[0])
+	}
+
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Clear: true}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := runtime.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Accounts[0].Plan != "pro" || cleared.Accounts[0].FiveHourCredits != 12_000 || cleared.Accounts[0].WeeklyCredits != 60_000 {
+		t.Fatalf("clear did not preserve base plan through carry-forward: %#v", cleared.Accounts[0])
+	}
+}
+
 func TestManagementAccountConfigPersistenceFailureLeavesRuntimeUnchanged(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("persist-failure"), Name: "account", KeySuffix: "persist", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}

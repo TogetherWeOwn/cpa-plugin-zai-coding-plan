@@ -91,6 +91,39 @@ func TestSettingsRenameSyncFailureIsRecoverablyCommitted(t *testing.T) {
 	}
 }
 
+func TestSettingsRecoveryRollsAcknowledgedUpdateForwardFromPreviousDigest(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	identity := accountIdentity("roll-forward")
+	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
+	if err := store.saveSettings(previous); err != nil {
+		t.Fatal(err)
+	}
+	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
+	recovery := settingsRecovery{Version: settingsRecoveryVersion, PreviousDigest: settingsDigest(previous), Desired: desired}
+	if err := store.writeJSON(settingsRecoveryName, recovery); err != nil {
+		t.Fatal(err)
+	}
+
+	recovered, err := store.recoverSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Accounts[identity].Name != "desired" {
+		t.Fatalf("recovery kept previous settings: %#v", recovered)
+	}
+	loaded, err := store.loadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Accounts[identity].Name != "desired" {
+		t.Fatalf("roll-forward was not persisted: %#v", loaded)
+	}
+}
+
 func TestSecureStoreWriteConfinedDuringDirectoryReplacement(t *testing.T) {
 	root := t.TempDir()
 	store, err := newSecureStore(filepath.Join(root, "auth"))

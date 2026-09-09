@@ -457,6 +457,7 @@ func applySettingToAccount(item *account, setting accountSetting) {
 	}
 	if setting.Plan != "" {
 		item.Plan = setting.Plan
+		item.planExplicit = true
 		if buckets, ok := planBuckets[setting.Plan]; ok {
 			item.FiveHourCredits = buckets.FiveHour
 			item.WeeklyCredits = buckets.Weekly
@@ -467,8 +468,10 @@ func applySettingToAccount(item *account, setting accountSetting) {
 	}
 	if setting.FiveHourCredits > 0 {
 		item.FiveHourCredits = setting.FiveHourCredits
+		item.fiveHourCreditsExplicit = true
 	}
 	if setting.WeeklyCredits > 0 {
 		item.WeeklyCredits = setting.WeeklyCredits
+		item.weeklyCreditsExplicit = true
 	}
 }

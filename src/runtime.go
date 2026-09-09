@@ -224,6 +224,10 @@ func (r *pluginRuntime) validationStatus() string {
 }
 
 func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+
+	now := r.runtimeClock().Now()
 	r.mu.Lock()
 	if r.stopped || r.snapshot == nil {
 		r.mu.Unlock()
@@ -236,7 +240,7 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 	}
 	state := r.snapshot.Quota[identity]
 	if state.CompleteSince.IsZero() {
-		state.CompleteSince = r.runtimeClock().Now()
+		state.CompleteSince = now
 	}
 	if record.Failed && usageDetailEmpty(record.Detail) {
 		state.DeliveryWarning = true
@@ -244,7 +248,16 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 		snapshot := r.persistenceSnapshotLocked()
 		store := r.snapshot.Store
 		r.mu.Unlock()
-		return r.persistState(store, snapshot)
+		return r.persistStateLocked(store, snapshot)
+	}
+	eventAt := usageTimestamp(record, now)
+	if eventAt.After(now.Add(maxPersistedClockSkew)) {
+		state.DeliveryWarning = true
+		r.snapshot.Quota[identity] = state
+		snapshot := r.persistenceSnapshotLocked()
+		store := r.snapshot.Store
+		r.mu.Unlock()
+		return r.persistStateLocked(store, snapshot)
 	}
 	dedupHash := usageDedupHash(record)
 	if state.seenDedup(dedupHash) {
@@ -252,9 +265,9 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 		snapshot := r.persistenceSnapshotLocked()
 		store := r.snapshot.Store
 		r.mu.Unlock()
-		return r.persistState(store, snapshot)
+		return r.persistStateLocked(store, snapshot)
 	}
-	estimate, err := estimateUsageCredits(record, usageTimestamp(record, r.runtimeClock().Now()))
+	estimate, err := estimateUsageCredits(record, eventAt)
 	if err != nil {
 		state.UnknownModelWarning = true
 		state.DeliveryWarning = true
@@ -262,15 +275,15 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 		snapshot := r.persistenceSnapshotLocked()
 		store := r.snapshot.Store
 		r.mu.Unlock()
-		return r.persistState(store, snapshot)
+		return r.persistStateLocked(store, snapshot)
 	}
-	state.addEvent(creditEvent{At: usageTimestamp(record, r.runtimeClock().Now()), Microcredits: estimate.Microcredits, Model: estimate.Model})
-	state.compact(r.runtimeClock().Now(), r.snapshot.Config.StateRetention)
+	state.addEvent(creditEvent{At: eventAt, Microcredits: estimate.Microcredits, Model: estimate.Model})
+	state.compact(now, r.snapshot.Config.StateRetention)
 	r.snapshot.Quota[identity] = state
 	snapshot := r.persistenceSnapshotLocked()
 	store := r.snapshot.Store
 	r.mu.Unlock()
-	return r.persistState(store, snapshot)
+	return r.persistStateLocked(store, snapshot)
 }
 
 func usageDetailEmpty(detail pluginapi.UsageDetail) bool {
@@ -302,6 +315,8 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 func (r *pluginRuntime) commitSnapshotAfter(staged *runtimeSnapshot, beforeCommit func() error) error {
 	r.pollersMu.Lock()
 	defer r.pollersMu.Unlock()
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
@@ -497,6 +512,10 @@ func carryForwardNamedPlans(live, staged *runtimeSnapshot) {
 func (r *pluginRuntime) persistState(store *secureStore, state persistedState) error {
 	r.persistMu.Lock()
 	defer r.persistMu.Unlock()
+	return r.persistStateLocked(store, state)
+}
+
+func (r *pluginRuntime) persistStateLocked(store *secureStore, state persistedState) error {
 	if state.Generation != 0 && state.Generation <= r.persisted.Load() {
 		return nil
 	}

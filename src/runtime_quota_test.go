@@ -154,6 +154,32 @@ func TestUsageHandleAcknowledgesLossyPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestRuntimeFutureUsageIsQuarantinedWithoutPoisoningPersistence(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("future-usage"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, ClaudeAuthID: "auth"}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	future := pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now.Add(maxPersistedClockSkew + time.Second), Detail: pluginapi.UsageDetail{InputTokens: 1}}
+	if err := runtime.handleUsage(future); err != nil {
+		t.Fatal(err)
+	}
+	view, _ := runtime.quotaView(item.Identity)
+	if view.FiveHour.ConsumedMicrocredits != 0 || !view.DeliveryWarning {
+		t.Fatalf("future usage was admitted live: %#v", view)
+	}
+	valid := pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now, Detail: pluginapi.UsageDetail{InputTokens: 1}}
+	if err := runtime.handleUsage(valid); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := runtime.snapshot.Store.loadStateAt(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := persisted.Accounts[item.Identity]
+	if len(state.Events) != 1 || state.Events[0].At != now || !state.DeliveryWarning {
+		t.Fatalf("valid usage did not persist after quarantine: %#v", state)
+	}
+}
+
 func TestRuntimePersistenceFailureDoesNotMarkReplacementGeneration(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	first := account{Identity: accountIdentity("persist-first"), Name: "first", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
@@ -243,6 +269,63 @@ func TestRuntimeShutdownPersistsWarningAfterAdmittedUsageFailure(t *testing.T) {
 	state := persisted.Accounts[item.Identity]
 	if !state.PersistenceWarning || !state.DeliveryWarning {
 		t.Fatalf("shutdown overwrote warning-bearing state: %#v", state)
+	}
+}
+
+func TestRuntimeDifferentStoreReconfigureWaitsForAdmittedUsage(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("store-handoff"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, ClaudeAuthID: "auth"}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	oldStore := runtime.snapshot.Store
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime.persistWrite = func(store *secureStore, state persistedState) error {
+		if store == oldStore {
+			close(started)
+			<-release
+		}
+		return store.saveState(state)
+	}
+	usageDone := make(chan error, 1)
+	go func() {
+		usageDone <- runtime.handleUsage(pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now, Detail: pluginapi.UsageDetail{InputTokens: 1}})
+	}()
+	<-started
+	replacementStore, err := newSecureStore(filepath.Join(t.TempDir(), "replacement-auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staged := cloneRuntimeSnapshot(runtime.snapshot)
+	staged.Store = replacementStore
+	commitDone := make(chan error, 1)
+	go func() { commitDone <- runtime.commitSnapshot(staged) }()
+	select {
+	case err := <-commitDone:
+		t.Fatalf("reconfigure completed before admitted usage persisted: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-usageDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-commitDone; err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := oldStore.loadStateAt(now)
+	if err == nil || !strings.Contains(err.Error(), "not initialized") {
+		t.Fatalf("superseded store remained open: state=%#v err=%v", persisted, err)
+	}
+	reloadedStore, err := newSecureStore(filepath.Dir(oldStore.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reloadedStore.close() }()
+	persisted, err = reloadedStore.loadStateAt(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(persisted.Accounts[item.Identity].Events) != 1 {
+		t.Fatalf("admitted usage was lost during store handoff: %#v", persisted)
 	}
 }
 

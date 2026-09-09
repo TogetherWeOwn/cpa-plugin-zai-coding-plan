@@ -181,8 +181,11 @@ func (s *secureStore) recoverSettings() (settingsFile, error) {
 	desiredDigest := settingsDigest(recovery.Desired)
 	switch currentDigest {
 	case recovery.PreviousDigest:
+		if err := s.writeJSON("settings.json", recovery.Desired); err != nil && writeErrorOutcome(err) != writeNeedsRecovery {
+			return settingsFile{}, fmt.Errorf("roll forward settings recovery: %w", err)
+		}
 		_ = s.removeJSON(settingsRecoveryName)
-		return settings, nil
+		return recovery.Desired, nil
 	case desiredDigest:
 		_ = s.removeJSON(settingsRecoveryName)
 		return recovery.Desired, nil
