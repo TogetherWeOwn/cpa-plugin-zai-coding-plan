@@ -95,7 +95,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 			raw = errorEnvelope("invalid_request", "request body is invalid")
 			break
 		}
-		if errConfig := runtimeState.reconfigure(lifecycle.ConfigYAML); errConfig != nil && !runtimeState.hasSnapshot() {
+		if errConfig := runtimeState.reconfigure(lifecycle.ConfigYAML); errConfig != nil {
 			raw = errorEnvelope("invalid_config", runtimeState.validationStatus())
 			break
 		}
