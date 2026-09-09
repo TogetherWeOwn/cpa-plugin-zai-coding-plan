@@ -37,7 +37,10 @@ type runtimeSnapshot struct {
 	Accounts   []account
 	Store      *secureStore
 	Quota      map[string]accountQuotaState
+	Health     map[string]accountHealthState
+	Routing    routingState
 	byAuthID   map[string]string
+	byIdentity map[string]account
 	Generation uint64
 }
 
@@ -58,6 +61,7 @@ type pluginRuntime struct {
 	persistMu    sync.Mutex
 	persistNext  atomic.Uint64
 	persisted    atomic.Uint64
+	now          func() time.Time
 }
 
 func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
@@ -114,7 +118,9 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	// it was durably saved) or lands in the new snapshot after the swap —
 	// never silently dropped by an overwrite.
 	quota := make(map[string]accountQuotaState, len(accounts))
+	health := make(map[string]accountHealthState, len(accounts))
 	byAuthID := make(map[string]string, len(accounts)*2)
+	byIdentity := make(map[string]account, len(accounts))
 	for i := range accounts {
 		state := persisted.Accounts[accounts[i].Identity]
 		if state.CompleteSince.IsZero() {
@@ -122,13 +128,18 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 		}
 		state.compact(r.runtimeClock().Now(), cfg.StateRetention)
 		quota[accounts[i].Identity] = state
+		health[accounts[i].Identity] = accountHealthState{}
 		if state.Authoritative != nil {
 			syncPlanFromUpstream(accounts, accounts[i].Identity, state.Authoritative.Plan)
 		}
 		byAuthID[accounts[i].ClaudeAuthID] = accounts[i].Identity
 		byAuthID[accounts[i].OpenAIAuthID] = accounts[i].Identity
+		byIdentity[accounts[i].Identity] = accounts[i]
 	}
-	staged := &runtimeSnapshot{Config: cfg, Accounts: accounts, Store: store, Quota: quota, byAuthID: byAuthID}
+	staged := &runtimeSnapshot{
+		Config: cfg, Accounts: accounts, Store: store, Quota: quota, Health: health,
+		byAuthID: byAuthID, byIdentity: byIdentity,
+	}
 	return r.commitSnapshot(staged)
 }
 
@@ -168,6 +179,18 @@ func cloneRuntimeSnapshot(source *runtimeSnapshot) *runtimeSnapshot {
 	for authID, identity := range source.byAuthID {
 		copySnapshot.byAuthID[authID] = identity
 	}
+	copySnapshot.byIdentity = make(map[string]account, len(source.byIdentity))
+	for identity, item := range source.byIdentity {
+		copySnapshot.byIdentity[identity] = item
+	}
+	copySnapshot.Health = make(map[string]accountHealthState, len(source.Health))
+	for identity, state := range source.Health {
+		copySnapshot.Health[identity] = state
+	}
+	copySnapshot.Routing = routingState{cursors: make(map[string]uint64, len(source.Routing.cursors))}
+	for scope, cursor := range source.Routing.cursors {
+		copySnapshot.Routing.cursors[scope] = cursor
+	}
 	copySnapshot.Quota = make(map[string]accountQuotaState, len(source.Quota))
 	for identity, state := range source.Quota {
 		state.Events = append([]creditEvent(nil), state.Events...)
@@ -201,6 +224,9 @@ func (r *pluginRuntime) validationStatus() string {
 }
 
 func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
+	now := r.runtimeNow()
+	resetAt, resetReason, hasResetHint := parseRateLimitHint(record, now)
+
 	r.mu.Lock()
 	if r.stopped || r.snapshot == nil {
 		r.mu.Unlock()
@@ -211,12 +237,26 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 	// race an Add from zero.
 	r.usage.Add(1)
 	defer r.usage.Done()
-	identity := r.snapshot.byAuthID[record.AuthID]
+	identity := r.snapshot.byAuthID[strings.TrimSpace(record.AuthID)]
 	if identity == "" {
 		r.mu.Unlock()
 		return nil
 	}
-	now := r.runtimeClock().Now()
+
+	health := r.snapshot.Health[identity]
+	if record.Failed {
+		switch record.Failure.StatusCode {
+		case 401, 403:
+			health.suspendUntil(now.Add(r.snapshot.Config.SuspendDuration))
+		case 429:
+			if !hasResetHint {
+				resetAt, resetReason = rateLimitReset(now, health, r.snapshot.Config.FallbackCooldown)
+			}
+			health.exhaustUntil(resetAt, resetReason)
+		}
+		r.snapshot.Health[identity] = health
+	}
+
 	state := r.snapshot.Quota[identity]
 	if state.CompleteSince.IsZero() {
 		state.CompleteSince = now
@@ -238,6 +278,46 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 	store := r.snapshot.Store
 	r.mu.Unlock()
 	return r.persistState(store, persisted)
+}
+
+// updateCapacity is the in-memory adapter used by quota polling. Results are
+// generation-bound so a late poll cannot mutate a replacement snapshot.
+func (r *pluginRuntime) updateCapacity(generation uint64, identity string, update capacityUpdate) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopped || r.snapshot == nil || r.snapshot.Generation != generation {
+		return false
+	}
+	state, exists := r.snapshot.Health[identity]
+	if !exists {
+		return false
+	}
+	state.CapacityExhausted = update.Exhausted
+	state.CapacityResetAt = update.ResetAt.UTC()
+	state.CapacitySource = boundedHealthReason(update.Source)
+	r.snapshot.Health[identity] = state
+	return true
+}
+
+func (r *pluginRuntime) health(identity string) (accountHealth, bool) {
+	now := r.runtimeNow()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.snapshot == nil {
+		return accountHealth{}, false
+	}
+	state, exists := r.snapshot.Health[identity]
+	if !exists {
+		return accountHealth{}, false
+	}
+	return state.assess(r.snapshot.byIdentity[identity], now), true
+}
+
+func (r *pluginRuntime) runtimeNow() time.Time {
+	if r.now != nil {
+		return r.now().UTC()
+	}
+	return r.runtimeClock().Now()
 }
 
 func usageDetailEmpty(detail pluginapi.UsageDetail) bool {
@@ -285,11 +365,18 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 					staged.Quota[identity] = state
 				}
 			}
+			for identity, state := range r.snapshot.Health {
+				if _, exists := staged.Health[identity]; exists {
+					staged.Health[identity] = state
+				}
+			}
 			carryForwardNamedPlans(r.snapshot, staged)
 		}
 	} else {
 		staged.Generation = 1
 	}
+	staged.Routing = routingState{}
+	staged.Routing.initialize()
 	r.cancel = cancel
 	r.snapshot = staged
 	r.lastErr = nil
@@ -367,6 +454,18 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, generation uint64, identit
 		syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan)
 	}
 	r.snapshot.Quota[identity] = state
+	view := state.view(now, accountByIdentity(r.snapshot.Accounts, identity), r.snapshot.Config)
+	health := r.snapshot.Health[identity]
+	health.CapacityExhausted = atOrAboveThreshold(view.FiveHour.ConsumedMicrocredits, view.FiveHour.BucketMicrocredits, r.snapshot.Config.ThresholdPercent) ||
+		atOrAboveThreshold(view.Weekly.ConsumedMicrocredits, view.Weekly.BucketMicrocredits, r.snapshot.Config.ThresholdPercent)
+	if health.CapacityExhausted {
+		health.CapacityResetAt = earliestReset(view.FiveHour.ResetsAt, view.Weekly.ResetsAt)
+		health.CapacitySource = view.Source + " quota threshold"
+	} else {
+		health.CapacityResetAt = time.Time{}
+		health.CapacitySource = view.Source
+	}
+	r.snapshot.Health[identity] = health
 	persisted := r.persistenceSnapshotLocked()
 	store := r.snapshot.Store
 	r.mu.Unlock()
@@ -573,6 +672,16 @@ func maxInt64(left, right int64) int64 {
 		return left
 	}
 	return right
+}
+
+func earliestReset(left, right time.Time) time.Time {
+	if left.IsZero() {
+		return right.UTC()
+	}
+	if right.IsZero() || left.Before(right) {
+		return left.UTC()
+	}
+	return right.UTC()
 }
 
 func (r *pluginRuntime) runtimeClock() clock {

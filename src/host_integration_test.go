@@ -187,7 +187,7 @@ func TestHostRegistersPlugin(t *testing.T) {
 		Dir:     filepath.Join(root, "plugins"),
 		AuthDir: authDir,
 		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled, Raw: *configNode.Content[0]},
+			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: *configNode.Content[0]},
 		},
 	})
 	defer host.ShutdownAll()
@@ -210,14 +210,22 @@ func TestHostRegistersPlugin(t *testing.T) {
 		t.Fatalf("plugin %s absent from host registration snapshot; plugins = %#v", pluginID, registered)
 	}
 
-	// The scheduler capability must decline rather than select, so the
-	// host's native scheduler stays in control (docs/ARCHITECTURE.md).
-	resp, handled, errPick := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{})
+	// Healthy managed traffic explicitly delegates to the native round-robin
+	// scheduler; returning unhandled would permit an accidental fallback path.
+	cpa, err := loadCPAConfig(cpaConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := discoverAccounts(cpa, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, handled, errPick := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: accounts[0].ClaudeAuthID}}})
 	if errPick != nil {
 		t.Fatalf("PickAuth() error = %v", errPick)
 	}
-	if handled {
-		t.Fatalf("PickAuth() handled = true, want scaffold scheduler to decline: %#v", resp)
+	if !handled || !resp.Handled || resp.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+		t.Fatalf("PickAuth() = %#v, handled %v, want explicit round-robin delegation", resp, handled)
 	}
 
 	if !host.HasScheduler() {
@@ -252,6 +260,59 @@ func buildTestPlugin(t *testing.T) (string, error) {
 		return "", err
 	}
 	return out, nil
+}
+
+func TestHostPropagatesAllImpairedSchedulerError(t *testing.T) {
+	binary, err := buildTestPlugin(t)
+	if err != nil {
+		t.Fatalf("build plugin: %v", err)
+	}
+	client, err := abiclient.Open(binary)
+	if err != nil {
+		t.Fatalf("open plugin: %v", err)
+	}
+	defer client.Close()
+
+	root := t.TempDir()
+	cpaConfigPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, cpaConfigPath, filepath.Join(root, "auth"), fixtureKey)
+	registerRequest, err := json.Marshal(map[string]any{"config_yaml": []byte("cpa-config-path: " + cpaConfigPath + "\ndefault-plan: pro\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Call(pluginabi.MethodPluginRegister, registerRequest); err != nil {
+		t.Fatal(err)
+	}
+	cpa, err := loadCPAConfig(cpaConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := discoverAccounts(cpa, pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := json.Marshal(pluginapi.UsageRecord{AuthID: accounts[0].OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = client.Call(pluginabi.MethodUsageHandle, usage); err != nil {
+		t.Fatal(err)
+	}
+	pick, err := json.Marshal(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: accounts[0].ClaudeAuthID}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, callErr := client.Call(pluginabi.MethodSchedulerPick, pick)
+	if callErr == nil {
+		t.Fatal("all-impaired scheduler call succeeded")
+	}
+	var result envelope
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Error == nil || result.Error.Code != "zai_no_capacity" || result.Error.Retryable {
+		t.Fatalf("scheduler error envelope = %#v", result.Error)
+	}
 }
 
 func TestInvalidReconfigureRetainsHostRegistration(t *testing.T) {

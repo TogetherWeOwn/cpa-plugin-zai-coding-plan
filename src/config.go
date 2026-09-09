@@ -14,6 +14,7 @@ import (
 
 const (
 	defaultCPAConfigPath       = "config.yaml"
+	requiredPluginPriority     = 1000
 	defaultQuotaRefresh        = 2 * time.Minute
 	defaultAuthoritativeMaxAge = 5 * time.Minute
 	defaultThreshold           = 97

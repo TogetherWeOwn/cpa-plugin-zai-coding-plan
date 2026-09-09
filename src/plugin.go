@@ -100,12 +100,19 @@ type managementRoute struct {
 	Description string `json:"description,omitempty"`
 }
 
-// schedulerPick always declines in the scaffold. A Handled=false response
-// makes the host fall back to its native scheduler, matching the
-// architecture contract: CPA's native scheduling stays in control while
-// all accounts are healthy.
-func schedulerPick(_ []byte) ([]byte, error) {
-	return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
+// schedulerPick explicitly delegates healthy traffic to CPA's built-in
+// round-robin scheduler and takes over only while managed accounts are
+// impaired. A hard scheduler error prevents fallback to known-bad capacity.
+func schedulerPick(request []byte) ([]byte, error) {
+	var pick pluginapi.SchedulerPickRequest
+	if err := json.Unmarshal(request, &pick); err != nil {
+		return nil, fmt.Errorf("decode scheduler request")
+	}
+	response, err := runtimeState.pick(pick)
+	if err != nil {
+		return nil, err
+	}
+	return okEnvelope(response)
 }
 
 // usageHandle consumes a lossy best-effort usage observation. Persistence

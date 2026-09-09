@@ -121,7 +121,7 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 		raw = errorEnvelope("unknown_method", "method is not implemented by this plugin")
 	}
 	if err != nil {
-		writeResponse(response, errorEnvelope("plugin_error", err.Error()))
+		writeResponse(response, errorEnvelopeFor(err))
 		return 1
 	}
 	writeResponse(response, raw)

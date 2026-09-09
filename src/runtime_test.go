@@ -112,6 +112,12 @@ func TestRuntimeShutdownStopsReconfigure(t *testing.T) {
 func writeCPAConfigFixture(t *testing.T, path, authDir, key string) {
 	t.Helper()
 	raw := "auth-dir: " + authDir + "\n" +
+		"plugins:\n" +
+		"  enabled: true\n" +
+		"  configs:\n" +
+		"    zai-coding-plan:\n" +
+		"      enabled: true\n" +
+		"      priority: 1000\n" +
 		"claude-api-key:\n" +
 		"  - api-key: " + key + "\n" +
 		"    base-url: " + zaiAnthropicBaseURL + "\n" +
