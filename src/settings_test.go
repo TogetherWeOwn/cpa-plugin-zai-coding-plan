@@ -177,6 +177,11 @@ func TestPersistedStateValidation(t *testing.T) {
 		{name: "unsupported version", state: persistedState{Version: 999}},
 		{name: "invalid identity", state: persistedState{Version: 1, Accounts: map[string]accountQuotaState{"not-an-identity": {}}}},
 		{name: "invalid body", state: persistedState{Version: 1, Accounts: map[string]accountQuotaState{identity: {ConsecutiveFailures: -1}}}},
+		{name: "legacy health data", state: persistedState{Version: 1, Health: map[string]persistedHealthState{identity: {SuspendedUntil: time.Now().UTC()}}}},
+		{name: "invalid health identity", state: persistedState{Version: persistedStateVersion, Health: map[string]persistedHealthState{"not-an-identity": {SuspendedUntil: time.Now().UTC()}}}},
+		{name: "invalid health reset", state: persistedState{Version: persistedStateVersion, Health: map[string]persistedHealthState{identity: {SuspendedUntil: time.Date(25000, 1, 1, 0, 0, 0, 0, time.UTC)}}}},
+		{name: "invalid health reason", state: persistedState{Version: persistedStateVersion, Health: map[string]persistedHealthState{identity: {ExhaustedUntil: time.Now().Add(time.Hour), ExhaustedReason: strings.Repeat("x", 97)}}}},
+		{name: "missing health reason", state: persistedState{Version: persistedStateVersion, Health: map[string]persistedHealthState{identity: {ExhaustedUntil: time.Now().Add(time.Hour)}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

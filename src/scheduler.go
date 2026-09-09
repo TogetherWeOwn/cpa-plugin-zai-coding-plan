@@ -88,7 +88,7 @@ func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Sche
 			continue
 		}
 		managedCount++
-		if r.snapshot.Health[identity].assess(r.snapshot.byIdentity[identity], now).Status != healthHealthy {
+		if r.refreshCapacityLocked(identity, now).assess(r.snapshot.byIdentity[identity], now).Status != healthHealthy {
 			impairedCount++
 		}
 	}

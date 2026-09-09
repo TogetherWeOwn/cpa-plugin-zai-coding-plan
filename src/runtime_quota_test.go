@@ -217,22 +217,15 @@ func quotaTestRuntime(t *testing.T, now time.Time, accounts []account) *pluginRu
 		t.Fatal(err)
 	}
 	quota := make(map[string]accountQuotaState, len(accounts))
-	byAuthID := make(map[string]string, len(accounts)*2)
 	for _, item := range accounts {
 		quota[item.Identity] = accountQuotaState{CompleteSince: now}
-		byAuthID[item.ClaudeAuthID] = item.Identity
-		byAuthID[item.OpenAIAuthID] = item.Identity
 	}
-	return &pluginRuntime{
-		clock: &fakeClock{now: now},
-		snapshot: &runtimeSnapshot{
-			Config:   pluginConfig{QuotaRefresh: 2 * time.Minute, AuthoritativeMaxAge: 5 * time.Minute, ThresholdPercent: 97, StateRetention: 8 * 24 * time.Hour},
-			Accounts: accounts,
-			Store:    store,
-			Quota:    quota,
-			byAuthID: byAuthID,
-		},
-	}
+	snapshot := newRuntimeSnapshot(pluginConfig{
+		QuotaRefresh: 2 * time.Minute, AuthoritativeMaxAge: 5 * time.Minute,
+		ThresholdPercent: 97, StateRetention: 8 * 24 * time.Hour,
+	}, accounts, store)
+	snapshot.Quota = quota
+	return &pluginRuntime{clock: &fakeClock{now: now}, snapshot: snapshot}
 }
 
 func TestUsageArrivingOutOfOrderStaysPersistable(t *testing.T) {

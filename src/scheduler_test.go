@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -224,6 +225,74 @@ func TestSchedulerPickNeverCallsExternalDependencies(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("scheduler critical section blocked on an external dependency")
 	}
+}
+
+func TestUsageCrossingQuotaThresholdImmediatelyBlocksScheduler(t *testing.T) {
+	now := schedulerNow
+	item := schedulerAccount("one", "claude-one", "openai-one")
+	item.FiveHourCredits = 1
+	item.WeeklyCredits = 100
+	runtime := quotaTestRuntime(t, now, []account{item})
+	current := now
+	runtime.now = func() time.Time { return current }
+
+	if err := runtime.handleUsage(pluginapi.UsageRecord{
+		AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now,
+		Detail: pluginapi.UsageDetail{InputTokens: 4_000},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response, err := runtime.pick(schedulerRequest(item.ClaudeAuthID, item.OpenAIAuthID))
+	if response.Handled {
+		t.Fatalf("hard error returned handled response: %#v", response)
+	}
+	assertSchedulerError(t, err, "zai_no_capacity")
+
+	current = now.Add(fiveHourWindow + time.Second)
+	response, err = runtime.pick(schedulerRequest(item.ClaudeAuthID, item.OpenAIAuthID))
+	if err != nil || !response.Handled || response.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+		t.Fatalf("recovered response = %#v, err = %v", response, err)
+	}
+}
+
+func TestFailureHealthPersistsAcrossReconfigure(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, configPath, authDir, fixtureKey)
+	rawConfig := []byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")
+
+	first := &pluginRuntime{now: func() time.Time { return schedulerNow }}
+	if err := first.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	account := first.snapshot.Accounts[0]
+	if err := first.handleUsage(pluginapi.UsageRecord{AuthID: account.OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}}); err != nil {
+		t.Fatal(err)
+	}
+
+	second := &pluginRuntime{now: func() time.Time { return schedulerNow }}
+	if err := second.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	for _, authID := range []string{account.ClaudeAuthID, account.OpenAIAuthID} {
+		_, err := second.pick(schedulerRequest(authID))
+		assertSchedulerError(t, err, "zai_no_capacity")
+	}
+}
+
+func TestManagementHealthMatchesSchedulerHealth(t *testing.T) {
+	account := schedulerAccount("one", "claude-one", "openai-one")
+	runtime := schedulerTestRuntime(schedulerNow, account)
+	if err := runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusForbidden}}); err != nil {
+		t.Fatal(err)
+	}
+	status := runtime.managementStatus("registered")
+	if len(status.Accounts) != 1 || status.Accounts[0].Health != healthSuspended {
+		t.Fatalf("management health = %#v, want suspended", status.Accounts)
+	}
+	_, err := runtime.pick(schedulerRequest(account.OpenAIAuthID))
+	assertSchedulerError(t, err, "zai_no_capacity")
 }
 
 func TestValidateSchedulerDeploymentFailsClosed(t *testing.T) {

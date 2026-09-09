@@ -87,6 +87,9 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 		return r.recordError(err)
 	}
 	providerKeys := cpaProviderKeys(cpa)
+	if err = validateSchedulerDeployment(cpa.Plugins); err != nil {
+		return r.recordError(err, providerKeys...)
+	}
 	authDir, err := resolveAuthDir(cpa.AuthDir)
 	if err != nil {
 		return r.recordError(err, providerKeys...)
@@ -117,6 +120,7 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	// in the old snapshot first (and is re-read from persisted state only if
 	// it was durably saved) or lands in the new snapshot after the swap —
 	// never silently dropped by an overwrite.
+	now := r.runtimeNow()
 	quota := make(map[string]accountQuotaState, len(accounts))
 	health := make(map[string]accountHealthState, len(accounts))
 	byAuthID := make(map[string]string, len(accounts)*2)
@@ -124,14 +128,15 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	for i := range accounts {
 		state := persisted.Accounts[accounts[i].Identity]
 		if state.CompleteSince.IsZero() {
-			state.CompleteSince = r.runtimeClock().Now()
+			state.CompleteSince = now
 		}
-		state.compact(r.runtimeClock().Now(), cfg.StateRetention)
+		state.compact(now, cfg.StateRetention)
 		quota[accounts[i].Identity] = state
-		health[accounts[i].Identity] = accountHealthState{}
 		if state.Authoritative != nil {
 			syncPlanFromUpstream(accounts, accounts[i].Identity, state.Authoritative.Plan)
 		}
+		healthState := restorePersistedHealth(persisted.Health[accounts[i].Identity], now)
+		health[accounts[i].Identity] = quotaCapacityHealth(healthState, state.view(now, accounts[i], cfg), cfg.ThresholdPercent)
 		byAuthID[accounts[i].ClaudeAuthID] = accounts[i].Identity
 		byAuthID[accounts[i].OpenAIAuthID] = accounts[i].Identity
 		byIdentity[accounts[i].Identity] = accounts[i]
@@ -281,6 +286,7 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 		state.compact(now, r.snapshot.Config.StateRetention)
 	}
 	r.snapshot.Quota[identity] = state
+	r.refreshCapacityLocked(identity, now)
 	persisted := r.persistenceSnapshotLocked()
 	store := r.snapshot.Store
 	r.mu.Unlock()
@@ -306,17 +312,29 @@ func (r *pluginRuntime) updateCapacity(generation uint64, identity string, updat
 	return true
 }
 
+func (r *pluginRuntime) refreshCapacityLocked(identity string, now time.Time) accountHealthState {
+	state := r.snapshot.Health[identity]
+	quota, exists := r.snapshot.Quota[identity]
+	item, managed := r.snapshot.byIdentity[identity]
+	if !exists || !managed {
+		return state
+	}
+	state = quotaCapacityHealth(state, quota.view(now, item, r.snapshot.Config), r.snapshot.Config.ThresholdPercent)
+	r.snapshot.Health[identity] = state
+	return state
+}
+
 func (r *pluginRuntime) health(identity string) (accountHealth, bool) {
 	now := r.runtimeNow()
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.snapshot == nil {
 		return accountHealth{}, false
 	}
-	state, exists := r.snapshot.Health[identity]
-	if !exists {
+	if _, exists := r.snapshot.Health[identity]; !exists {
 		return accountHealth{}, false
 	}
+	state := r.refreshCapacityLocked(identity, now)
 	return state.assess(r.snapshot.byIdentity[identity], now), true
 }
 
@@ -324,7 +342,7 @@ func (r *pluginRuntime) runtimeNow() time.Time {
 	if r.now != nil {
 		return r.now().UTC()
 	}
-	return r.runtimeClock().Now()
+	return r.runtimeClock().Now().UTC()
 }
 
 func usageDetailEmpty(detail pluginapi.UsageDetail) bool {
@@ -461,21 +479,7 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, generation uint64, identit
 		syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan)
 	}
 	r.snapshot.Quota[identity] = state
-	view := state.view(now, accountByIdentity(r.snapshot.Accounts, identity), r.snapshot.Config)
-	if r.snapshot.Health == nil {
-		r.snapshot.Health = make(map[string]accountHealthState)
-	}
-	health := r.snapshot.Health[identity]
-	health.CapacityExhausted = atOrAboveThreshold(view.FiveHour.ConsumedMicrocredits, view.FiveHour.BucketMicrocredits, r.snapshot.Config.ThresholdPercent) ||
-		atOrAboveThreshold(view.Weekly.ConsumedMicrocredits, view.Weekly.BucketMicrocredits, r.snapshot.Config.ThresholdPercent)
-	if health.CapacityExhausted {
-		health.CapacityResetAt = earliestReset(view.FiveHour.ResetsAt, view.Weekly.ResetsAt)
-		health.CapacitySource = view.Source + " quota threshold"
-	} else {
-		health.CapacityResetAt = time.Time{}
-		health.CapacitySource = view.Source
-	}
-	r.snapshot.Health[identity] = health
+	r.refreshCapacityLocked(identity, now)
 	persisted := r.persistenceSnapshotLocked()
 	store := r.snapshot.Store
 	r.mu.Unlock()
@@ -575,7 +579,10 @@ func (r *pluginRuntime) persistState(store *secureStore, state persistedState) e
 }
 
 func (r *pluginRuntime) persistenceSnapshotLocked() persistedState {
-	state := persistedState{Version: 1, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota)), Generation: r.persistNext.Add(1)}
+	state := persistedState{
+		Version: persistedStateVersion, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota)),
+		Health: make(map[string]persistedHealthState, len(r.snapshot.Health)), Generation: r.persistNext.Add(1),
+	}
 	for identity, accountState := range r.snapshot.Quota {
 		accountState.Events = append([]creditEvent(nil), accountState.Events...)
 		accountState.DedupHashes = append([]string(nil), accountState.DedupHashes...)
@@ -584,6 +591,12 @@ func (r *pluginRuntime) persistenceSnapshotLocked() persistedState {
 			accountState.Authoritative = &copyQuota
 		}
 		state.Accounts[identity] = accountState
+	}
+	now := r.runtimeNow()
+	for identity, health := range r.snapshot.Health {
+		if persisted, active := health.persisted(now); active {
+			state.Health[identity] = persisted
+		}
 	}
 	return state
 }
@@ -611,8 +624,8 @@ func (r *pluginRuntime) quotaView(identity string) (accountQuotaView, bool) {
 }
 
 func (r *pluginRuntime) managementStatus(status string) managementStatusBody {
-	now := r.runtimeClock().Now()
-	r.mu.RLock()
+	now := r.runtimeNow()
+	r.mu.Lock()
 	validationError := ""
 	if r.lastErr != nil {
 		validationError = boundedStatus(r.lastErr.Error())
@@ -624,13 +637,14 @@ func (r *pluginRuntime) managementStatus(status string) managementStatusBody {
 		GeneratedAt:     now,
 		ValidationError: validationError,
 	}
-	defer r.mu.RUnlock()
+	defer r.mu.Unlock()
 	if r.snapshot == nil {
 		return result
 	}
 	result.Accounts = make([]managementAccountStatus, 0, len(r.snapshot.Accounts))
 	for _, item := range r.snapshot.Accounts {
 		view := r.snapshot.Quota[item.Identity].view(now, item, r.snapshot.Config)
+		health := r.refreshCapacityLocked(item.Identity, now)
 		accountStatus := managementAccountStatus{
 			Name:                   item.Name,
 			KeySuffix:              item.KeySuffix,
@@ -644,7 +658,7 @@ func (r *pluginRuntime) managementStatus(status string) managementStatusBody {
 			QuotaStale:             view.Stale,
 			QuotaError:             view.Warning,
 			Offpeak:                isOffpeak(now),
-			Health:                 quotaHealth(item, view, r.snapshot.Config.ThresholdPercent),
+			Health:                 health.assess(item, now).Status,
 			EstimatorCompleteSince: view.CompleteSince,
 			DeliveryWarning:        view.DeliveryWarning,
 			PersistenceWarning:     view.PersistenceWarning,
@@ -665,16 +679,6 @@ func utilization(window quotaWindow) float64 {
 		return 1
 	}
 	return float64(window.ConsumedMicrocredits) / float64(window.BucketMicrocredits)
-}
-
-func quotaHealth(item account, view accountQuotaView, threshold int) string {
-	if item.Disabled {
-		return "disabled"
-	}
-	if atOrAboveThreshold(view.FiveHour.ConsumedMicrocredits, view.FiveHour.BucketMicrocredits, threshold) || atOrAboveThreshold(view.Weekly.ConsumedMicrocredits, view.Weekly.BucketMicrocredits, threshold) {
-		return "exhausted"
-	}
-	return "healthy"
 }
 
 func maxInt64(left, right int64) int64 {
