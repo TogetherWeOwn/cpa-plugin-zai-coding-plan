@@ -1,16 +1,44 @@
 package main
 
 import (
+	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+type clock interface {
+	Now() time.Time
+	Sleep(context.Context, time.Duration) error
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now().UTC() }
+func (realClock) Sleep(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 type runtimeSnapshot struct {
-	Config   pluginConfig
-	Accounts []account
-	Store    *secureStore
+	Config     pluginConfig
+	Accounts   []account
+	Store      *secureStore
+	Quota      map[string]accountQuotaState
+	byAuthID   map[string]string
+	Generation uint64
 }
 
 type pluginRuntime struct {
@@ -19,6 +47,17 @@ type pluginRuntime struct {
 	lastErr      error
 	stopped      bool
 	reconfigures sync.WaitGroup
+	workers      sync.WaitGroup
+	usage        sync.WaitGroup
+	cancel       context.CancelFunc
+	clock        clock
+	httpClient   httpDoer
+	endpoint     string
+	persist      func(*secureStore, persistedState) error
+	pollersMu    sync.Mutex
+	persistMu    sync.Mutex
+	persistNext  atomic.Uint64
+	persisted    atomic.Uint64
 }
 
 func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
@@ -63,20 +102,34 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	if err = applyStoredSettings(accounts, settings); err != nil {
 		return r.recordError(err, providerKeys...)
 	}
-	if _, err = store.loadState(); err != nil {
+	persisted, err := store.loadState()
+	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
 
-	staged := &runtimeSnapshot{Config: cfg, Accounts: accounts, Store: store}
-	r.mu.Lock()
-	if r.stopped {
-		r.mu.Unlock()
-		return fmt.Errorf("plugin is shutting down")
+	// Build the staged quota view before taking the publish lock. The swap
+	// below runs under r.mu, and handleUsage serializes on the same mutex
+	// with a generation check, so usage accepted while staging either lands
+	// in the old snapshot first (and is re-read from persisted state only if
+	// it was durably saved) or lands in the new snapshot after the swap —
+	// never silently dropped by an overwrite.
+	quota := make(map[string]accountQuotaState, len(accounts))
+	byAuthID := make(map[string]string, len(accounts)*2)
+	for i := range accounts {
+		state := persisted.Accounts[accounts[i].Identity]
+		if state.CompleteSince.IsZero() {
+			state.CompleteSince = r.runtimeClock().Now()
+		}
+		state.compact(r.runtimeClock().Now(), cfg.StateRetention)
+		quota[accounts[i].Identity] = state
+		if state.Authoritative != nil {
+			syncPlanFromUpstream(accounts, accounts[i].Identity, state.Authoritative.Plan)
+		}
+		byAuthID[accounts[i].ClaudeAuthID] = accounts[i].Identity
+		byAuthID[accounts[i].OpenAIAuthID] = accounts[i].Identity
 	}
-	r.snapshot = staged
-	r.lastErr = nil
-	r.mu.Unlock()
-	return nil
+	staged := &runtimeSnapshot{Config: cfg, Accounts: accounts, Store: store, Quota: quota, byAuthID: byAuthID}
+	return r.commitSnapshot(staged)
 }
 
 func (r *pluginRuntime) recordError(err error, secrets ...string) error {
@@ -101,9 +154,31 @@ func (r *pluginRuntime) current() (*runtimeSnapshot, error) {
 		}
 		return nil, fmt.Errorf("plugin is not configured")
 	}
-	copySnapshot := *r.snapshot
-	copySnapshot.Accounts = append([]account(nil), r.snapshot.Accounts...)
-	return &copySnapshot, nil
+	return cloneRuntimeSnapshot(r.snapshot), nil
+}
+
+func sameSecureStore(left, right *secureStore) bool {
+	return left != nil && right != nil && left.dir == right.dir
+}
+
+func cloneRuntimeSnapshot(source *runtimeSnapshot) *runtimeSnapshot {
+	copySnapshot := *source
+	copySnapshot.Accounts = append([]account(nil), source.Accounts...)
+	copySnapshot.byAuthID = make(map[string]string, len(source.byAuthID))
+	for authID, identity := range source.byAuthID {
+		copySnapshot.byAuthID[authID] = identity
+	}
+	copySnapshot.Quota = make(map[string]accountQuotaState, len(source.Quota))
+	for identity, state := range source.Quota {
+		state.Events = append([]creditEvent(nil), state.Events...)
+		state.DedupHashes = append([]string(nil), state.DedupHashes...)
+		if state.Authoritative != nil {
+			copyQuota := *state.Authoritative
+			state.Authoritative = &copyQuota
+		}
+		copySnapshot.Quota[identity] = state
+	}
+	return &copySnapshot
 }
 
 // hasSnapshot is called from the linux/cgo ABI boundary, which is excluded
@@ -125,6 +200,402 @@ func (r *pluginRuntime) validationStatus() string {
 	return boundedStatus(r.lastErr.Error())
 }
 
+func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
+	r.mu.Lock()
+	if r.stopped || r.snapshot == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("plugin is not configured")
+	}
+	// Add while holding the same lock shutdown uses to close admission. Once
+	// stopped is set no new handler can increment this group, so Wait cannot
+	// race an Add from zero.
+	r.usage.Add(1)
+	defer r.usage.Done()
+	identity := r.snapshot.byAuthID[record.AuthID]
+	if identity == "" {
+		r.mu.Unlock()
+		return nil
+	}
+	now := r.runtimeClock().Now()
+	state := r.snapshot.Quota[identity]
+	if state.CompleteSince.IsZero() {
+		state.CompleteSince = now
+	}
+	if record.Failed && usageDetailEmpty(record.Detail) {
+		state.DeliveryWarning = true
+	} else if hash := usageDedupHash(record); state.seenDedup(hash) {
+		// Heuristic dedup hit: keep the warning but add no event.
+	} else if estimate, err := estimateUsageCredits(record, usageTimestamp(record, now)); err != nil {
+		state.UnknownModelWarning = true
+		state.DeliveryWarning = true
+	} else {
+		at := usageTimestamp(record, now)
+		state.addEvent(creditEvent{At: at, Microcredits: estimate.Microcredits, Model: estimate.Model})
+		state.compact(now, r.snapshot.Config.StateRetention)
+	}
+	r.snapshot.Quota[identity] = state
+	persisted := r.persistenceSnapshotLocked()
+	store := r.snapshot.Store
+	r.mu.Unlock()
+	return r.persistState(store, persisted)
+}
+
+func usageDetailEmpty(detail pluginapi.UsageDetail) bool {
+	return detail.InputTokens == 0 && detail.OutputTokens == 0 && detail.CacheReadTokens == 0 && detail.CacheCreationTokens == 0
+}
+
+func usageTimestamp(record pluginapi.UsageRecord, fallback time.Time) time.Time {
+	if record.RequestedAt.IsZero() {
+		return fallback.UTC()
+	}
+	return record.RequestedAt.UTC()
+}
+
+func (r *pluginRuntime) startPollers(ctx context.Context, snapshot *runtimeSnapshot) {
+	for i := range snapshot.Accounts {
+		item := snapshot.Accounts[i]
+		if item.Disabled {
+			continue
+		}
+		r.workers.Add(1)
+		go r.pollAccount(ctx, snapshot.Generation, item.Identity, item.key, snapshot.Config.QuotaRefresh)
+	}
+}
+
+// commitSnapshot is the lifecycle boundary shared with the management slice:
+// publish one complete generation, cancel and join the prior pollers, then
+// start workers from an immutable clone of the committed snapshot.
+func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
+	r.pollersMu.Lock()
+	defer r.pollersMu.Unlock()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		cancel()
+		return fmt.Errorf("plugin is shutting down")
+	}
+	previousCancel := r.cancel
+	if r.snapshot != nil {
+		staged.Generation = r.snapshot.Generation + 1
+		if sameSecureStore(r.snapshot.Store, staged.Store) {
+			for identity, state := range r.snapshot.Quota {
+				if _, exists := staged.Quota[identity]; exists {
+					staged.Quota[identity] = state
+				}
+			}
+			carryForwardNamedPlans(r.snapshot, staged)
+		}
+	} else {
+		staged.Generation = 1
+	}
+	r.cancel = cancel
+	r.snapshot = staged
+	r.lastErr = nil
+	pollerSnapshot := cloneRuntimeSnapshot(staged)
+	r.mu.Unlock()
+
+	if previousCancel != nil {
+		previousCancel()
+		r.workers.Wait()
+	}
+	r.startPollers(ctx, pollerSnapshot)
+	return nil
+}
+
+func (r *pluginRuntime) pollAccount(ctx context.Context, generation uint64, identity, key string, base time.Duration) {
+	defer r.workers.Done()
+	attempt := 0
+	for {
+		if err := r.pollOnce(ctx, generation, identity, key); err != nil && errors.Is(err, context.Canceled) {
+			return
+		}
+		attempt++
+		delay := jitteredPollInterval(base, identity, attempt)
+		if failures := r.pollFailureCount(identity); failures > 0 {
+			delay = pollBackoff(delay, failures)
+		}
+		if err := r.runtimeClock().Sleep(ctx, delay); err != nil {
+			return
+		}
+	}
+}
+
+func (r *pluginRuntime) pollOnce(ctx context.Context, generation uint64, identity, key string) error {
+	now := r.runtimeClock().Now()
+	attemptCtx, cancel := context.WithTimeout(ctx, defaultQuotaTimeout)
+	defer cancel()
+	snapshot, err := fetchQuota(attemptCtx, r.quotaClient(), r.quotaEndpoint(), key, now)
+	// A cancelled parent (shutdown or reconfigure) is not a poll failure; an
+	// attemptCtx timeout with a live parent is.
+	if err != nil && ctx.Err() != nil {
+		return context.Canceled
+	}
+	r.mu.Lock()
+	// Bind the result to the snapshot generation the poll was launched for:
+	// a reconfigure (or shutdown) that replaced the snapshot in between must
+	// not have this result mutate the new configuration's state.
+	if r.stopped || r.snapshot == nil || r.snapshot.Generation != generation {
+		r.mu.Unlock()
+		return context.Canceled
+	}
+	state, exists := r.snapshot.Quota[identity]
+	if !exists {
+		r.mu.Unlock()
+		return nil
+	}
+	state.LastPollAttempt = now
+	if err != nil {
+		state.ConsecutiveFailures++
+		state.LastPollError = boundedStatus(err.Error())
+	} else {
+		if state.Authoritative == nil {
+			state.LastSourceTransition = "estimated_to_authoritative"
+		} else {
+			view := state.view(now, accountByIdentity(r.snapshot.Accounts, identity), r.snapshot.Config)
+			state.LastDivergence = formatQuotaDivergence(view, snapshot)
+		}
+		state.Authoritative = &snapshot
+		state.LastPollError = ""
+		state.ConsecutiveFailures = 0
+		// Keep the fallback buckets aligned with the plan the upstream
+		// actually reports (ARCHITECTURE.md: "server-reported plan level
+		// selects the normal Lite/Pro/Max defaults"): a configured Max
+		// account that upstream reports as Lite must fall back to Lite
+		// capacity during an outage, not the stale configured buckets.
+		syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan)
+	}
+	r.snapshot.Quota[identity] = state
+	persisted := r.persistenceSnapshotLocked()
+	store := r.snapshot.Store
+	r.mu.Unlock()
+	persistErr := r.persistState(store, persisted)
+	if err != nil {
+		return err
+	}
+	return persistErr
+}
+
+// syncPlanFromUpstream aligns an account's plan and fallback buckets with a
+// plan reported by the quota endpoint. Explicit custom credit buckets are
+// never overridden — only named-plan defaults follow the upstream plan.
+func syncPlanFromUpstream(accounts []account, identity, plan string) {
+	if plan == "" {
+		return
+	}
+	buckets, known := planBuckets[plan]
+	if !known {
+		return
+	}
+	for i := range accounts {
+		if accounts[i].Identity == identity {
+			// Explicit account or stored-setting choices take precedence over
+			// upstream-derived named-plan defaults, including persisted snapshots
+			// loaded during reconfigure.
+			if accounts[i].Plan == "custom" || accounts[i].planExplicit || accounts[i].fiveHourCreditsExplicit || accounts[i].weeklyCreditsExplicit {
+				return
+			}
+			if accounts[i].Plan != plan {
+				accounts[i].Plan = plan
+				accounts[i].FiveHourCredits = buckets.FiveHour
+				accounts[i].WeeklyCredits = buckets.Weekly
+			}
+			return
+		}
+	}
+}
+
+// carryForwardNamedPlans preserves an upstream-discovered named plan across a
+// same-store reconfigure that staged before the poll completed. Explicit plan
+// or bucket overrides on either side remain authoritative and are never
+// mistaken for upstream-derived state.
+func carryForwardNamedPlans(live, staged *runtimeSnapshot) {
+	liveAccounts := make(map[string]account, len(live.Accounts))
+	for _, item := range live.Accounts {
+		liveAccounts[item.Identity] = item
+	}
+	for i := range staged.Accounts {
+		liveAccount, exists := liveAccounts[staged.Accounts[i].Identity]
+		if !exists || liveAccount.Plan == "custom" || liveAccount.planExplicit || liveAccount.fiveHourCreditsExplicit || liveAccount.weeklyCreditsExplicit {
+			continue
+		}
+		if staged.Accounts[i].planExplicit || staged.Accounts[i].fiveHourCreditsExplicit || staged.Accounts[i].weeklyCreditsExplicit {
+			continue
+		}
+		buckets, known := planBuckets[liveAccount.Plan]
+		if !known {
+			continue
+		}
+		staged.Accounts[i].Plan = liveAccount.Plan
+		staged.Accounts[i].FiveHourCredits = buckets.FiveHour
+		staged.Accounts[i].WeeklyCredits = buckets.Weekly
+	}
+}
+
+// persistState commits a persistence snapshot. Commits are serialized and
+// versioned: an older generation that reaches the mutex after a newer
+// generation's commit must never overwrite it (persistMu orders the write,
+// the monotonic generation check rejects stale ones).
+func (r *pluginRuntime) persistState(store *secureStore, state persistedState) error {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	if state.Generation != 0 && state.Generation <= r.persisted.Load() {
+		return nil
+	}
+	persist := r.persist
+	if persist == nil {
+		persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
+	}
+	if err := persist(store, state); err != nil {
+		r.mu.Lock()
+		if r.snapshot != nil {
+			for identity, accountState := range r.snapshot.Quota {
+				accountState.PersistenceWarning = true
+				accountState.DeliveryWarning = true
+				r.snapshot.Quota[identity] = accountState
+			}
+		}
+		r.mu.Unlock()
+		return fmt.Errorf("persist quota state: %w", err)
+	}
+	if state.Generation != 0 {
+		r.persisted.Store(state.Generation)
+	}
+	return nil
+}
+
+func (r *pluginRuntime) persistenceSnapshotLocked() persistedState {
+	state := persistedState{Version: 1, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota)), Generation: r.persistNext.Add(1)}
+	for identity, accountState := range r.snapshot.Quota {
+		accountState.Events = append([]creditEvent(nil), accountState.Events...)
+		accountState.DedupHashes = append([]string(nil), accountState.DedupHashes...)
+		if accountState.Authoritative != nil {
+			copyQuota := *accountState.Authoritative
+			accountState.Authoritative = &copyQuota
+		}
+		state.Accounts[identity] = accountState
+	}
+	return state
+}
+
+func (r *pluginRuntime) pollFailureCount(identity string) int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.snapshot == nil {
+		return 0
+	}
+	return r.snapshot.Quota[identity].ConsecutiveFailures
+}
+
+func (r *pluginRuntime) quotaView(identity string) (accountQuotaView, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.snapshot == nil {
+		return accountQuotaView{}, false
+	}
+	state, ok := r.snapshot.Quota[identity]
+	if !ok {
+		return accountQuotaView{}, false
+	}
+	return state.view(r.runtimeClock().Now(), accountByIdentity(r.snapshot.Accounts, identity), r.snapshot.Config), true
+}
+
+func (r *pluginRuntime) managementStatus(status string) managementStatusBody {
+	now := r.runtimeClock().Now()
+	r.mu.RLock()
+	validationError := ""
+	if r.lastErr != nil {
+		validationError = boundedStatus(r.lastErr.Error())
+	}
+	result := managementStatusBody{
+		Plugin:          pluginID,
+		Status:          status,
+		Version:         pluginVersion,
+		GeneratedAt:     now,
+		ValidationError: validationError,
+	}
+	defer r.mu.RUnlock()
+	if r.snapshot == nil {
+		return result
+	}
+	result.Accounts = make([]managementAccountStatus, 0, len(r.snapshot.Accounts))
+	for _, item := range r.snapshot.Accounts {
+		view := r.snapshot.Quota[item.Identity].view(now, item, r.snapshot.Config)
+		accountStatus := managementAccountStatus{
+			Name:                   item.Name,
+			KeySuffix:              item.KeySuffix,
+			Plan:                   item.Plan,
+			FiveHourUtilization:    utilization(view.FiveHour),
+			WeeklyUtilization:      utilization(view.Weekly),
+			FiveHourResetsAt:       view.FiveHour.ResetsAt,
+			WeeklyResetsAt:         view.Weekly.ResetsAt,
+			QuotaSource:            view.Source,
+			QuotaObservedAt:        view.ObservedAt,
+			QuotaStale:             view.Stale,
+			QuotaError:             view.Warning,
+			Offpeak:                isOffpeak(now),
+			Health:                 quotaHealth(item, view, r.snapshot.Config.ThresholdPercent),
+			EstimatorCompleteSince: view.CompleteSince,
+			DeliveryWarning:        view.DeliveryWarning,
+			PersistenceWarning:     view.PersistenceWarning,
+			UnknownModelWarning:    view.UnknownModelWarning,
+			HeuristicDedupWarning:  view.DedupCollisionWarn,
+			DedupMode:              "bounded_hash_heuristic",
+		}
+		if !view.ObservedAt.IsZero() {
+			accountStatus.QuotaAgeSeconds = maxInt64(0, int64(now.Sub(view.ObservedAt)/time.Second))
+		}
+		result.Accounts = append(result.Accounts, accountStatus)
+	}
+	return result
+}
+
+func utilization(window quotaWindow) float64 {
+	if window.BucketMicrocredits <= 0 {
+		return 1
+	}
+	return float64(window.ConsumedMicrocredits) / float64(window.BucketMicrocredits)
+}
+
+func quotaHealth(item account, view accountQuotaView, threshold int) string {
+	if item.Disabled {
+		return "disabled"
+	}
+	if atOrAboveThreshold(view.FiveHour.ConsumedMicrocredits, view.FiveHour.BucketMicrocredits, threshold) || atOrAboveThreshold(view.Weekly.ConsumedMicrocredits, view.Weekly.BucketMicrocredits, threshold) {
+		return "exhausted"
+	}
+	return "healthy"
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
+func (r *pluginRuntime) runtimeClock() clock {
+	if r.clock != nil {
+		return r.clock
+	}
+	return realClock{}
+}
+
+func (r *pluginRuntime) quotaClient() httpDoer {
+	if r.httpClient != nil {
+		return r.httpClient
+	}
+	return newQuotaHTTPClient()
+}
+
+func (r *pluginRuntime) quotaEndpoint() string {
+	if r.endpoint != "" {
+		return r.endpoint
+	}
+	return quotaEndpoint
+}
+
 func (r *pluginRuntime) shutdown() error {
 	r.mu.Lock()
 	if r.stopped {
@@ -132,16 +603,88 @@ func (r *pluginRuntime) shutdown() error {
 		return nil
 	}
 	r.stopped = true
+	cancel := r.cancel
+	r.cancel = nil
 	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	r.reconfigures.Wait()
+	r.pollersMu.Lock()
+	defer r.pollersMu.Unlock()
+	r.workers.Wait()
+	// In-flight usage handlers persist after dropping r.mu; join them so no
+	// accepted record writes state after — or is lost from — this final flush.
+	r.usage.Wait()
 
 	r.mu.RLock()
 	snapshot := r.snapshot
+	var persisted persistedState
+	if snapshot != nil {
+		persisted = r.persistenceSnapshotLocked()
+	}
 	r.mu.RUnlock()
 	if snapshot == nil || snapshot.Store == nil {
 		return nil
 	}
+	persist := r.persist
+	if persist == nil {
+		persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
+	}
+	if err := persist(snapshot.Store, persisted); err != nil {
+		return fmt.Errorf("persist quota state: %w", err)
+	}
 	return snapshot.Store.flush()
+}
+
+func maxPollInterval(base time.Duration) time.Duration {
+	return base + base/2
+}
+
+func jitteredPollInterval(base time.Duration, identity string, attempt int) time.Duration {
+	if base <= 0 {
+		base = defaultQuotaRefresh
+	}
+	minimum := base / 2
+	span := base
+	var seed uint64
+	if len(identity) >= 16 {
+		seed = binary.LittleEndian.Uint64([]byte(identity[:8])) ^ binary.LittleEndian.Uint64([]byte(identity[8:16]))
+	} else {
+		for i := range identity {
+			seed = seed*131 + uint64(identity[i])
+		}
+	}
+	seed ^= uint64(attempt) * 0x9e3779b97f4a7c15
+	return minimum + time.Duration(seed%uint64(span+1))
+}
+
+func pollBackoff(interval time.Duration, failures int) time.Duration {
+	if failures <= 1 {
+		return interval
+	}
+	shift := failures - 1
+	if shift > 4 {
+		shift = 4
+	}
+	delay := interval * time.Duration(1<<shift)
+	if delay > 15*time.Minute {
+		return 15 * time.Minute
+	}
+	return delay
+}
+
+func accountByIdentity(accounts []account, identity string) account {
+	for _, item := range accounts {
+		if item.Identity == identity {
+			return item
+		}
+	}
+	return account{}
+}
+
+func formatQuotaDivergence(view accountQuotaView, authoritative quotaSnapshot) string {
+	return boundedStatus(fmt.Sprintf("five_hour_microcredits=%d weekly_microcredits=%d", authoritative.FiveHour.ConsumedMicrocredits-view.FiveHour.ConsumedMicrocredits, authoritative.Weekly.ConsumedMicrocredits-view.Weekly.ConsumedMicrocredits))
 }
 
 func cpaProviderKeys(cpa cpaConfigProjection) []string {

@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 )
@@ -112,7 +113,7 @@ func TestFixtureKeyAbsentFromSerializedOutputs(t *testing.T) {
 	outputs := []any{
 		accounts,
 		settingsFile{Version: 1, Accounts: map[string]accountSetting{accounts[0].Identity: {Name: accounts[0].Name, Plan: accounts[0].Plan}}},
-		persistedState{Version: 1, Accounts: map[string]json.RawMessage{accounts[0].Identity: json.RawMessage(`{"health":"healthy"}`)}},
+		persistedState{Version: 1, Accounts: map[string]accountQuotaState{accounts[0].Identity: {CompleteSince: time.Unix(1, 0)}}},
 	}
 	for _, output := range outputs {
 		raw, errMarshal := json.Marshal(output)
@@ -174,8 +175,8 @@ func TestPersistedStateValidation(t *testing.T) {
 		state persistedState
 	}{
 		{name: "unsupported version", state: persistedState{Version: 999}},
-		{name: "invalid identity", state: persistedState{Version: 1, Accounts: map[string]json.RawMessage{"not-an-identity": json.RawMessage(`{}`)}}},
-		{name: "invalid body", state: persistedState{Version: 1, Accounts: map[string]json.RawMessage{identity: json.RawMessage(`not-json`)}}},
+		{name: "invalid identity", state: persistedState{Version: 1, Accounts: map[string]accountQuotaState{"not-an-identity": {}}}},
+		{name: "invalid body", state: persistedState{Version: 1, Accounts: map[string]accountQuotaState{identity: {ConsecutiveFailures: -1}}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
