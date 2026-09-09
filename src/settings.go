@@ -11,10 +11,39 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
-const maxStateFileSize = 8 << 20
+const (
+	maxStateFileSize        = 8 << 20
+	maxPersistedClockSkew   = 5 * time.Minute
+	settingsRecoveryVersion = 1
+)
+
+type writeOutcome uint8
+
+const (
+	writeNotCommitted writeOutcome = iota
+	writeCommitted
+	writeNeedsRecovery
+)
+
+type storeWriteError struct {
+	outcome writeOutcome
+	err     error
+}
+
+func (e *storeWriteError) Error() string { return e.err.Error() }
+func (e *storeWriteError) Unwrap() error { return e.err }
+
+func writeErrorOutcome(err error) writeOutcome {
+	var writeErr *storeWriteError
+	if errors.As(err, &writeErr) {
+		return writeErr.outcome
+	}
+	return writeNotCommitted
+}
 
 type settingsFile struct {
 	Version             int                       `json:"version"`
@@ -34,15 +63,27 @@ type accountSetting struct {
 }
 
 type persistedState struct {
-	Version    int                          `json:"version"`
-	Accounts   map[string]accountQuotaState `json:"accounts,omitempty"`
-	Generation uint64                       `json:"-"`
+	Version           int                          `json:"version"`
+	Accounts          map[string]accountQuotaState `json:"accounts,omitempty"`
+	Generation        uint64                       `json:"-"`
+	RuntimeGeneration uint64                       `json:"-"`
+}
+
+type settingsRecovery struct {
+	Version        int          `json:"version"`
+	PreviousDigest string       `json:"previous_digest"`
+	Desired        settingsFile `json:"desired"`
 }
 
 type secureStore struct {
+	mu        sync.RWMutex
 	dir       string
 	dirHandle *os.File
+	dirSync   func(*os.File) error
+	closed    bool
 }
+
+const settingsRecoveryName = "settings.recovery.json"
 
 func newSecureStore(authDir string) (*secureStore, error) {
 	base := filepath.Clean(strings.TrimSpace(authDir))
@@ -65,11 +106,18 @@ func (s *secureStore) loadSettings() (settingsFile, error) {
 	if err := s.readJSON("settings.json", &settings); err != nil {
 		return settingsFile{}, err
 	}
+	if err := validateSettingsFile(settings); err != nil {
+		return settingsFile{}, err
+	}
+	return settings, nil
+}
+
+func validateSettingsFile(settings settingsFile) error {
 	if settings.Version == 0 && settingsEmpty(settings) {
-		return settings, nil
+		return nil
 	}
 	if settings.Version != 1 {
-		return settingsFile{}, fmt.Errorf("settings.json has unsupported version")
+		return fmt.Errorf("settings.json has unsupported version")
 	}
 	if _, err := applyStoredConfig(pluginConfig{
 		QuotaRefresh:        defaultQuotaRefresh,
@@ -77,21 +125,88 @@ func (s *secureStore) loadSettings() (settingsFile, error) {
 		QuotaTimeout:        defaultQuotaTimeout,
 		ThresholdPercent:    defaultThreshold,
 	}, settings); err != nil {
-		return settingsFile{}, err
+		return err
 	}
-	return settings, nil
+	return nil
 }
 
 func (s *secureStore) saveSettings(settings settingsFile) error {
-	return s.writeJSON("settings.json", settings)
+	previous, err := s.loadSettings()
+	if err != nil {
+		if strings.Contains(err.Error(), "too many levels of symbolic links") {
+			return fmt.Errorf("refusing symlink target")
+		}
+		return err
+	}
+	recovery := settingsRecovery{
+		Version:        settingsRecoveryVersion,
+		PreviousDigest: settingsDigest(previous),
+		Desired:        settings,
+	}
+	if err := s.writeJSON(settingsRecoveryName, recovery); err != nil {
+		if writeErrorOutcome(err) != writeNeedsRecovery {
+			return fmt.Errorf("stage settings recovery: %w", err)
+		}
+	}
+	if err := s.writeJSON("settings.json", settings); err != nil {
+		if writeErrorOutcome(err) == writeNeedsRecovery {
+			return nil
+		}
+		_ = s.removeJSON(settingsRecoveryName)
+		return fmt.Errorf("commit settings: %w", err)
+	}
+	if err := s.removeJSON(settingsRecoveryName); err != nil {
+		return nil
+	}
+	return nil
+}
+
+func (s *secureStore) recoverSettings() (settingsFile, error) {
+	settings, err := s.loadSettings()
+	if err != nil {
+		return settingsFile{}, err
+	}
+	var recovery settingsRecovery
+	found, err := s.readJSONIfExists(settingsRecoveryName, &recovery)
+	if err != nil {
+		return settingsFile{}, err
+	}
+	if !found {
+		return settings, nil
+	}
+	if recovery.Version != settingsRecoveryVersion || validateSettingsFile(recovery.Desired) != nil {
+		return settingsFile{}, fmt.Errorf("settings recovery marker is invalid")
+	}
+	currentDigest := settingsDigest(settings)
+	desiredDigest := settingsDigest(recovery.Desired)
+	switch currentDigest {
+	case recovery.PreviousDigest:
+		_ = s.removeJSON(settingsRecoveryName)
+		return settings, nil
+	case desiredDigest:
+		_ = s.removeJSON(settingsRecoveryName)
+		return recovery.Desired, nil
+	default:
+		return settingsFile{}, fmt.Errorf("settings recovery marker does not match settings.json")
+	}
+}
+
+func settingsDigest(settings settingsFile) string {
+	raw, _ := json.Marshal(settings)
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:])
 }
 
 func (s *secureStore) loadState() (persistedState, error) {
+	return s.loadStateAt(time.Now().UTC())
+}
+
+func (s *secureStore) loadStateAt(now time.Time) (persistedState, error) {
 	var state persistedState
 	if err := s.readJSON("state.json", &state); err != nil {
 		return persistedState{}, err
 	}
-	if err := validatePersistedState(state); err != nil {
+	if err := validatePersistedStateAt(state, now); err != nil {
 		return persistedState{}, err
 	}
 	return state, nil
@@ -105,6 +220,10 @@ func (s *secureStore) saveState(state persistedState) error {
 }
 
 func validatePersistedState(state persistedState) error {
+	return validatePersistedStateAt(state, time.Now().UTC())
+}
+
+func validatePersistedStateAt(state persistedState, now time.Time) error {
 	if state.Version == 0 && len(state.Accounts) == 0 {
 		return nil
 	}
@@ -118,18 +237,22 @@ func validatePersistedState(state persistedState) error {
 		if _, err := hex.DecodeString(identity); err != nil {
 			return fmt.Errorf("state.json contains invalid account identity")
 		}
-		if err := validateAccountQuotaState(accountState); err != nil {
+		if err := validateAccountQuotaState(accountState, now); err != nil {
 			return fmt.Errorf("state.json contains invalid account state")
 		}
 	}
 	return nil
 }
 
-func validateAccountQuotaState(state accountQuotaState) error {
+func validateAccountQuotaState(state accountQuotaState, now time.Time) error {
+	futureLimit := now.UTC().Add(maxPersistedClockSkew)
 	if state.ConsecutiveFailures < 0 || len(state.DedupHashes) > maxDedupHashes {
 		return fmt.Errorf("invalid polling metadata")
 	}
 	if state.Authoritative != nil {
+		if state.Authoritative.ObservedAt.IsZero() || state.Authoritative.ObservedAt.After(futureLimit) {
+			return fmt.Errorf("invalid authoritative observation time")
+		}
 		for _, window := range []quotaWindow{state.Authoritative.FiveHour, state.Authoritative.Weekly} {
 			if window.ConsumedMicrocredits < 0 || window.BucketMicrocredits <= 0 || window.ConsumedMicrocredits > window.BucketMicrocredits || window.ResetsAt.IsZero() {
 				return fmt.Errorf("invalid authoritative quota")
@@ -138,7 +261,7 @@ func validateAccountQuotaState(state accountQuotaState) error {
 	}
 	last := time.Time{}
 	for _, event := range state.Events {
-		if event.At.IsZero() || event.Microcredits <= 0 || normalizeModelName(event.Model) == "" || (!last.IsZero() && event.At.Before(last)) {
+		if event.At.IsZero() || event.At.After(futureLimit) || event.Microcredits <= 0 || normalizeModelName(event.Model) == "" || (!last.IsZero() && event.At.Before(last)) {
 			return fmt.Errorf("invalid credit event")
 		}
 		last = event.At
@@ -280,57 +403,66 @@ func validateAccounts(accounts []account) error {
 }
 
 func (s *secureStore) readJSON(name string, dst any) error {
-	if err := s.validateDirectory(); err != nil {
-		return err
+	_, err := s.readJSONIfExists(name, dst)
+	return err
+}
+
+func (s *secureStore) readJSONIfExists(name string, dst any) (bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateDirectoryLocked(); err != nil {
+		return false, err
 	}
-	path, err := s.securePath(name)
+	path, err := s.securePathLocked(name)
 	if err != nil {
-		return err
+		return false, err
 	}
 	file, err := os.OpenFile(path, os.O_RDONLY|syscallNoFollow, 0)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("open %s: %w", name, err)
+		return false, fmt.Errorf("open %s: %w", name, err)
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
-		return fmt.Errorf("stat %s: %w", name, err)
+		return false, fmt.Errorf("stat %s: %w", name, err)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%s is not a regular file", name)
+		return false, fmt.Errorf("%s is not a regular file", name)
 	}
 	if info.Mode().Perm() != 0o600 {
-		return fmt.Errorf("%s has insecure permissions", name)
+		return false, fmt.Errorf("%s has insecure permissions", name)
 	}
 	if info.Size() > maxStateFileSize {
-		return fmt.Errorf("%s exceeds maximum size", name)
+		return false, fmt.Errorf("%s exceeds maximum size", name)
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxStateFileSize+1))
 	if err != nil {
-		return fmt.Errorf("read %s: %w", name, err)
+		return false, fmt.Errorf("read %s: %w", name, err)
 	}
 	if len(data) == 0 {
-		return fmt.Errorf("decode %s: empty file", name)
+		return false, fmt.Errorf("decode %s: empty file", name)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if errDecode := decoder.Decode(dst); errDecode != nil {
-		return fmt.Errorf("decode %s: corrupt state", name)
+		return false, fmt.Errorf("decode %s: corrupt state", name)
 	}
 	if errDecode := ensureJSONEOF(decoder); errDecode != nil {
-		return fmt.Errorf("decode %s: corrupt state", name)
+		return false, fmt.Errorf("decode %s: corrupt state", name)
 	}
-	return nil
+	return true, nil
 }
 
 func (s *secureStore) writeJSON(name string, value any) error {
-	if _, err := s.securePath(name); err != nil {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, err := s.securePathLocked(name); err != nil {
 		return err
 	}
-	if err := s.validateDirectory(); err != nil {
+	if err := s.validateDirectoryLocked(); err != nil {
 		return err
 	}
 	data, err := json.Marshal(value)
@@ -341,14 +473,35 @@ func (s *secureStore) writeJSON(name string, value any) error {
 	if len(data) > maxStateFileSize {
 		return fmt.Errorf("%s exceeds maximum size", name)
 	}
-	if err := writeJSONAt(s.dirHandle, name, data); err != nil {
+	if err := writeJSONAt(s.dirHandle, name, data, s.syncDirLocked); err != nil {
 		return err
 	}
-	return s.validateDirectory()
+	return s.validateDirectoryLocked()
+}
+
+func (s *secureStore) removeJSON(name string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if _, err := s.securePathLocked(name); err != nil {
+		return err
+	}
+	if err := s.validateDirectoryLocked(); err != nil {
+		return err
+	}
+	if err := removeJSONAt(s.dirHandle, name, s.syncDirLocked); err != nil {
+		return err
+	}
+	return s.validateDirectoryLocked()
 }
 
 func (s *secureStore) securePath(name string) (string, error) {
-	if s == nil || s.dir == "" {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.securePathLocked(name)
+}
+
+func (s *secureStore) securePathLocked(name string) (string, error) {
+	if s == nil || s.dir == "" || s.closed {
 		return "", fmt.Errorf("secure store is not initialized")
 	}
 	if filepath.Base(name) != name || name == "." || name == "" {
@@ -358,7 +511,13 @@ func (s *secureStore) securePath(name string) (string, error) {
 }
 
 func (s *secureStore) validateDirectory() error {
-	if s == nil || s.dir == "" || s.dirHandle == nil {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.validateDirectoryLocked()
+}
+
+func (s *secureStore) validateDirectoryLocked() error {
+	if s == nil || s.dir == "" || s.dirHandle == nil || s.closed {
 		return fmt.Errorf("secure store is not initialized")
 	}
 	pathInfo, err := os.Lstat(s.dir)
@@ -384,14 +543,41 @@ func (s *secureStore) validateDirectory() error {
 	return nil
 }
 
+func (s *secureStore) syncDirLocked(dir *os.File) error {
+	if s.dirSync != nil {
+		return s.dirSync(dir)
+	}
+	return dir.Sync()
+}
+
 func (s *secureStore) flush() error {
 	if s == nil {
 		return nil
 	}
-	if err := s.validateDirectory(); err != nil {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if err := s.validateDirectoryLocked(); err != nil {
 		return err
 	}
-	return s.dirHandle.Sync()
+	return s.syncDirLocked(s.dirHandle)
+}
+
+func (s *secureStore) close() error {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	handle := s.dirHandle
+	s.dirHandle = nil
+	if handle == nil {
+		return nil
+	}
+	return handle.Close()
 }
 
 func ensureSecureDirectory(dir string) error {

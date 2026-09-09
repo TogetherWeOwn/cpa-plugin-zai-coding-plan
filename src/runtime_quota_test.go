@@ -154,6 +154,98 @@ func TestUsageHandleAcknowledgesLossyPersistenceFailure(t *testing.T) {
 	}
 }
 
+func TestRuntimePersistenceFailureDoesNotMarkReplacementGeneration(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	first := account{Identity: accountIdentity("persist-first"), Name: "first", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	second := account{Identity: accountIdentity("persist-second"), Name: "second", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{first})
+	runtime.snapshot.Generation = 1
+	oldStore := runtime.snapshot.Store
+	runtime.mu.Lock()
+	oldState := runtime.persistenceSnapshotLocked()
+	runtime.mu.Unlock()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	runtime.persistWrite = func(*secureStore, persistedState) error {
+		close(started)
+		<-release
+		return errors.New("disk unavailable")
+	}
+	done := make(chan error, 1)
+	go func() { done <- runtime.persistState(oldStore, oldState) }()
+	<-started
+	replacementStore, err := newSecureStore(filepath.Join(t.TempDir(), "replacement-auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	runtime.snapshot = &runtimeSnapshot{
+		Config:       runtime.snapshot.Config,
+		BaseAccounts: []account{second},
+		Accounts:     []account{second},
+		Store:        replacementStore,
+		Quota:        map[string]accountQuotaState{second.Identity: {CompleteSince: now}},
+		byAuthID:     map[string]string{},
+		Generation:   2,
+	}
+	runtime.mu.Unlock()
+	close(release)
+	if err := <-done; err == nil {
+		t.Fatal("old-generation persistence failure unexpectedly succeeded")
+	}
+	runtime.mu.RLock()
+	state := runtime.snapshot.Quota[second.Identity]
+	runtime.mu.RUnlock()
+	if state.PersistenceWarning || state.DeliveryWarning {
+		t.Fatalf("old-generation failure marked replacement account: %#v", state)
+	}
+}
+
+func TestRuntimeShutdownPersistsWarningAfterAdmittedUsageFailure(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("shutdown-warning"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, ClaudeAuthID: "auth"}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	started := make(chan struct{})
+	release := make(chan struct{})
+	calls := 0
+	runtime.persistWrite = func(store *secureStore, state persistedState) error {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-release
+			return errors.New("disk unavailable")
+		}
+		return store.saveState(state)
+	}
+	usageDone := make(chan error, 1)
+	go func() {
+		usageDone <- runtime.handleUsage(pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now, Detail: pluginapi.UsageDetail{InputTokens: 1}})
+	}()
+	<-started
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- runtime.shutdown() }()
+	close(release)
+	if err := <-usageDone; err == nil {
+		t.Fatal("usage persistence failure unexpectedly succeeded")
+	}
+	if err := <-shutdownDone; err != nil {
+		t.Fatal(err)
+	}
+	reloadedStore, err := newSecureStore(filepath.Dir(runtime.snapshot.Store.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reloadedStore.close() }()
+	persisted, err := reloadedStore.loadStateAt(now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := persisted.Accounts[item.Identity]
+	if !state.PersistenceWarning || !state.DeliveryWarning {
+		t.Fatalf("shutdown overwrote warning-bearing state: %#v", state)
+	}
+}
+
 func TestRuntimeStatePersistenceRejectsStaleSnapshot(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("persist-order"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
@@ -462,11 +554,12 @@ func quotaTestRuntime(t *testing.T, now time.Time, accounts []account) *pluginRu
 	return &pluginRuntime{
 		clock: &fakeClock{now: now},
 		snapshot: &runtimeSnapshot{
-			Config:   pluginConfig{QuotaRefresh: 2 * time.Minute, AuthoritativeMaxAge: 5 * time.Minute, ThresholdPercent: 97, StateRetention: 8 * 24 * time.Hour},
-			Accounts: accounts,
-			Store:    store,
-			Quota:    quota,
-			byAuthID: byAuthID,
+			Config:       pluginConfig{QuotaRefresh: 2 * time.Minute, AuthoritativeMaxAge: 5 * time.Minute, ThresholdPercent: 97, StateRetention: 8 * 24 * time.Hour},
+			BaseAccounts: append([]account(nil), accounts...),
+			Accounts:     accounts,
+			Store:        store,
+			Quota:        quota,
+			byAuthID:     byAuthID,
 		},
 	}
 }

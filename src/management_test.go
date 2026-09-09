@@ -199,6 +199,33 @@ func TestManagementConcurrentAccountConfigPreservesBothUpdates(t *testing.T) {
 	}
 }
 
+func TestManagementAccountConfigClearAppliesBaseConfigurationLive(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("clear-live"), Name: "account", KeySuffix: "clear", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	disabled := true
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Name: "renamed", Disabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "renamed", Clear: true}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := runtime.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Accounts[0].Name != "account" || snapshot.Accounts[0].Disabled {
+		t.Fatalf("clear did not restore base configuration live: %#v", snapshot.Accounts[0])
+	}
+	settings, err := snapshot.Store.loadSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := settings.Accounts[item.Identity]; exists {
+		t.Fatalf("clear left persisted override: %#v", settings.Accounts)
+	}
+}
+
 func TestManagementAccountConfigPersistenceFailureLeavesRuntimeUnchanged(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("persist-failure"), Name: "account", KeySuffix: "persist", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}

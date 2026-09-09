@@ -33,12 +33,13 @@ func (realClock) Sleep(ctx context.Context, delay time.Duration) error {
 }
 
 type runtimeSnapshot struct {
-	Config     pluginConfig
-	Accounts   []account
-	Store      *secureStore
-	Quota      map[string]accountQuotaState
-	byAuthID   map[string]string
-	Generation uint64
+	Config       pluginConfig
+	BaseAccounts []account
+	Accounts     []account
+	Store        *secureStore
+	Quota        map[string]accountQuotaState
+	byAuthID     map[string]string
+	Generation   uint64
 }
 
 type refreshGeneration struct {
@@ -57,7 +58,7 @@ type pluginRuntime struct {
 	reconfigures   sync.WaitGroup
 	workers        sync.WaitGroup
 	refreshWorkers sync.WaitGroup
-	settingsWrites sync.WaitGroup
+	operations     sync.WaitGroup
 	cancel         context.CancelFunc
 	refreshContext context.Context
 	refreshCancel  context.CancelFunc
@@ -108,13 +109,20 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
+	keepStore := false
+	defer func() {
+		if !keepStore {
+			_ = store.close()
+		}
+	}()
 	accounts, err := discoverAccounts(cpa, cfg)
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
+	baseAccounts := append([]account(nil), accounts...)
 	r.settingsMu.Lock()
 	defer r.settingsMu.Unlock()
-	settings, err := store.loadSettings()
+	settings, err := store.recoverSettings()
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
@@ -125,7 +133,7 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
-	persisted, err := store.loadState()
+	persisted, err := store.loadStateAt(r.runtimeClock().Now())
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
@@ -142,8 +150,12 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 		byAuthID[accounts[i].ClaudeAuthID] = accounts[i].Identity
 		byAuthID[accounts[i].OpenAIAuthID] = accounts[i].Identity
 	}
-	staged := &runtimeSnapshot{Config: cfg, Accounts: accounts, Store: store, Quota: quota, byAuthID: byAuthID}
-	return r.commitSnapshot(staged)
+	staged := &runtimeSnapshot{Config: cfg, BaseAccounts: baseAccounts, Accounts: accounts, Store: store, Quota: quota, byAuthID: byAuthID}
+	if err := r.commitSnapshot(staged); err != nil {
+		return err
+	}
+	keepStore = true
+	return nil
 }
 
 func (r *pluginRuntime) recordError(err error, secrets ...string) error {
@@ -177,6 +189,7 @@ func sameSecureStore(left, right *secureStore) bool {
 
 func cloneRuntimeSnapshot(source *runtimeSnapshot) *runtimeSnapshot {
 	copySnapshot := *source
+	copySnapshot.BaseAccounts = append([]account(nil), source.BaseAccounts...)
 	copySnapshot.Accounts = append([]account(nil), source.Accounts...)
 	copySnapshot.byAuthID = make(map[string]string, len(source.byAuthID))
 	for authID, identity := range source.byAuthID {
@@ -298,13 +311,19 @@ func (r *pluginRuntime) commitSnapshotAfter(staged *runtimeSnapshot, beforeCommi
 		return fmt.Errorf("plugin is shutting down")
 	}
 	previousCancel := r.cancel
+	var previousStore *secureStore
 	if r.snapshot != nil {
+		previousStore = r.snapshot.Store
 		staged.Generation = r.snapshot.Generation + 1
 		if sameSecureStore(r.snapshot.Store, staged.Store) {
 			for identity, state := range r.snapshot.Quota {
 				if _, exists := staged.Quota[identity]; exists {
 					staged.Quota[identity] = state
 				}
+			}
+			if previousStore != staged.Store {
+				_ = staged.Store.close()
+				staged.Store = previousStore
 			}
 		}
 	} else {
@@ -330,6 +349,11 @@ func (r *pluginRuntime) commitSnapshotAfter(staged *runtimeSnapshot, beforeCommi
 		previousCancel()
 	}
 	r.startPollers(ctx, pollerSnapshot)
+	if previousStore != nil && previousStore != staged.Store {
+		if err := previousStore.close(); err != nil {
+			return fmt.Errorf("close superseded secure store: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -427,8 +451,12 @@ func (r *pluginRuntime) persistState(store *secureStore, state persistedState) e
 	}
 	if err := persist(store, state); err != nil {
 		r.mu.Lock()
-		if r.snapshot != nil {
-			for identity, accountState := range r.snapshot.Quota {
+		if r.snapshot != nil && r.snapshot.Generation == state.RuntimeGeneration && r.snapshot.Store == store {
+			for identity := range state.Accounts {
+				accountState, exists := r.snapshot.Quota[identity]
+				if !exists {
+					continue
+				}
 				accountState.PersistenceWarning = true
 				accountState.DeliveryWarning = true
 				r.snapshot.Quota[identity] = accountState
@@ -444,7 +472,7 @@ func (r *pluginRuntime) persistState(store *secureStore, state persistedState) e
 }
 
 func (r *pluginRuntime) persistenceSnapshotLocked() persistedState {
-	state := persistedState{Version: 1, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota)), Generation: r.persistNext.Add(1)}
+	state := persistedState{Version: 1, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota)), Generation: r.persistNext.Add(1), RuntimeGeneration: r.snapshot.Generation}
 	for identity, accountState := range r.snapshot.Quota {
 		accountState.Events = append([]creditEvent(nil), accountState.Events...)
 		accountState.DedupHashes = append([]string(nil), accountState.DedupHashes...)
@@ -627,8 +655,9 @@ func (r *pluginRuntime) shutdown() error {
 	r.reconfigures.Wait()
 	r.workers.Wait()
 	r.refreshWorkers.Wait()
-	r.settingsWrites.Wait()
+	r.operations.Wait()
 
+	r.persistMu.Lock()
 	r.mu.RLock()
 	snapshot := r.snapshot
 	var persisted persistedState
@@ -638,8 +667,26 @@ func (r *pluginRuntime) shutdown() error {
 	r.mu.RUnlock()
 	var err error
 	if snapshot != nil && snapshot.Store != nil {
-		if err = r.persistState(snapshot.Store, persisted); err == nil {
+		persist := r.persist
+		if r.persistWrite != nil {
+			persist = r.persistWrite
+		}
+		if persist == nil {
+			persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
+		}
+		if err = persist(snapshot.Store, persisted); err != nil {
+			err = fmt.Errorf("persist quota state: %w", err)
+		} else if persisted.Generation != 0 {
+			r.persisted.Store(persisted.Generation)
+		}
+		if err == nil {
 			err = snapshot.Store.flush()
+		}
+	}
+	r.persistMu.Unlock()
+	if snapshot != nil && snapshot.Store != nil {
+		if closeErr := snapshot.Store.close(); err == nil && closeErr != nil {
+			err = closeErr
 		}
 	}
 

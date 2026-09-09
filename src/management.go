@@ -313,6 +313,15 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 		return fmt.Errorf("account is required")
 	}
 
+	r.mu.Lock()
+	if r.stopped || r.snapshot == nil || r.snapshot.Store == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("plugin is not configured")
+	}
+	r.operations.Add(1)
+	r.mu.Unlock()
+	defer r.operations.Done()
+
 	r.settingsMu.Lock()
 	defer r.settingsMu.Unlock()
 	r.mu.RLock()
@@ -337,7 +346,7 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 	}
 	item := &updated.Accounts[index]
 
-	settings, err := updated.Store.loadSettings()
+	settings, err := updated.Store.recoverSettings()
 	if err != nil {
 		return err
 	}
@@ -410,6 +419,10 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 
 	candidate := *item
 	if input.Clear {
+		if index >= len(updated.BaseAccounts) || updated.BaseAccounts[index].Identity != item.Identity {
+			return fmt.Errorf("base account configuration is unavailable")
+		}
+		candidate = updated.BaseAccounts[index]
 		delete(settings.Accounts, item.Identity)
 	} else {
 		applySettingToAccount(&candidate, setting)
@@ -425,9 +438,7 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 		r.mu.Unlock()
 		return fmt.Errorf("plugin is shutting down")
 	}
-	r.settingsWrites.Add(1)
 	r.mu.Unlock()
-	defer r.settingsWrites.Done()
 	return r.commitSnapshotAfter(updated, func() error {
 		save := r.saveSettings
 		if save == nil {
