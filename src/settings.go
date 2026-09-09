@@ -39,6 +39,18 @@ type storeWriteError struct {
 func (e *storeWriteError) Error() string { return e.err.Error() }
 func (e *storeWriteError) Unwrap() error { return e.err }
 
+type settingsRecoveryPendingError struct {
+	err error
+}
+
+func (e *settingsRecoveryPendingError) Error() string { return e.err.Error() }
+func (e *settingsRecoveryPendingError) Unwrap() error { return e.err }
+
+func settingsRecoveryPending(err error) bool {
+	var pending *settingsRecoveryPendingError
+	return errors.As(err, &pending)
+}
+
 func writeErrorOutcome(err error) writeOutcome {
 	var writeErr *storeWriteError
 	if errors.As(err, &writeErr) {
@@ -161,12 +173,18 @@ func (s *secureStore) saveSettings(settings settingsFile) error {
 			return fmt.Errorf("prepare settings recovery: %w", err)
 		}
 		if flushErr := s.flush(); flushErr != nil {
-			return nil
+			current, readErr := s.loadSettings()
+			if readErr == nil && settingsDigest(current) == settingsDigest(settings) {
+				return nil
+			}
+			return &settingsRecoveryPendingError{err: fmt.Errorf("prepare settings recovery: %w", err)}
 		}
 	}
 	if err := s.writeJSON("settings.json", settings); err != nil {
 		if writeErrorOutcome(err) == writeNeedsRecovery {
-			return nil
+			if flushErr := s.flush(); flushErr == nil {
+				return nil
+			}
 		}
 		return fmt.Errorf("commit settings: %w", err)
 	}

@@ -119,7 +119,7 @@ func TestSettingsFirstDirectorySyncFailureRejectsBeforeDesiredMarker(t *testing.
 	}
 }
 
-func TestSettingsSecondDirectorySyncFailureAcknowledgesDesiredMarker(t *testing.T) {
+func TestSettingsSecondDirectorySyncFailureRequiresDurability(t *testing.T) {
 	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
 	if err != nil {
 		t.Fatal(err)
@@ -139,16 +139,87 @@ func TestSettingsSecondDirectorySyncFailureAcknowledgesDesiredMarker(t *testing.
 		return dir.Sync()
 	}
 	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
-	if err := store.saveSettings(desired); err != nil {
-		t.Fatalf("desired marker survived rename and must be acknowledged: %v", err)
+	if err := store.saveSettings(desired); err == nil || !settingsRecoveryPending(err) {
+		t.Fatalf("settings outcome = %v, want recoverable pending commit", err)
 	}
 	store.dirSync = nil
+	if err := store.removeJSON(settingsRecoveryName); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.recoverSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.Accounts[identity].Name != "previous" {
+		t.Fatalf("rejected settings survived simulated marker loss: %#v", recovered)
+	}
+}
+
+func TestSettingsSecondDirectorySyncFailureAcknowledgesAlreadyCommittedSettings(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	identity := accountIdentity("second-sync-committed")
+	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
+	if err := store.saveSettings(previous); err != nil {
+		t.Fatal(err)
+	}
+	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
+	calls := 0
+	store.dirSync = func(dir *os.File) error {
+		calls++
+		if calls == 1 {
+			return dir.Sync()
+		}
+		if calls == 2 {
+			store.dirSync = nil
+			if err := store.writeJSON("settings.json", desired); err != nil {
+				t.Fatalf("inject committed settings: %v", err)
+			}
+			store.dirSync = func(*os.File) error { return errors.New("injected persistent directory sync failure") }
+		}
+		return errors.New("injected persistent directory sync failure")
+	}
+	if err := store.saveSettings(desired); err != nil {
+		t.Fatalf("already committed settings were rejected: %v", err)
+	}
+}
+
+func TestSettingsCommitDirectorySyncFailureRequiresDurability(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	identity := accountIdentity("commit-sync")
+	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
+	if err := store.saveSettings(previous); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	store.dirSync = func(dir *os.File) error {
+		calls++
+		if calls >= 3 {
+			return errors.New("injected persistent directory sync failure")
+		}
+		return dir.Sync()
+	}
+	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
+	if err := store.saveSettings(desired); err == nil || settingsRecoveryPending(err) {
+		t.Fatalf("settings outcome = %v, want ordinary commit rejection", err)
+	}
+	store.dirSync = nil
+	if err := store.writeJSON("settings.json", previous); err != nil {
+		t.Fatal(err)
+	}
 	recovered, err := store.recoverSettings()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recovered.Accounts[identity].Name != "desired" {
-		t.Fatalf("acknowledged settings were not activated after recovery: %#v", recovered)
+		t.Fatalf("durable marker did not recover rejected commit: %#v", recovered)
 	}
 }
 

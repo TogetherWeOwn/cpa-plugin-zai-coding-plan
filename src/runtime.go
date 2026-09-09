@@ -546,7 +546,9 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, gene
 		// selects the normal Lite/Pro/Max defaults"): a configured Max
 		// account that upstream reports as Lite must fall back to Lite
 		// capacity during an outage, not the stale configured buckets.
-		syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan)
+		if syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan) {
+			r.snapshot.byIdentity[identity] = accountByIdentity(r.snapshot.Accounts, identity)
+		}
 	}
 	r.snapshot.Quota[identity] = state
 	r.refreshCapacityLocked(identity, now)
@@ -563,13 +565,13 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, gene
 // syncPlanFromUpstream aligns an account's plan and fallback buckets with a
 // plan reported by the quota endpoint. Explicit custom credit buckets are
 // never overridden — only named-plan defaults follow the upstream plan.
-func syncPlanFromUpstream(accounts []account, identity, plan string) {
+func syncPlanFromUpstream(accounts []account, identity, plan string) bool {
 	if plan == "" {
-		return
+		return false
 	}
 	buckets, known := planBuckets[plan]
 	if !known {
-		return
+		return false
 	}
 	for i := range accounts {
 		if accounts[i].Identity == identity {
@@ -577,16 +579,18 @@ func syncPlanFromUpstream(accounts []account, identity, plan string) {
 			// upstream-derived named-plan defaults, including persisted snapshots
 			// loaded during reconfigure.
 			if accounts[i].Plan == "custom" || accounts[i].planExplicit || accounts[i].fiveHourCreditsExplicit || accounts[i].weeklyCreditsExplicit {
-				return
+				return false
 			}
 			if accounts[i].Plan != plan {
 				accounts[i].Plan = plan
 				accounts[i].FiveHourCredits = buckets.FiveHour
 				accounts[i].WeeklyCredits = buckets.Weekly
+				return true
 			}
-			return
+			return false
 		}
 	}
+	return false
 }
 
 // carryForwardNamedPlans preserves an upstream-discovered named plan across a

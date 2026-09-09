@@ -129,10 +129,13 @@ func TestUpstreamPlanSyncsFallbackBuckets(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("account"), Name: "account", Plan: "max", FiveHourCredits: 28_000, WeeklyCredits: 140_000, ClaudeAuthID: "auth", key: quotaFixtureKey}
 	runtime := quotaTestRuntime(t, now, []account{item})
+	state := runtime.snapshot.Quota[item.Identity]
+	state.Events = []creditEvent{{At: now.Add(-time.Hour), Microcredits: 1_980 * creditScale, Model: "glm-5.3"}}
+	runtime.snapshot.Quota[item.Identity] = state
 	runtime.httpClient = roundTripDoer(func(*http.Request) (*http.Response, error) {
 		return quotaHTTPResponse(200, quotaFixture("lite", []string{
-			quotaLimitFixture(3, 5, 2_000, 1_000, 1_000, now.Add(time.Hour).UnixMilli()),
-			quotaLimitFixture(6, 1, 10_000, 3_000, 7_000, now.Add(24*time.Hour).UnixMilli()),
+			quotaLimitFixture(3, 5, 2_000, 1_980, 20, now.Add(time.Hour).UnixMilli()),
+			quotaLimitFixture(6, 1, 10_000, 9_900, 100, now.Add(24*time.Hour).UnixMilli()),
 		})), nil
 	})
 	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation, runtime.snapshot.Config.QuotaTimeout); err != nil {
@@ -149,6 +152,12 @@ func TestUpstreamPlanSyncsFallbackBuckets(t *testing.T) {
 	}
 	if view.Weekly.BucketMicrocredits != 10_000*creditScale {
 		t.Fatalf("weekly fallback bucket = %d, want lite %d", view.Weekly.BucketMicrocredits, 10_000*creditScale)
+	}
+	if got := runtime.snapshot.byIdentity[item.Identity]; got.Plan != "lite" || got.FiveHourCredits != 2_000 || got.WeeklyCredits != 10_000 {
+		t.Fatalf("indexed account retained stale plan: %#v", got)
+	}
+	if health, ok := runtime.health(item.Identity); !ok || health.Status != healthExhausted {
+		t.Fatalf("health did not enforce upstream lite buckets: %#v ok=%v", health, ok)
 	}
 }
 

@@ -316,6 +316,27 @@ func TestManagementAccountConfigPersistenceFailureLeavesRuntimeUnchanged(t *test
 	}
 }
 
+func TestManagementAccountConfigPublishesRecoverablePendingCommit(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("pending-settings"), Name: "account", KeySuffix: "pending", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	runtime.snapshot.Generation = 7
+	runtime.saveSettings = func(*secureStore, settingsFile) error {
+		return &settingsRecoveryPendingError{err: errors.New("directory durability unavailable")}
+	}
+
+	if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Name: "desired"}); err != nil {
+		t.Fatalf("recoverable settings commit was rejected: %v", err)
+	}
+	snapshot, err := runtime.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Generation != 8 || snapshot.Accounts[0].Name != "desired" {
+		t.Fatalf("recoverable settings did not become live: generation=%d account=%#v", snapshot.Generation, snapshot.Accounts[0])
+	}
+}
+
 func TestManagementAccountConfigShutdownJoinsWriteAndRejectsNewWrites(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("shutdown-write"), Name: "account", KeySuffix: "write", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
@@ -590,6 +611,32 @@ func TestManagementUnblockRecomputesWithoutManufacturingCapacity(t *testing.T) {
 	after := runtime.managementStatus("registered").Accounts[0]
 	if after.Health != "exhausted" || after.FiveHourUtilization != before.FiveHourUtilization {
 		t.Fatalf("unblock manufactured capacity: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestManagementUnblockPreservesAuthenticationSuspension(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("unblock-suspended"), Name: "account", KeySuffix: "redacted", Plan: "pro", FiveHourCredits: 100, WeeklyCredits: 100}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	health := runtime.snapshot.Health[item.Identity]
+	health.SuspendedUntil = now.Add(time.Hour)
+	health.ExhaustedUntil = now.Add(30 * time.Minute)
+	health.ExhaustedReason = "upstream quota response"
+	runtime.snapshot.Health[item.Identity] = health
+
+	response := runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPost, Path: managementUnblockPath, Body: []byte(`{"account":"account"}`)})
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("unblock status = %d body=%s", response.StatusCode, response.Body)
+	}
+	got := runtime.snapshot.Health[item.Identity]
+	if !got.SuspendedUntil.Equal(health.SuspendedUntil) {
+		t.Fatalf("unblock cleared authentication suspension: before=%s after=%s", health.SuspendedUntil, got.SuspendedUntil)
+	}
+	if !got.ExhaustedUntil.IsZero() || got.ExhaustedReason != "" {
+		t.Fatalf("unblock retained upstream quota block: %#v", got)
+	}
+	if assessed, ok := runtime.health(item.Identity); !ok || assessed.Status != healthSuspended {
+		t.Fatalf("unblock changed suspended account health: %#v ok=%v", assessed, ok)
 	}
 }
 

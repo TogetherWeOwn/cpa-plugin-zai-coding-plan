@@ -305,7 +305,6 @@ func (r *pluginRuntime) unblock(accountName string) error {
 		state.compact(now, r.snapshot.Config.StateRetention)
 		r.snapshot.Quota[identity] = state
 		health := r.snapshot.Health[identity]
-		health.SuspendedUntil = time.Time{}
 		health.ExhaustedUntil = time.Time{}
 		health.ExhaustedReason = ""
 		r.snapshot.Health[identity] = health
@@ -465,6 +464,9 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 			save = func(store *secureStore, settings settingsFile) error { return store.saveSettings(settings) }
 		}
 		if err := save(updated.Store, settings); err != nil {
+			if settingsRecoveryPending(err) {
+				return nil
+			}
 			return fmt.Errorf("save account settings: %w", err)
 		}
 		return nil
