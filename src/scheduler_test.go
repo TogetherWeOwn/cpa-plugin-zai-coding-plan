@@ -66,6 +66,16 @@ func TestResetHintsAreBoundedAndUseAuthoritativeThenFallback(t *testing.T) {
 	}
 }
 
+func TestRetryAfterMillisecondsUsesRelativeDuration(t *testing.T) {
+	account := schedulerAccount("one", "claude-one", "openai-one")
+	runtime := schedulerTestRuntime(schedulerNow, account)
+	runtime.handleUsage(pluginapi.UsageRecord{AuthID: account.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `{"retry_after_ms":1800000}`}})
+	health, _ := runtime.health(account.Identity)
+	if !health.ResetAt.Equal(schedulerNow.Add(30 * time.Minute)) {
+		t.Fatalf("rate-limit reset = %v, want %v", health.ResetAt, schedulerNow.Add(30*time.Minute))
+	}
+}
+
 func TestAuthSuspensionPrecedesExhaustionAndBothRecover(t *testing.T) {
 	account := schedulerAccount("one", "claude-one", "openai-one")
 	runtime := schedulerTestRuntime(schedulerNow, account)

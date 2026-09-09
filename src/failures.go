@@ -141,6 +141,12 @@ func parseResetValue(raw, key string, now time.Time) (time.Time, bool) {
 	if key == "retryafter" {
 		return parseRetryAfter(value, now)
 	}
+	if key == "retryafterms" {
+		if integer > int64(maxResetHintFuture/time.Millisecond) {
+			return time.Time{}, false
+		}
+		return validResetAt(now.Add(time.Duration(integer)*time.Millisecond), now)
+	}
 	var resetAt time.Time
 	switch {
 	case strings.Contains(key, "ms") || integer >= 1_000_000_000_000:
