@@ -13,6 +13,16 @@ import (
 
 const creditScale int64 = 1_000_000
 
+// maxCreditBucket is the largest configured bucket whose conversion to
+// microcredits cannot overflow int64.
+const maxCreditBucket int64 = int64(^uint64(0)>>1) / creditScale
+
+// validCreditBucket reports whether a configured credit bucket can be
+// represented safely throughout the estimator.
+func validCreditBucket(credits int64) bool {
+	return credits > 0 && credits <= maxCreditBucket
+}
+
 type creditRates struct {
 	Input         int64
 	Cached        int64

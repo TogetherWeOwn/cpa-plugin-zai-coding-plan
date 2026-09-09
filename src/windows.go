@@ -47,11 +47,19 @@ type accountQuotaView struct {
 	DedupCollisionWarn  bool
 }
 
+// addEvent inserts in chronological order because usage records can arrive out
+// of order while compaction and persisted-state validation require sorted data.
 func (state *accountQuotaState) addEvent(event creditEvent) {
 	if event.Microcredits <= 0 {
 		return
 	}
-	state.Events = append(state.Events, event)
+	index := len(state.Events)
+	for index > 0 && state.Events[index-1].At.After(event.At) {
+		index--
+	}
+	state.Events = append(state.Events, creditEvent{})
+	copy(state.Events[index+1:], state.Events[index:])
+	state.Events[index] = event
 }
 
 func (state *accountQuotaState) compact(now time.Time, retention time.Duration) {
@@ -83,7 +91,8 @@ func (state *accountQuotaState) seenDedup(hash string) bool {
 }
 
 func (state accountQuotaState) view(now time.Time, item account, cfg pluginConfig) accountQuotaView {
-	fresh := state.Authoritative != nil && now.Sub(state.Authoritative.ObservedAt) <= cfg.AuthoritativeMaxAge
+	// A future timestamp must never manufacture authoritative freshness.
+	fresh := state.Authoritative != nil && !state.Authoritative.ObservedAt.After(now) && now.Sub(state.Authoritative.ObservedAt) <= cfg.AuthoritativeMaxAge
 	if fresh {
 		return accountQuotaView{
 			Source:              "authoritative",

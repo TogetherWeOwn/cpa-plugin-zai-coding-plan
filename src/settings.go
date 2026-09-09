@@ -250,7 +250,7 @@ func validateAccountQuotaState(state accountQuotaState, now time.Time) error {
 		return fmt.Errorf("invalid polling metadata")
 	}
 	if state.Authoritative != nil {
-		if state.Authoritative.ObservedAt.IsZero() || state.Authoritative.ObservedAt.After(futureLimit) {
+		if state.Authoritative.ObservedAt.IsZero() || state.Authoritative.ObservedAt.Year() < 2000 || state.Authoritative.ObservedAt.After(futureLimit) {
 			return fmt.Errorf("invalid authoritative observation time")
 		}
 		for _, window := range []quotaWindow{state.Authoritative.FiveHour, state.Authoritative.Weekly} {
@@ -313,6 +313,7 @@ func applyStoredSettings(accounts []account, settings settingsFile) error {
 		}
 		if plan := normalizePlan(stored.Plan); plan != "" {
 			accounts[i].Plan = plan
+			accounts[i].planExplicit = true
 			if buckets, known := planBuckets[plan]; known {
 				accounts[i].FiveHourCredits = buckets.FiveHour
 				accounts[i].WeeklyCredits = buckets.Weekly
@@ -323,9 +324,11 @@ func applyStoredSettings(accounts []account, settings settingsFile) error {
 		}
 		if stored.FiveHourCredits > 0 {
 			accounts[i].FiveHourCredits = stored.FiveHourCredits
+			accounts[i].fiveHourCreditsExplicit = true
 		}
 		if stored.WeeklyCredits > 0 {
 			accounts[i].WeeklyCredits = stored.WeeklyCredits
+			accounts[i].weeklyCreditsExplicit = true
 		}
 	}
 	return validateAccounts(accounts)
@@ -375,6 +378,9 @@ func validateStoredSetting(stored accountSetting) error {
 	if stored.FiveHourCredits < 0 || stored.WeeklyCredits < 0 {
 		return fmt.Errorf("negative credit bucket")
 	}
+	if stored.FiveHourCredits > 0 && !validCreditBucket(stored.FiveHourCredits) || stored.WeeklyCredits > 0 && !validCreditBucket(stored.WeeklyCredits) {
+		return fmt.Errorf("credit bucket exceeds supported range")
+	}
 	if plan == "custom" && (stored.FiveHourCredits <= 0 || stored.WeeklyCredits <= 0) {
 		return fmt.Errorf("custom plan requires both credit buckets")
 	}
@@ -390,8 +396,8 @@ func validateAccounts(accounts []account) error {
 		if normalizePlan(accounts[i].Plan) == "" {
 			return fmt.Errorf("account has invalid plan")
 		}
-		if accounts[i].FiveHourCredits <= 0 || accounts[i].WeeklyCredits <= 0 {
-			return fmt.Errorf("account has non-positive credit bucket")
+		if !validCreditBucket(accounts[i].FiveHourCredits) || !validCreditBucket(accounts[i].WeeklyCredits) {
+			return fmt.Errorf("account has non-positive or out-of-range credit bucket")
 		}
 		nameKey := strings.ToLower(strings.TrimSpace(accounts[i].Name))
 		if _, exists := seenNames[nameKey]; exists {

@@ -316,6 +316,7 @@ func (r *pluginRuntime) commitSnapshotAfter(staged *runtimeSnapshot, beforeCommi
 		previousStore = r.snapshot.Store
 		staged.Generation = r.snapshot.Generation + 1
 		if sameSecureStore(r.snapshot.Store, staged.Store) {
+			carryForwardNamedPlans(r.snapshot, staged)
 			for identity, state := range r.snapshot.Quota {
 				if _, exists := staged.Quota[identity]; exists {
 					staged.Quota[identity] = state
@@ -424,6 +425,10 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, gene
 		state.Authoritative = &snapshot
 		state.LastPollError = ""
 		state.ConsecutiveFailures = 0
+		// Keep named-plan fallback buckets aligned with the plan reported by
+		// the upstream quota endpoint. Explicit configured or stored choices
+		// remain authoritative and are never overwritten.
+		syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan)
 	}
 	r.snapshot.Quota[identity] = state
 	persisted := r.persistenceSnapshotLocked()
@@ -434,6 +439,59 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, gene
 		return err
 	}
 	return persistErr
+}
+
+// syncPlanFromUpstream aligns an account's named-plan fallback buckets with
+// the plan reported by the quota endpoint. Explicit plan and bucket choices
+// from configuration or persisted management settings always win.
+func syncPlanFromUpstream(accounts []account, identity, plan string) {
+	if plan == "" {
+		return
+	}
+	buckets, known := planBuckets[plan]
+	if !known {
+		return
+	}
+	for i := range accounts {
+		if accounts[i].Identity != identity {
+			continue
+		}
+		if accounts[i].Plan == "custom" || accounts[i].planExplicit || accounts[i].fiveHourCreditsExplicit || accounts[i].weeklyCreditsExplicit {
+			return
+		}
+		if accounts[i].Plan != plan {
+			accounts[i].Plan = plan
+			accounts[i].FiveHourCredits = buckets.FiveHour
+			accounts[i].WeeklyCredits = buckets.Weekly
+		}
+		return
+	}
+}
+
+// carryForwardNamedPlans preserves an upstream-discovered named plan across a
+// same-store reconfigure that staged before the poll completed. Explicit plan
+// or bucket overrides on either side remain authoritative.
+func carryForwardNamedPlans(live, staged *runtimeSnapshot) {
+	liveAccounts := make(map[string]account, len(live.Accounts))
+	for _, item := range live.Accounts {
+		liveAccounts[item.Identity] = item
+	}
+	for i := range staged.Accounts {
+		liveAccount, exists := liveAccounts[staged.Accounts[i].Identity]
+		if !exists || liveAccount.Plan == "custom" || liveAccount.planExplicit || liveAccount.fiveHourCreditsExplicit || liveAccount.weeklyCreditsExplicit {
+			continue
+		}
+		if staged.Accounts[i].planExplicit || staged.Accounts[i].fiveHourCreditsExplicit || staged.Accounts[i].weeklyCreditsExplicit {
+			continue
+		}
+		buckets, known := planBuckets[liveAccount.Plan]
+		if !known {
+			continue
+		}
+		staged.Accounts[i].Plan = liveAccount.Plan
+		staged.Accounts[i].FiveHourCredits = buckets.FiveHour
+		staged.Accounts[i].WeeklyCredits = buckets.Weekly
+	}
 }
 
 func (r *pluginRuntime) persistState(store *secureStore, state persistedState) error {
@@ -674,10 +732,14 @@ func (r *pluginRuntime) shutdown() error {
 		if persist == nil {
 			persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
 		}
-		if err = persist(snapshot.Store, persisted); err != nil {
-			err = fmt.Errorf("persist quota state: %w", err)
-		} else if persisted.Generation != 0 {
-			r.persisted.Store(persisted.Generation)
+		// Earlier admitted writes may already have committed a newer snapshot.
+		// Never let shutdown overwrite it with an older final capture.
+		if persisted.Generation == 0 || persisted.Generation > r.persisted.Load() {
+			if err = persist(snapshot.Store, persisted); err != nil {
+				err = fmt.Errorf("persist quota state: %w", err)
+			} else if persisted.Generation != 0 {
+				r.persisted.Store(persisted.Generation)
+			}
 		}
 		if err == nil {
 			err = snapshot.Store.flush()
