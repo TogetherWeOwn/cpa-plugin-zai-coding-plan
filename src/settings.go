@@ -156,7 +156,15 @@ func (s *secureStore) saveSettings(settings settingsFile) error {
 		return fmt.Errorf("commit settings: %w", err)
 	}
 	if err := s.removeJSON(settingsRecoveryName); err != nil {
-		return nil
+		if writeErrorOutcome(err) != writeNeedsRecovery {
+			return fmt.Errorf("clear settings recovery: %w", err)
+		}
+		if err := s.flush(); err == nil {
+			return nil
+		}
+		if err := s.writeJSON(settingsRecoveryName, recovery); err != nil {
+			return fmt.Errorf("restore settings recovery: %w", err)
+		}
 	}
 	return nil
 }

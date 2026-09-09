@@ -91,6 +91,31 @@ func TestSettingsRenameSyncFailureIsRecoverablyCommitted(t *testing.T) {
 	}
 }
 
+func TestSettingsMarkerRemovalSyncFailureRequiresDurabilityBeforeSuccess(t *testing.T) {
+	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	identity := accountIdentity("marker-removal-durability")
+	previous := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "previous", Plan: "pro"}}}
+	if err := store.saveSettings(previous); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	store.dirSync = func(dir *os.File) error {
+		calls++
+		if calls >= 3 {
+			return errors.New("injected directory sync failure")
+		}
+		return dir.Sync()
+	}
+	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
+	if err := store.saveSettings(desired); err == nil || !strings.Contains(err.Error(), "restore settings recovery") {
+		t.Fatalf("marker-removal durability failure = %v after %d sync calls, want rejection", err, calls)
+	}
+}
+
 func TestSettingsRecoveryRollsAcknowledgedUpdateForwardFromPreviousDigest(t *testing.T) {
 	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
 	if err != nil {

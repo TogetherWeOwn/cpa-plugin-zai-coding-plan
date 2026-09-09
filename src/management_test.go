@@ -262,6 +262,41 @@ func TestManagementAccountPlanAndClearSurviveCarryForward(t *testing.T) {
 	}
 }
 
+func TestManagementNamedPlanClearsInheritedCustomBuckets(t *testing.T) {
+	for _, plan := range []string{"lite", "pro"} {
+		t.Run(plan, func(t *testing.T) {
+			now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+			item := account{Identity: accountIdentity("named-plan-" + plan), Name: "account", KeySuffix: "plan", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
+			runtime := quotaTestRuntime(t, now, []account{item})
+			five := int64(20_000)
+			weekly := int64(100_000)
+			if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Plan: "custom", FiveHourCredits: &five, WeeklyCredits: &weekly}); err != nil {
+				t.Fatal(err)
+			}
+			if err := runtime.updateAccountConfig(managementAccountConfigRequest{Account: "account", Plan: plan}); err != nil {
+				t.Fatal(err)
+			}
+
+			snapshot, err := runtime.current()
+			if err != nil {
+				t.Fatal(err)
+			}
+			buckets := planBuckets[plan]
+			if got := snapshot.Accounts[0]; got.Plan != plan || got.FiveHourCredits != buckets.FiveHour || got.WeeklyCredits != buckets.Weekly {
+				t.Fatalf("named plan retained custom buckets live: %#v", got)
+			}
+			settings, err := snapshot.Store.loadSettings()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored := settings.Accounts[item.Identity]
+			if stored.Plan != plan || stored.FiveHourCredits != 0 || stored.WeeklyCredits != 0 {
+				t.Fatalf("named plan retained persisted custom buckets: %#v", stored)
+			}
+		})
+	}
+}
+
 func TestManagementAccountConfigPersistenceFailureLeavesRuntimeUnchanged(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("persist-failure"), Name: "account", KeySuffix: "persist", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}

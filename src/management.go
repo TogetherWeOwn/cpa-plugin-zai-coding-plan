@@ -364,9 +364,18 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 			setting.Name = strings.TrimSpace(input.Name)
 		}
 		if input.Plan != "" {
+			previousPlan := normalizePlan(setting.Plan)
 			setting.Plan = normalizePlan(input.Plan)
 			if setting.Plan == "" {
 				return fmt.Errorf("plan must be lite, pro, max, or custom")
+			}
+			if setting.Plan != "custom" && setting.Plan != previousPlan {
+				if input.FiveHourCredits == nil {
+					setting.FiveHourCredits = 0
+				}
+				if input.WeeklyCredits == nil {
+					setting.WeeklyCredits = 0
+				}
 			}
 		}
 		if input.Disabled != nil {
