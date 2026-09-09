@@ -107,14 +107,14 @@ func TestAuthoritativeQuotaReplacesEstimateAndFailureRetainsLastGood(t *testing.
 		}
 		return quotaHTTPResponse(503, quotaFixtureKey), nil
 	})
-	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation); err != nil {
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation, 0); err != nil {
 		t.Fatal(err)
 	}
 	view, _ := runtime.quotaView(item.Identity)
 	if view.Source != "authoritative" || view.FiveHour.ConsumedMicrocredits != 6_000*creditScale {
 		t.Fatalf("authoritative view = %#v", view)
 	}
-	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation); err == nil {
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation, 0); err == nil {
 		t.Fatal("non-200 poll succeeded")
 	}
 	view, _ = runtime.quotaView(item.Identity)
@@ -176,6 +176,29 @@ func TestRuntimeStatePersistenceRejectsStaleSnapshot(t *testing.T) {
 	}
 }
 
+func TestRuntimePeriodicPollUsesConfiguredQuotaTimeout(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("periodic-timeout"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	runtime.snapshot.Config.QuotaTimeout = 5 * time.Second
+	var remaining time.Duration
+	runtime.httpClient = roundTripDoer(func(request *http.Request) (*http.Response, error) {
+		deadline, ok := request.Context().Deadline()
+		if !ok {
+			t.Fatal("periodic poll request has no deadline")
+		}
+		remaining = time.Until(deadline)
+		return quotaHTTPResponse(http.StatusBadGateway, quotaFixtureKey), nil
+	})
+
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation, runtime.snapshot.Config.QuotaTimeout); err == nil {
+		t.Fatal("periodic poll unexpectedly succeeded")
+	}
+	if remaining < 4*time.Second || remaining > 5*time.Second {
+		t.Fatalf("periodic poll deadline remaining = %s, want configured timeout %s", remaining, runtime.snapshot.Config.QuotaTimeout)
+	}
+}
+
 func TestRuntimePollOnceRejectsCancelledOldGenerationResponse(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("stale-generation"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
@@ -199,7 +222,7 @@ func TestRuntimePollOnceRejectsCancelledOldGenerationResponse(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	pollDone := make(chan error, 1)
-	go func() { pollDone <- runtime.pollOnce(ctx, item.Identity, item.key, 1) }()
+	go func() { pollDone <- runtime.pollOnce(ctx, item.Identity, item.key, 1, 0) }()
 	<-started
 	cancel()
 	runtime.mu.Lock()

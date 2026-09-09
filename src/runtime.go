@@ -41,6 +41,12 @@ type runtimeSnapshot struct {
 	Generation uint64
 }
 
+type refreshGeneration struct {
+	done       chan struct{}
+	err        error
+	generation uint64
+}
+
 type pluginRuntime struct {
 	mu             sync.RWMutex
 	snapshot       *runtimeSnapshot
@@ -62,9 +68,7 @@ type pluginRuntime struct {
 	persistWrite   func(*secureStore, persistedState) error
 	persistNext    atomic.Uint64
 	persisted      atomic.Uint64
-	refreshing     bool
-	refreshDone    chan struct{}
-	refreshErr     error
+	refresh        *refreshGeneration
 	shutdownDone   chan struct{}
 	shutdownErr    error
 }
@@ -270,7 +274,7 @@ func (r *pluginRuntime) startPollers(ctx context.Context, snapshot *runtimeSnaps
 			continue
 		}
 		r.workers.Add(1)
-		go r.pollAccount(ctx, item.Identity, item.key, snapshot.Generation, snapshot.Config.QuotaRefresh)
+		go r.pollAccount(ctx, item.Identity, item.key, snapshot.Generation, snapshot.Config.QuotaRefresh, snapshot.Config.QuotaTimeout)
 	}
 }
 
@@ -334,11 +338,11 @@ func (r *pluginRuntime) restartPollers() error {
 	return nil
 }
 
-func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, generation uint64, base time.Duration) {
+func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, generation uint64, base, timeout time.Duration) {
 	defer r.workers.Done()
 	attempt := 0
 	for {
-		if err := r.pollOnce(ctx, identity, key, generation); err != nil && errors.Is(err, context.Canceled) {
+		if err := r.pollOnce(ctx, identity, key, generation, timeout); err != nil && errors.Is(err, context.Canceled) {
 			return
 		}
 		attempt++
@@ -352,9 +356,9 @@ func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, g
 	}
 }
 
-func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, generation uint64) error {
+func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, generation uint64, timeout time.Duration) error {
 	now := r.runtimeClock().Now()
-	attemptCtx, cancel := context.WithTimeout(ctx, defaultQuotaTimeout)
+	attemptCtx, cancel := context.WithTimeout(ctx, quotaTimeout(timeout))
 	defer cancel()
 	snapshot, err := fetchQuota(attemptCtx, r.quotaClient(), r.quotaEndpoint(), key, now)
 	r.mu.Lock()
@@ -628,6 +632,13 @@ func (r *pluginRuntime) shutdown() error {
 	close(done)
 	r.mu.Unlock()
 	return err
+}
+
+func quotaTimeout(timeout time.Duration) time.Duration {
+	if timeout == 0 {
+		return defaultQuotaTimeout
+	}
+	return timeout
 }
 
 func maxPollInterval(base time.Duration) time.Duration {

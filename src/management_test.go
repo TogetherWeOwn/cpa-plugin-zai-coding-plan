@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -132,6 +133,42 @@ func TestManagementRefreshCoalescesAndRedactsFailure(t *testing.T) {
 	}
 }
 
+func TestManagementRefreshFollowersReceiveTheirGenerationResult(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("refresh-generations"), Name: "account", KeySuffix: "redacted", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+
+	first, leader, err := runtime.beginRefresh()
+	if err != nil || !leader {
+		t.Fatalf("begin first refresh: leader=%t err=%v", leader, err)
+	}
+	follower, leader, err := runtime.beginRefresh()
+	if err != nil || leader || follower != first {
+		t.Fatalf("join first refresh: leader=%t err=%v follower=%p first=%p", leader, err, follower, first)
+	}
+	firstErr := errors.New("first generation failed")
+	runtime.endRefresh(first, firstErr)
+
+	runtime.mu.Lock()
+	replacement := cloneRuntimeSnapshot(runtime.snapshot)
+	replacement.Generation++
+	runtime.snapshot = replacement
+	runtime.mu.Unlock()
+	second, leader, err := runtime.beginRefresh()
+	if err != nil || !leader || second == first {
+		t.Fatalf("begin second refresh: leader=%t err=%v second=%p first=%p", leader, err, second, first)
+	}
+	secondErr := errors.New("second generation failed")
+	runtime.endRefresh(second, secondErr)
+
+	if got := runtime.waitRefresh(context.Background(), follower); !errors.Is(got, firstErr) {
+		t.Fatalf("first-generation follower error = %v, want %v", got, firstErr)
+	}
+	if got := runtime.waitRefresh(context.Background(), second); !errors.Is(got, secondErr) {
+		t.Fatalf("second-generation error = %v, want %v", got, secondErr)
+	}
+}
+
 func TestManagementConcurrentAccountConfigPreservesBothUpdates(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	first := account{Identity: accountIdentity("first-config"), Name: "first", KeySuffix: "first", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000}
@@ -159,6 +196,49 @@ func TestManagementConcurrentAccountConfigPreservesBothUpdates(t *testing.T) {
 	}
 	if settings.Accounts[first.Identity].Name != "ONE" || settings.Accounts[second.Identity].Name != "TWO" {
 		t.Fatalf("concurrent settings lost an acknowledged update: %#v", settings.Accounts)
+	}
+}
+
+func TestManagementAccountConfigShutdownErrorDoesNotPersist(t *testing.T) {
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, configPath, authDir, fixtureKey)
+	rawConfig := []byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")
+
+	var runtime pluginRuntime
+	if err := runtime.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	runtime.settingsMu.Lock()
+	updateDone := make(chan pluginapi.ManagementResponse, 1)
+	go func() {
+		updateDone <- runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{
+			Method: http.MethodPost,
+			Path:   managementAccountConfigPath,
+			Body:   []byte(`{"account":"zai-pro-1","name":"must-not-persist"}`),
+		})
+	}()
+	if err := runtime.shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	runtime.settingsMu.Unlock()
+	response := <-updateDone
+	if response.StatusCode == http.StatusOK {
+		t.Fatalf("shutdown-losing config update succeeded: %s", response.Body)
+	}
+
+	var reloaded pluginRuntime
+	if err := reloaded.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reloaded.shutdown() }()
+	snapshot, err := reloaded.current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Accounts[0].Name == "must-not-persist" {
+		t.Fatal("error response persisted account settings into the next runtime")
 	}
 }
 

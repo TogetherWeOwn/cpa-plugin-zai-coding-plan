@@ -180,19 +180,12 @@ func (r *pluginRuntime) statusResponse(statusCode int) pluginapi.ManagementRespo
 }
 
 func (r *pluginRuntime) forceRefresh(ctx context.Context) error {
-	done, leader, err := r.beginRefresh()
+	refresh, leader, err := r.beginRefresh()
 	if err != nil {
 		return err
 	}
 	if !leader {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-done:
-			r.mu.RLock()
-			defer r.mu.RUnlock()
-			return r.refreshErr
-		}
+		return r.waitRefresh(ctx, refresh)
 	}
 	defer r.refreshWorkers.Done()
 
@@ -208,39 +201,42 @@ func (r *pluginRuntime) forceRefresh(ctx context.Context) error {
 		stop()
 		cancel()
 	}()
-	refreshErr := r.runRefresh(refreshCtx)
-	r.endRefresh(refreshErr)
+	refreshErr := r.runRefresh(refreshCtx, refresh)
+	r.endRefresh(refresh, refreshErr)
 	return refreshErr
 }
 
-func (r *pluginRuntime) beginRefresh() (<-chan struct{}, bool, error) {
+func (r *pluginRuntime) waitRefresh(ctx context.Context, refresh *refreshGeneration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-refresh.done:
+		return refresh.err
+	}
+}
+
+func (r *pluginRuntime) beginRefresh() (*refreshGeneration, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.stopped || r.snapshot == nil {
 		return nil, false, fmt.Errorf("plugin is not configured")
 	}
-	if r.refreshing {
-		return r.refreshDone, false, nil
+	if r.refresh != nil && r.refresh.generation == r.snapshot.Generation {
+		return r.refresh, false, nil
 	}
 	if r.refreshContext == nil {
 		r.refreshContext, r.refreshCancel = context.WithCancel(context.Background())
 	}
 	r.refreshWorkers.Add(1)
-	r.refreshing = true
-	r.refreshDone = make(chan struct{})
-	r.refreshErr = nil
-	return r.refreshDone, true, nil
+	r.refresh = &refreshGeneration{done: make(chan struct{}), generation: r.snapshot.Generation}
+	return r.refresh, true, nil
 }
 
-func (r *pluginRuntime) runRefresh(ctx context.Context) error {
+func (r *pluginRuntime) runRefresh(ctx context.Context, refresh *refreshGeneration) error {
 	r.mu.RLock()
 	accounts := append([]account(nil), r.snapshot.Accounts...)
-	generation := r.snapshot.Generation
-	timeout := r.snapshot.Config.QuotaTimeout
+	timeout := quotaTimeout(r.snapshot.Config.QuotaTimeout)
 	r.mu.RUnlock()
-	if timeout == 0 {
-		timeout = defaultQuotaTimeout
-	}
 
 	refreshCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -253,7 +249,7 @@ func (r *pluginRuntime) runRefresh(ctx context.Context) error {
 		}
 		launched++
 		go func(item account) {
-			results <- pollResult{err: r.pollOnce(refreshCtx, item.Identity, item.key, generation)}
+			results <- pollResult{err: r.pollOnce(refreshCtx, item.Identity, item.key, refresh.generation, timeout)}
 		}(item)
 	}
 	var failures int
@@ -273,16 +269,14 @@ func (r *pluginRuntime) runRefresh(ctx context.Context) error {
 	return nil
 }
 
-func (r *pluginRuntime) endRefresh(err error) {
+func (r *pluginRuntime) endRefresh(refresh *refreshGeneration, err error) {
 	r.mu.Lock()
-	done := r.refreshDone
-	r.refreshErr = err
-	r.refreshing = false
-	r.refreshDone = nil
-	if done != nil {
-		close(done)
+	refresh.err = err
+	if r.refresh == refresh {
+		r.refresh = nil
 	}
 	r.mu.Unlock()
+	close(refresh.done)
 }
 
 func (r *pluginRuntime) unblock(accountName string) error {
@@ -426,10 +420,13 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 	if err := validateAccounts(updated.Accounts); err != nil {
 		return err
 	}
+	if err := r.commitSnapshot(updated); err != nil {
+		return err
+	}
 	if err := updated.Store.saveSettings(settings); err != nil {
 		return fmt.Errorf("save account settings: %w", err)
 	}
-	return r.commitSnapshot(updated)
+	return nil
 }
 
 func applySettingToAccount(item *account, setting accountSetting) {
