@@ -16,9 +16,11 @@ import (
 )
 
 const (
-	maxStateFileSize        = 8 << 20
-	maxPersistedClockSkew   = 5 * time.Minute
-	settingsRecoveryVersion = 1
+	maxStateFileSize            = 8 << 20
+	maxPersistedClockSkew       = 5 * time.Minute
+	settingsRecoveryVersion     = 1
+	persistedStateVersion       = 2
+	legacyPersistedStateVersion = 1
 )
 
 type writeOutcome uint8
@@ -63,10 +65,17 @@ type accountSetting struct {
 }
 
 type persistedState struct {
-	Version           int                          `json:"version"`
-	Accounts          map[string]accountQuotaState `json:"accounts,omitempty"`
-	Generation        uint64                       `json:"-"`
-	RuntimeGeneration uint64                       `json:"-"`
+	Version           int                             `json:"version"`
+	Accounts          map[string]accountQuotaState    `json:"accounts,omitempty"`
+	Health            map[string]persistedHealthState `json:"health,omitempty"`
+	Generation        uint64                          `json:"-"`
+	RuntimeGeneration uint64                          `json:"-"`
+}
+
+type persistedHealthState struct {
+	SuspendedUntil  time.Time `json:"suspended_until,omitempty"`
+	ExhaustedUntil  time.Time `json:"exhausted_until,omitempty"`
+	ExhaustedReason string    `json:"exhausted_reason,omitempty"`
 }
 
 type settingsRecovery struct {
@@ -235,22 +244,57 @@ func validatePersistedState(state persistedState) error {
 }
 
 func validatePersistedStateAt(state persistedState, now time.Time) error {
-	if state.Version == 0 && len(state.Accounts) == 0 {
+	if state.Version == 0 && len(state.Accounts) == 0 && len(state.Health) == 0 {
 		return nil
 	}
-	if state.Version != 1 {
+	if state.Version != legacyPersistedStateVersion && state.Version != persistedStateVersion {
 		return fmt.Errorf("state.json has unsupported version")
 	}
+	if state.Version == legacyPersistedStateVersion && len(state.Health) != 0 {
+		return fmt.Errorf("state.json has unsupported health data")
+	}
 	for identity, accountState := range state.Accounts {
-		if len(identity) != sha256.Size*2 {
-			return fmt.Errorf("state.json contains invalid account identity")
-		}
-		if _, err := hex.DecodeString(identity); err != nil {
-			return fmt.Errorf("state.json contains invalid account identity")
+		if err := validateAccountIdentity(identity); err != nil {
+			return err
 		}
 		if err := validateAccountQuotaState(accountState, now); err != nil {
 			return fmt.Errorf("state.json contains invalid account state")
 		}
+	}
+	for identity, healthState := range state.Health {
+		if err := validateAccountIdentity(identity); err != nil {
+			return err
+		}
+		if err := validatePersistedHealthState(healthState); err != nil {
+			return fmt.Errorf("state.json contains invalid health state")
+		}
+	}
+	return nil
+}
+
+func validateAccountIdentity(identity string) error {
+	if len(identity) != sha256.Size*2 {
+		return fmt.Errorf("state.json contains invalid account identity")
+	}
+	if _, err := hex.DecodeString(identity); err != nil {
+		return fmt.Errorf("state.json contains invalid account identity")
+	}
+	return nil
+}
+
+func validatePersistedHealthState(state persistedHealthState) error {
+	const maxPersistedHealthYear = 9999
+	if !state.SuspendedUntil.IsZero() && (state.SuspendedUntil.Year() < 2000 || state.SuspendedUntil.Year() > maxPersistedHealthYear) {
+		return fmt.Errorf("invalid suspension time")
+	}
+	if !state.ExhaustedUntil.IsZero() && (state.ExhaustedUntil.Year() < 2000 || state.ExhaustedUntil.Year() > maxPersistedHealthYear) {
+		return fmt.Errorf("invalid exhaustion time")
+	}
+	if !state.ExhaustedUntil.IsZero() && strings.TrimSpace(state.ExhaustedReason) == "" {
+		return fmt.Errorf("missing exhaustion reason")
+	}
+	if len(state.ExhaustedReason) > 96 {
+		return fmt.Errorf("invalid exhaustion reason")
 	}
 	return nil
 }

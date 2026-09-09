@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -25,8 +26,15 @@ func TestPluginRegistration(t *testing.T) {
 	}
 }
 
-func TestSchedulerPickDeclines(t *testing.T) {
-	raw, err := schedulerPick(nil)
+func TestSchedulerPickDeclinesUnmanagedTraffic(t *testing.T) {
+	previous := runtimeState
+	defer func() { runtimeState = previous }()
+	runtimeState = schedulerTestRuntime(time.Now().UTC(), schedulerAccount("managed", "claude-auth", "openai-auth"))
+	request, err := json.Marshal(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "other-auth", Provider: "gemini"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := schedulerPick(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,11 +46,8 @@ func TestSchedulerPickDeclines(t *testing.T) {
 	if err := json.Unmarshal(envelope.Result, &pick); err != nil {
 		t.Fatal(err)
 	}
-	if pick.Handled {
-		t.Fatal("scaffold scheduler must decline so the host's native scheduler stays in control")
-	}
-	if pick.AuthID != "" || pick.DelegateBuiltin != "" {
-		t.Fatalf("declined pick must not select an auth: %#v", pick)
+	if pick.Handled || pick.AuthID != "" || pick.DelegateBuiltin != "" {
+		t.Fatalf("unmanaged traffic must be declined: %#v", pick)
 	}
 }
 

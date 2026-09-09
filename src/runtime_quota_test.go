@@ -130,11 +130,12 @@ func TestAuthoritativeQuotaReplacesEstimateAndFailureRetainsLastGood(t *testing.
 }
 
 func TestUsageHandleAcknowledgesLossyPersistenceFailure(t *testing.T) {
-	defer func() { runtimeState = pluginRuntime{} }()
+	previous := runtimeState
+	defer func() { runtimeState = previous }()
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("account"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, ClaudeAuthID: "auth"}
 	testRuntime := quotaTestRuntime(t, now, []account{item})
-	runtimeState = pluginRuntime{clock: testRuntime.clock, snapshot: testRuntime.snapshot}
+	runtimeState = &pluginRuntime{clock: testRuntime.clock, snapshot: testRuntime.snapshot}
 	runtimeState.persist = func(*secureStore, persistedState) error { return errors.New("disk unavailable") }
 	raw, err := json.Marshal(pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now, Detail: pluginapi.UsageDetail{InputTokens: 1}})
 	if err != nil {
@@ -634,16 +635,32 @@ func quotaTestRuntime(t *testing.T, now time.Time, accounts []account) *pluginRu
 		byAuthID[item.ClaudeAuthID] = item.Identity
 		byAuthID[item.OpenAIAuthID] = item.Identity
 	}
-	return &pluginRuntime{
-		clock: &fakeClock{now: now},
-		snapshot: &runtimeSnapshot{
-			Config:       pluginConfig{QuotaRefresh: 2 * time.Minute, AuthoritativeMaxAge: 5 * time.Minute, ThresholdPercent: 97, StateRetention: 8 * 24 * time.Hour},
-			BaseAccounts: append([]account(nil), accounts...),
-			Accounts:     accounts,
-			Store:        store,
-			Quota:        quota,
-			byAuthID:     byAuthID,
-		},
+	snapshot := newRuntimeSnapshot(pluginConfig{
+		QuotaRefresh: 2 * time.Minute, AuthoritativeMaxAge: 5 * time.Minute,
+		ThresholdPercent: 97, StateRetention: 8 * 24 * time.Hour,
+	}, accounts, store)
+	snapshot.Quota = quota
+	return &pluginRuntime{clock: &fakeClock{now: now}, snapshot: snapshot}
+}
+
+func TestUsageArrivingOutOfOrderStaysPersistable(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("account"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 60_000, ClaudeAuthID: "auth"}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	later := pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now, Detail: pluginapi.UsageDetail{InputTokens: 10_000}}
+	earlier := pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now.Add(-time.Minute), Detail: pluginapi.UsageDetail{InputTokens: 2_000}}
+	if err := runtime.handleUsage(later); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.handleUsage(earlier); err != nil {
+		t.Fatalf("late-arriving record broke persistence: %v", err)
+	}
+	state := runtime.snapshot.Quota[item.Identity]
+	if len(state.Events) != 2 || state.Events[0].At.After(state.Events[1].At) {
+		t.Fatalf("events not chronological: %#v", state.Events)
+	}
+	if err := validatePersistedState(persistedState{Version: 1, Accounts: map[string]accountQuotaState{item.Identity: state}}); err != nil {
+		t.Fatalf("out-of-order delivery poisoned persisted state: %v", err)
 	}
 }
 

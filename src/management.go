@@ -299,10 +299,17 @@ func (r *pluginRuntime) unblock(accountName string) error {
 	if selector != "" && len(matches) != 1 {
 		return fmt.Errorf("account selector is ambiguous")
 	}
+	now := r.runtimeNow()
 	for _, identity := range matches {
 		state := r.snapshot.Quota[identity]
-		state.compact(r.runtimeClock().Now(), r.snapshot.Config.StateRetention)
+		state.compact(now, r.snapshot.Config.StateRetention)
 		r.snapshot.Quota[identity] = state
+		health := r.snapshot.Health[identity]
+		health.SuspendedUntil = time.Time{}
+		health.ExhaustedUntil = time.Time{}
+		health.ExhaustedReason = ""
+		r.snapshot.Health[identity] = health
+		r.refreshCapacityLocked(identity, now)
 	}
 	return nil
 }
@@ -438,6 +445,10 @@ func (r *pluginRuntime) updateAccountConfig(input managementAccountConfigRequest
 		settings.Accounts[item.Identity] = setting
 	}
 	updated.Accounts[index] = candidate
+	if updated.byIdentity == nil {
+		updated.byIdentity = make(map[string]account, len(updated.Accounts))
+	}
+	updated.byIdentity[candidate.Identity] = candidate
 	updated.Config = cfg
 	if err := validateAccounts(updated.Accounts); err != nil {
 		return err

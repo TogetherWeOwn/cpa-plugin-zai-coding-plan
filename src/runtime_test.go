@@ -44,6 +44,29 @@ func TestRuntimeLoadsSettingsByStableIdentity(t *testing.T) {
 	}
 }
 
+func TestRuntimeRejectsNonExclusiveSchedulerDeployment(t *testing.T) {
+	root := t.TempDir()
+	cpaPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, cpaPath, filepath.Join(root, "auth"), fixtureKey)
+	raw, err := os.ReadFile(cpaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.Replace(string(raw), "      priority: 1000\n", "      priority: 1000\n    competitor:\n      enabled: true\n      priority: 2000\n", 1))
+	if err = os.WriteFile(cpaPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var runtime pluginRuntime
+	err = runtime.reconfigure([]byte("cpa-config-path: " + cpaPath + "\ndefault-plan: pro\n"))
+	if err == nil || !strings.Contains(err.Error(), "sole enabled") {
+		t.Fatalf("non-exclusive reconfigure error = %v", err)
+	}
+	if _, currentErr := runtime.current(); currentErr == nil {
+		t.Fatal("non-exclusive deployment published a snapshot")
+	}
+}
+
 func TestRuntimeReconfigureClosesSupersededAndShutdownClosesFinalStore(t *testing.T) {
 	root := t.TempDir()
 	configPath := filepath.Join(root, "config.yaml")
@@ -138,6 +161,12 @@ func TestRuntimeShutdownStopsReconfigure(t *testing.T) {
 func writeCPAConfigFixture(t *testing.T, path, authDir, key string) {
 	t.Helper()
 	raw := "auth-dir: " + authDir + "\n" +
+		"plugins:\n" +
+		"  enabled: true\n" +
+		"  configs:\n" +
+		"    zai-coding-plan:\n" +
+		"      enabled: true\n" +
+		"      priority: 1000\n" +
 		"claude-api-key:\n" +
 		"  - api-key: " + key + "\n" +
 		"    base-url: " + zaiAnthropicBaseURL + "\n" +

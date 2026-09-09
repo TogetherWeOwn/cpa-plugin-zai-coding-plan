@@ -14,6 +14,7 @@ import (
 
 const (
 	defaultCPAConfigPath       = "config.yaml"
+	requiredPluginPriority     = 1000
 	defaultQuotaRefresh        = 2 * time.Minute
 	defaultAuthoritativeMaxAge = 5 * time.Minute
 	defaultThreshold           = 97
@@ -82,6 +83,17 @@ type cpaConfigProjection struct {
 	AuthDir             string                          `yaml:"auth-dir"`
 	ClaudeKeys          []sdkconfig.ClaudeKey           `yaml:"claude-api-key"`
 	OpenAICompatibility []sdkconfig.OpenAICompatibility `yaml:"openai-compatibility"`
+	Plugins             cpaPluginsProjection            `yaml:"plugins"`
+}
+
+type cpaPluginsProjection struct {
+	Enabled bool                           `yaml:"enabled"`
+	Configs map[string]cpaPluginProjection `yaml:"configs"`
+}
+
+type cpaPluginProjection struct {
+	Enabled  *bool `yaml:"enabled"`
+	Priority int   `yaml:"priority"`
 }
 
 func parsePluginConfig(raw []byte) (pluginConfig, error) {
@@ -230,10 +242,15 @@ func loadCPAConfig(path string) (cpaConfigProjection, error) {
 	if err != nil {
 		return cpaConfigProjection{}, fmt.Errorf("load CPA config: invalid configuration")
 	}
+	plugins := cpaPluginsProjection{Enabled: cfg.Plugins.Enabled, Configs: make(map[string]cpaPluginProjection, len(cfg.Plugins.Configs))}
+	for id, item := range cfg.Plugins.Configs {
+		plugins.Configs[id] = cpaPluginProjection{Enabled: item.Enabled, Priority: item.Priority}
+	}
 	return cpaConfigProjection{
 		AuthDir:             cfg.AuthDir,
 		ClaudeKeys:          cfg.ClaudeKey,
 		OpenAICompatibility: cfg.OpenAICompatibility,
+		Plugins:             plugins,
 	}, nil
 }
 
