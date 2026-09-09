@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -106,9 +108,15 @@ func schedulerPick(_ []byte) ([]byte, error) {
 	return okEnvelope(pluginapi.SchedulerPickResponse{Handled: false})
 }
 
-// usageHandle acknowledges a usage record. Quota accounting arrives in a
-// later slice; the host only logs when the call errors.
-func usageHandle(_ []byte) ([]byte, error) {
+// usageHandle consumes a lossy best-effort usage observation. Persistence
+// failures are surfaced in estimator integrity state, but the response remains
+// successful because CPA discards usage-plugin RPC errors.
+func usageHandle(request []byte) ([]byte, error) {
+	var record pluginapi.UsageRecord
+	if err := json.Unmarshal(request, &record); err != nil {
+		return nil, fmt.Errorf("decode usage record")
+	}
+	_ = runtimeState.handleUsage(record)
 	return okEnvelope(struct{}{})
 }
 
@@ -129,12 +137,7 @@ func managementHandle(request []byte) ([]byte, error) {
 	if runtimeState.validationStatus() != "" {
 		status = "reconfigure_rejected"
 	}
-	body, err := json.Marshal(managementStatusBody{
-		Plugin:          pluginID,
-		Status:          status,
-		Version:         pluginVersion,
-		ValidationError: runtimeState.validationStatus(),
-	})
+	body, err := json.Marshal(runtimeState.managementStatus(status))
 	if err != nil {
 		return nil, err
 	}
@@ -145,12 +148,37 @@ func managementHandle(request []byte) ([]byte, error) {
 	})
 }
 
-// managementStatusBody is the JSON served at the status route.
+// managementStatusBody is the redacted JSON served at the status route.
 type managementStatusBody struct {
-	Plugin          string `json:"plugin"`
-	Status          string `json:"status"`
-	Version         string `json:"version"`
-	ValidationError string `json:"validation_error,omitempty"`
+	Plugin          string                    `json:"plugin"`
+	Status          string                    `json:"status"`
+	Version         string                    `json:"version"`
+	GeneratedAt     time.Time                 `json:"generated_at"`
+	ValidationError string                    `json:"validation_error,omitempty"`
+	Accounts        []managementAccountStatus `json:"accounts,omitempty"`
+}
+
+type managementAccountStatus struct {
+	Name                   string    `json:"name"`
+	KeySuffix              string    `json:"key_suffix"`
+	Plan                   string    `json:"plan"`
+	FiveHourUtilization    float64   `json:"five_hour_utilization"`
+	WeeklyUtilization      float64   `json:"weekly_utilization"`
+	FiveHourResetsAt       time.Time `json:"five_hour_resets_at,omitempty"`
+	WeeklyResetsAt         time.Time `json:"weekly_resets_at,omitempty"`
+	QuotaSource            string    `json:"quota_source"`
+	QuotaObservedAt        time.Time `json:"quota_observed_at,omitempty"`
+	QuotaAgeSeconds        int64     `json:"quota_age_seconds"`
+	QuotaStale             bool      `json:"quota_stale"`
+	QuotaError             string    `json:"quota_error,omitempty"`
+	Offpeak                bool      `json:"offpeak"`
+	Health                 string    `json:"health"`
+	EstimatorCompleteSince time.Time `json:"estimator_complete_since,omitempty"`
+	DeliveryWarning        bool      `json:"delivery_warning"`
+	PersistenceWarning     bool      `json:"persistence_warning"`
+	UnknownModelWarning    bool      `json:"unknown_model_warning"`
+	HeuristicDedupWarning  bool      `json:"heuristic_dedup_warning"`
+	DedupMode              string    `json:"dedup_mode"`
 }
 
 func okEnvelope(value any) ([]byte, error) {

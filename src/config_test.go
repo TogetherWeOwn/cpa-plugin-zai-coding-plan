@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -17,11 +18,30 @@ func TestParsePluginConfigDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CPAConfigPath != defaultCPAConfigPath || cfg.ThresholdPercent != defaultThreshold {
+	if cfg.CPAConfigPath != defaultCPAConfigPath || cfg.QuotaRefresh != defaultQuotaRefresh || cfg.AuthoritativeMaxAge != defaultAuthoritativeMaxAge || cfg.ThresholdPercent != defaultThreshold {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
 	if cfg.SuspendDuration != defaultSuspend || cfg.FallbackCooldown != defaultFallback || cfg.StateRetention != defaultStateRetention {
 		t.Fatalf("unexpected durations: %#v", cfg)
+	}
+}
+
+func TestParsePluginConfigQuotaCadenceAndFreshness(t *testing.T) {
+	cfg, err := parsePluginConfig([]byte("quota-refresh-interval: 1m\nauthoritative-max-age: 2m\ndefault-plan: pro\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.QuotaRefresh != time.Minute || cfg.AuthoritativeMaxAge != 2*time.Minute {
+		t.Fatalf("quota config = %#v", cfg)
+	}
+	for _, raw := range []string{
+		"quota-refresh-interval: 59s\nauthoritative-max-age: 5m\ndefault-plan: pro\n",
+		"quota-refresh-interval: 181s\nauthoritative-max-age: 5m\ndefault-plan: pro\n",
+		"quota-refresh-interval: 2m\nauthoritative-max-age: 3m\ndefault-plan: pro\n",
+	} {
+		if _, err := parsePluginConfig([]byte(raw)); err == nil {
+			t.Fatalf("invalid quota config succeeded: %q", raw)
+		}
 	}
 }
 
