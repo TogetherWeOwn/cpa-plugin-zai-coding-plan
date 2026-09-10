@@ -119,7 +119,7 @@ func TestSettingsFirstDirectorySyncFailureRejectsBeforeDesiredMarker(t *testing.
 	}
 }
 
-func TestSettingsSecondDirectorySyncFailureRequiresDurability(t *testing.T) {
+func TestSettingsSecondDirectorySyncFailureRemainsPending(t *testing.T) {
 	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
 	if err != nil {
 		t.Fatal(err)
@@ -143,15 +143,12 @@ func TestSettingsSecondDirectorySyncFailureRequiresDurability(t *testing.T) {
 		t.Fatalf("settings outcome = %v, want recoverable pending commit", err)
 	}
 	store.dirSync = nil
-	if err := store.removeJSON(settingsRecoveryName); err != nil {
-		t.Fatal(err)
-	}
 	recovered, err := store.recoverSettings()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if recovered.Accounts[identity].Name != "previous" {
-		t.Fatalf("rejected settings survived simulated marker loss: %#v", recovered)
+	if recovered.Accounts[identity].Name != "desired" {
+		t.Fatalf("pending settings were not recovered: %#v", recovered)
 	}
 }
 
@@ -187,7 +184,7 @@ func TestSettingsSecondDirectorySyncFailureAcknowledgesAlreadyCommittedSettings(
 	}
 }
 
-func TestSettingsCommitDirectorySyncFailureRequiresDurability(t *testing.T) {
+func TestSettingsCommitDirectorySyncFailureIsRecoverablyCommitted(t *testing.T) {
 	store, err := newSecureStore(filepath.Join(t.TempDir(), "auth"))
 	if err != nil {
 		t.Fatal(err)
@@ -207,8 +204,8 @@ func TestSettingsCommitDirectorySyncFailureRequiresDurability(t *testing.T) {
 		return dir.Sync()
 	}
 	desired := settingsFile{Version: 1, Accounts: map[string]accountSetting{identity: {Name: "desired", Plan: "pro"}}}
-	if err := store.saveSettings(desired); err == nil || settingsRecoveryPending(err) {
-		t.Fatalf("settings outcome = %v, want ordinary commit rejection", err)
+	if err := store.saveSettings(desired); err == nil || !settingsRecoveryPending(err) {
+		t.Fatalf("settings outcome = %v, want recoverable committed update", err)
 	}
 	store.dirSync = nil
 	if err := store.writeJSON("settings.json", previous); err != nil {
@@ -219,7 +216,7 @@ func TestSettingsCommitDirectorySyncFailureRequiresDurability(t *testing.T) {
 		t.Fatal(err)
 	}
 	if recovered.Accounts[identity].Name != "desired" {
-		t.Fatalf("durable marker did not recover rejected commit: %#v", recovered)
+		t.Fatalf("durable marker did not recover acknowledged commit: %#v", recovered)
 	}
 }
 

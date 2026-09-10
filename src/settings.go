@@ -177,6 +177,8 @@ func (s *secureStore) saveSettings(settings settingsFile) error {
 			if readErr == nil && settingsDigest(current) == settingsDigest(settings) {
 				return nil
 			}
+			// The rename outcome is indeterminate. Publish the update as pending rather
+			// than rejecting a desired marker that recovery may later observe.
 			return &settingsRecoveryPendingError{err: fmt.Errorf("prepare settings recovery: %w", err)}
 		}
 	}
@@ -186,7 +188,9 @@ func (s *secureStore) saveSettings(settings settingsFile) error {
 				return nil
 			}
 		}
-		return fmt.Errorf("commit settings: %w", err)
+		// A durable desired marker makes this update logically committed even when
+		// settings.json itself still needs recovery.
+		return &settingsRecoveryPendingError{err: fmt.Errorf("commit settings: %w", err)}
 	}
 	if err := s.removeJSON(settingsRecoveryName); err != nil {
 		if writeErrorOutcome(err) != writeNeedsRecovery {
