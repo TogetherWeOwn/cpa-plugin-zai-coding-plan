@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -32,7 +33,7 @@ def main() -> int:
     projected = collector.project(fixture, "2026-09-10T15:00:00Z")
     with tempfile.TemporaryDirectory() as directory:
         output = pathlib.Path(directory) / "zai.json"
-        collector.write_atomic(output, projected)
+        collector.write_atomic(output, projected, expected_owner_uid=os.getuid())
         raw = output.read_text()
         if any(value in raw for value in FORBIDDEN_VALUES) or FORBIDDEN_FIELDS.search(raw):
             raise SystemExit("projected collector output contains a forbidden secret marker")

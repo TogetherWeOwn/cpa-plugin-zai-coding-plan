@@ -14,7 +14,7 @@ class VerifyLiveTest(unittest.TestCase):
         path.write_text(textwrap.dedent(body).lstrip())
         path.chmod(0o700)
 
-    def run_verify(self, dashboard="dashboard ok", service_log="service ok", projected="projected ok"):
+    def run_verify(self, dashboard="dashboard ok", service_log="service ok", projected="projected ok", management_url=None):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             bin_dir = root / "bin"
@@ -29,7 +29,7 @@ class VerifyLiveTest(unittest.TestCase):
                 bin_dir / "curl",
                 f"""
                 #!/usr/bin/env python3
-                import json, os, pathlib, sys
+                import json, pathlib, sys
                 with pathlib.Path({str(curl_log)!r}).open("a") as log:
                     log.write("\\n".join(sys.argv[1:]) + "\\n---\\n")
                 args=sys.argv[1:]
@@ -41,6 +41,8 @@ class VerifyLiveTest(unittest.TestCase):
                     print(json.dumps({{
                         "plugin":"zai-coding-plan",
                         "status":"registered",
+                        "version":"0.0.0-dev",
+                        "generated_at":"2026-09-10T15:00:00Z",
                         "accounts":[{{
                             "name":"zai-pro-1","key_suffix":"redacted","plan":"pro",
                             "five_hour_utilization":0.1,"weekly_utilization":0.2,
@@ -86,28 +88,49 @@ class VerifyLiveTest(unittest.TestCase):
                     "COLLECTOR_ZAI": str(bin_dir / "collector-zai"),
                 }
             )
+            if management_url is not None:
+                env["CLIPROXY_MANAGEMENT_URL"] = management_url
             completed = subprocess.run([str(SCRIPT)], cwd=ROOT, env=env, text=True, capture_output=True)
-            return completed, curl_log.read_text()
+            return completed, curl_log.read_text() if curl_log.exists() else ""
 
     def test_management_key_never_appears_in_curl_argv(self):
         completed, curl_argv = self.run_verify()
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertNotIn("fixture-management-marker", curl_argv)
 
+    def test_rejects_unapproved_management_origin_before_curl(self):
+        completed, curl_argv = self.run_verify(management_url="http://127.0.0.1:9999")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(curl_argv, "")
+        self.assertIn("origin is not approved", completed.stderr)
+
+    def test_authenticated_curl_is_time_and_size_bounded(self):
+        completed, curl_argv = self.run_verify()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        invocations = [part for part in curl_argv.split("---\n") if "management.curl" in part]
+        self.assertEqual(len(invocations), 1)
+        self.assertIn("--max-time\n5", invocations[0])
+        self.assertIn("--max-filesize\n1048576", invocations[0])
+        self.assertIn("--max-redirs\n0", invocations[0])
+
     def test_oversized_service_log_is_rejected_before_full_capture(self):
         completed, _ = self.run_verify(service_log="x" * 1_048_577)
         self.assertNotEqual(completed.returncode, 0)
 
-    def test_bounded_scans_reject_management_or_plan_markers_without_printing_them(self):
+    def test_bounded_scans_reject_full_or_suffix_markers_without_printing_them(self):
         for source, value in (
             ("projected", "fixture-plan-marker"),
             ("dashboard", "fixture-plan-marker"),
             ("service_log", "fixture-management-marker"),
+            ("projected", "marker"),
+            ("dashboard", "marker"),
+            ("service_log", "marker"),
         ):
-            with self.subTest(source=source):
+            with self.subTest(source=source, value=value):
                 completed, _ = self.run_verify(**{source: value})
                 self.assertNotEqual(completed.returncode, 0)
-                self.assertNotIn(value, completed.stdout + completed.stderr)
+                self.assertNotIn("fixture-plan-marker", completed.stdout + completed.stderr)
+                self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
 
 
 if __name__ == "__main__":

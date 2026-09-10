@@ -1,6 +1,7 @@
 import http.server
 import importlib.util
 import json
+import math
 import os
 import pathlib
 import stat
@@ -26,6 +27,14 @@ class CollectorZaiTest(unittest.TestCase):
         self.assertEqual(out["records"][0]["quota_source"], "quota_api")
         self.assertEqual(set(out["records"][0]), collector.EXPECTED_ACCOUNT_FIELDS - {"quota_error"})
 
+    def test_reconfigure_rejected_marks_all_capacity_unavailable(self):
+        value = self.fixture("status-authoritative.json")
+        value["status"] = "reconfigure_rejected"
+        value["validation_error"] = "invalid replacement configuration"
+        out = collector.project(value, "2026-09-10T15:00:00Z")
+        self.assertTrue(out["records"][0]["quota_stale"])
+        self.assertEqual(out["records"][0]["health"], "config_error")
+
     def test_bounds_and_redacts_every_persisted_string(self):
         value = self.fixture("status-fallback.json")
         value["accounts"][0]["quota_error"] = "management-key=fixture-management-marker"
@@ -40,6 +49,44 @@ class CollectorZaiTest(unittest.TestCase):
                 value["accounts"][0][field] = "x" * (collector.MAX_STRING_BYTES + 1)
                 with self.assertRaises(ValueError):
                     collector.project(value, "2026-09-10T15:00:00Z")
+
+    def test_rejects_null_names_fractional_age_and_nonfinite_numbers(self):
+        cases = (
+            ("name", None),
+            ("quota_age_seconds", 1.5),
+            ("quota_age_seconds", math.inf),
+            ("five_hour_utilization", math.nan),
+            ("weekly_utilization", math.inf),
+        )
+        for field, value in cases:
+            status = self.fixture("status-authoritative.json")
+            status["accounts"][0][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                collector.project(status, "2026-09-10T15:00:00Z")
+
+    def test_rejects_invalid_timestamps(self):
+        for field in ("generated_at", "observedAt", "quota_observed_at", "five_hour_resets_at", "estimator_complete_since"):
+            with self.subTest(field=field):
+                status = self.fixture("status-authoritative.json")
+                observed_at = "2026-09-10T15:00:00Z"
+                if field == "generated_at":
+                    status[field] = "not-a-timestamp"
+                elif field == "observedAt":
+                    observed_at = "not-a-timestamp"
+                else:
+                    status["accounts"][0][field] = "not-a-timestamp"
+                with self.assertRaises(ValueError):
+                    collector.project(status, observed_at)
+
+    def test_rejects_unknown_top_level_fields_and_non_rfc_json(self):
+        status = self.fixture("status-authoritative.json")
+        status["extra"] = "value"
+        with self.assertRaises(ValueError):
+            collector.project(status, "2026-09-10T15:00:00Z")
+        for constant in (b"NaN", b"Infinity", b"-Infinity"):
+            raw = b'{"value":' + constant + b"}"
+            with self.subTest(constant=constant), self.assertRaisesRegex(ValueError, "non-RFC JSON"):
+                collector.load_json_strict(raw)
 
     def test_rejects_non_string_and_nested_values_in_allowed_fields(self):
         cases = (
@@ -65,6 +112,19 @@ class CollectorZaiTest(unittest.TestCase):
         value["accounts"][0]["key_suffix"] = "last-four"
         with self.assertRaises(ValueError):
             collector.project(value, "2026-09-10T15:00:00Z")
+
+    def test_reads_only_one_nonempty_secret_line_without_leaking_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "key"
+            for raw in (b"", b"first\nsecond\n", b" padded \n"):
+                path.write_bytes(raw)
+                with self.subTest(raw=raw), self.assertRaises(ValueError) as caught:
+                    collector.read_single_line_secret(path, "management key")
+                for line in raw.decode(errors="ignore").splitlines():
+                    if line:
+                        self.assertNotIn(line, str(caught.exception))
+            path.write_text("fixture-key\n")
+            self.assertEqual(collector.read_single_line_secret(path, "management key"), "fixture-key")
 
     def test_rejects_unapproved_management_origins(self):
         with self.assertRaises(ValueError):
@@ -123,19 +183,59 @@ class CollectorZaiTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             parent = pathlib.Path(directory) / "collector"
             path = parent / "zai.json"
-            collector.write_atomic(path, payload)
+            collector.write_atomic(path, payload, expected_owner_uid=os.getuid())
             self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             os.chmod(parent, 0o755)
             os.chmod(path, 0o644)
-            collector.write_atomic(path, payload)
+            collector.write_atomic(path, payload, expected_owner_uid=os.getuid())
             self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o700)
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_atomic_write_rejects_symlinked_or_wrong_owner_parent(self):
+        payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            victim = root / "victim"
+            victim.mkdir()
+            link = root / "usage"
+            link.symlink_to(victim, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                collector.write_atomic(link / "zai.json", payload, expected_owner_uid=os.getuid())
+            self.assertFalse((victim / "zai.json").exists())
+            real = root / "real"
+            real.mkdir()
+            with self.assertRaisesRegex(ValueError, "wrong owner"):
+                collector.write_atomic(real / "zai.json", payload, expected_owner_uid=os.getuid() + 1)
+
+    def test_atomic_write_detects_parent_substitution_before_replace(self):
+        payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            parent = root / "collector"
+            parent.mkdir()
+            replacement = root / "replacement"
+            replacement.mkdir()
+            real_lstat = collector.os.lstat
+            calls = 0
+
+            def substitute_before_final_check(path, *args, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    parent.rename(root / "original")
+                    replacement.rename(parent)
+                return real_lstat(path, *args, **kwargs)
+
+            with mock.patch.object(collector.os, "lstat", side_effect=substitute_before_final_check):
+                with self.assertRaisesRegex(ValueError, "substituted"):
+                    collector.write_atomic(parent / "zai.json", payload, expected_owner_uid=os.getuid())
+            self.assertFalse((parent / "zai.json").exists())
 
     def test_atomic_write_fsyncs_file_and_parent_directory(self):
         payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(collector.os, "fsync", wraps=os.fsync) as fsync:
-            collector.write_atomic(pathlib.Path(directory) / "collector" / "zai.json", payload)
+            collector.write_atomic(pathlib.Path(directory) / "collector" / "zai.json", payload, expected_owner_uid=os.getuid())
             self.assertEqual(fsync.call_count, 2)
 
 

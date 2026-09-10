@@ -27,11 +27,23 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn("sha256sum --check", readme)
         self.assertEqual(hashlib.sha256(REGISTRY.read_bytes()).hexdigest(), PINNED_DIGEST)
 
-    def test_rollback_defines_recorded_config_and_backup_paths(self):
+    def test_config_replacement_is_same_directory_fsynced_and_atomic(self):
+        install = README.read_text().split("## Exact host install and validation", 1)[1].split("## Rollback", 1)[0]
+        self.assertIn('mktemp --tmpdir="$config_dir"', install)
+        self.assertIn("os.fsync(handle.fileno())", install)
+        self.assertIn('mv -T "$candidate" "$config"', install)
+        self.assertIn("os.fsync(directory_fd)", install)
+        self.assertIn("systemctl reload cliproxy.service || systemctl restart cliproxy.service", install)
+
+    def test_rollback_restores_atomically_and_reloads_running_service(self):
         rollback = README.read_text().split("## Rollback", 1)[1]
         self.assertIn("config=/home/ubuntu/cliproxy/config.yaml", rollback)
         self.assertIn("backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-", rollback)
-        self.assertLess(rollback.index("backup="), rollback.index('install -m 0600 "$backup" "$config"'))
+        self.assertLess(rollback.index("backup="), rollback.index('install -m 0600 "$backup" "$restored"'))
+        self.assertIn('mktemp --tmpdir="$config_dir"', rollback)
+        self.assertIn('mv -T "$restored" "$config"', rollback)
+        self.assertIn("os.fsync(directory_fd)", rollback)
+        self.assertIn("systemctl reload cliproxy.service || systemctl restart cliproxy.service", rollback)
 
     def test_runbook_passes_both_secret_marker_files_to_live_verification(self):
         text = README.read_text()

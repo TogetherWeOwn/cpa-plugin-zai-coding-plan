@@ -52,9 +52,40 @@ path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').r
 path.chmod(0o600)
 PY
 
-# Merge deploy/config.yaml.tmpl without printing the rendered credential values.
-# Confirm the rendered config and containing directory are not group/world readable.
+# Render the complete candidate config without printing credential values, then replace
+# config.yaml durably from the same directory. Never rename across filesystems.
+config_dir=$(dirname "$config")
+test ! -L "$config_dir"
+test "$(stat -c %U:%G "$config_dir")" = root:root
+test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
+candidate=$(mktemp --tmpdir="$config_dir" .config.yaml.zai.XXXXXX)
+trap 'rm -f "$curl_config" "$candidate"' EXIT
+# Merge deploy/config.yaml.tmpl into "$candidate" without logging rendered secrets.
+chmod 0600 "$candidate"
+python3 - "$candidate" "$config_dir" <<'PY'
+import os, pathlib, sys
+candidate=pathlib.Path(sys.argv[1])
+directory=pathlib.Path(sys.argv[2])
+with candidate.open("rb") as handle:
+    os.fsync(handle.fileno())
+directory_fd=os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+mv -T "$candidate" "$config"
+candidate=
+python3 - "$config_dir" <<'PY'
+import os, pathlib, sys
+directory_fd=os.open(pathlib.Path(sys.argv[1]), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
 test "$(stat -c %a "$config")" = 600
+systemctl reload cliproxy.service || systemctl restart cliproxy.service
 
 # After config reload exposes the custom source, install the exact release.
 curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
@@ -64,9 +95,13 @@ curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --data '{"version":"0.1.0"}' \
   'http://127.0.0.1:8317/v0/management/plugin-store/zai-coding-plan/install'
 
+usage_dir=/srv/cliproxy-usage
+install -d -o root -g root -m 0700 "$usage_dir"
+test ! -L "$usage_dir"
+test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
 CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
 ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
-CLIPROXY_USAGE_DIR=/srv/cliproxy-usage \
+CLIPROXY_USAGE_DIR="$usage_dir" \
 CLIPROXY_DASHBOARD_URL=http://127.0.0.1:3000/api/telemetry/model-usage/zai \
 CLIPROXY_SERVICE_UNIT=cliproxy.service \
   "$repo/deploy/verify-live.sh"
@@ -96,18 +131,41 @@ path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').r
 path.chmod(0o600)
 PY
 curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+  --max-time 5 --max-filesize 1048576 \
   --config "$curl_config" \
   -X DELETE \
   'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan'
-install -m 0600 "$backup" "$config"
+config_dir=$(dirname "$config")
+test ! -L "$config_dir"
+test "$(stat -c %U:%G "$config_dir")" = root:root
+restored=$(mktemp --tmpdir="$config_dir" .config.yaml.rollback.XXXXXX)
+trap 'rm -f "$curl_config" "$restored"' EXIT
+install -m 0600 "$backup" "$restored"
+python3 - "$restored" <<'PY'
+import os, pathlib, sys
+with pathlib.Path(sys.argv[1]).open("rb") as handle:
+    os.fsync(handle.fileno())
+PY
+mv -T "$restored" "$config"
+restored=
+python3 - "$config_dir" <<'PY'
+import os, pathlib, sys
+directory_fd=os.open(pathlib.Path(sys.argv[1]), os.O_RDONLY | os.O_DIRECTORY)
+try:
+    os.fsync(directory_fd)
+finally:
+    os.close(directory_fd)
+PY
+systemctl reload cliproxy.service || systemctl restart cliproxy.service
 rm -f /srv/cliproxy-usage/zai.json
 ```
 
-If the deployed host cannot target-unload the native library, the operator must restart the existing CLIProxy service after both install and rollback. That restart is intentionally not hidden here: it belongs on one unassigned `operator` card with the deployment-specific command and rollback.
+The rollback is complete only after the restored configuration has been loaded by the running service. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.
 
 ## Evidence and redaction
 
 - Synthetic 401, 403, 429, threshold exhaustion, paired-sibling exclusion, healthy native round-robin, and collector redaction are executed by `acceptance_local.py`.
 - Live validation stores response bodies only in mode-`0600` temporary files and checks field names; commands and comments record status codes and hashes, never key material.
-- The collector rejects redirects, restricts management requests to loopback or an explicit `--allowed-origin`, caps the authenticated response at 1 MiB, bounds every persisted string, and redacts secret-shaped string values.
-- The collector enforces mode `0700` on the output directory, mode `0600` on initial and replacement files, fsyncs file data, atomically renames, then fsyncs the parent directory.
+- The collector rejects redirects, restricts management requests to loopback or an explicit `--allowed-origin`, caps the authenticated response at 1 MiB, requires exact schemas, RFC 3339 timestamps, integer quota ages, finite RFC JSON numbers, and one-line key files, and redacts secret-shaped string values.
+- A `reconfigure_rejected` snapshot is retained only as unavailable capacity: every projected account becomes `config_error` and stale, while live installation verification fails that state.
+- The collector requires an absolute output under a verified root-owned real directory, rejects symlinked or substituted parents, enforces mode `0700` on the directory and `0600` on initial and replacement files, fsyncs file data, atomically renames relative to the held directory descriptor, then fsyncs that directory.
