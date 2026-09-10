@@ -22,6 +22,7 @@ test:
 
 test-release:
 	$(GO) test ./.github/scripts/release-validation
+	.github/scripts/select-release-tag_test.sh
 
 validate-source:
 	$(GO) run -buildvcs=false ./.github/scripts/release-validation -mode source
