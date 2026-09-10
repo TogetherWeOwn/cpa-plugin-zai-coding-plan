@@ -30,6 +30,10 @@ jobs:
         run: make test-release
       - name: Validate release source
         run: make validate-source
+      - name: Scan repository with gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Lint
         uses: golangci/golangci-lint-action@v9
         with:

@@ -29,6 +29,10 @@ jobs:
           make test-release
           make validate-source
           make lint
+      - name: Scan repository with gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Package
         run: make package VERSION="$VERSION"
       - name: Verify plugin-store artifact

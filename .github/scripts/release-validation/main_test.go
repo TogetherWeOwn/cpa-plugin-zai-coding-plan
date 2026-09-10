@@ -118,6 +118,30 @@ func TestScanSecrets(t *testing.T) {
 	}
 }
 
+func TestValidateDocumentationRejectsTruncatedLicense(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeDocumentation(t, root)
+	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte("MIT License\nPermission is hereby granted\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentation(root); err == nil || !strings.Contains(err.Error(), "canonical MIT text") {
+		t.Fatalf("validateDocumentation() error = %v, want canonical text error", err)
+	}
+}
+
+func TestValidateDocumentationRejectsTruncatedNotice(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeDocumentation(t, root)
+	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentation(root); err == nil || !strings.Contains(err.Error(), "NOTICE is missing") {
+		t.Fatalf("validateDocumentation() error = %v, want NOTICE error", err)
+	}
+}
+
 func TestValidateHostImagePinRejectsDigestDrift(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -187,11 +211,19 @@ func writeDocumentation(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, ".github", "release-host-image.json"), pinRaw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	license := "MIT License\n\nPermission is hereby granted, free of charge.\n"
+	license := strings.Join([]string{
+		"MIT License",
+		"Copyright (c) 2026 TogetherWeOwn",
+		"Permission is hereby granted, free of charge, to any person obtaining a copy",
+		"The above copyright notice and this permission notice shall be included",
+		"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND",
+		"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM",
+	}, "\n")
 	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(license), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte("Copyright 2026 TogetherWeOwn\n"), 0o644); err != nil {
+	notice := "cpa-plugin-zai-coding-plan\nCopyright (c) 2026 TogetherWeOwn\nThis product includes third-party software.\n"
+	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte(notice), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	changelog := "## [0.1.0] - 2026-09-08\n\n[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0\n"

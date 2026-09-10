@@ -209,8 +209,18 @@ func validateDocumentation(root string) error {
 		return fmt.Errorf("read LICENSE: %w", err)
 	}
 	licenseText := string(license)
-	if !strings.Contains(licenseText, "MIT License") || !strings.Contains(licenseText, "Permission is hereby granted") {
-		return errors.New("LICENSE does not contain the expected MIT license text")
+	requiredLicensePhrases := []string{
+		"MIT License",
+		"Copyright (c) 2026 TogetherWeOwn",
+		"Permission is hereby granted, free of charge, to any person obtaining a copy",
+		"The above copyright notice and this permission notice shall be included",
+		"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND",
+		"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM",
+	}
+	for _, phrase := range requiredLicensePhrases {
+		if !strings.Contains(licenseText, phrase) {
+			return fmt.Errorf("LICENSE is missing canonical MIT text %q", phrase)
+		}
 	}
 
 	noticePath := filepath.Join(root, "NOTICE")
@@ -218,8 +228,11 @@ func validateDocumentation(root string) error {
 	if err != nil {
 		return fmt.Errorf("read NOTICE: %w", err)
 	}
-	if len(strings.TrimSpace(string(notice))) == 0 {
-		return errors.New("NOTICE is empty")
+	noticeText := string(notice)
+	for _, phrase := range []string{"cpa-plugin-zai-coding-plan", "Copyright (c) 2026 TogetherWeOwn", "third-party software"} {
+		if !strings.Contains(noticeText, phrase) {
+			return fmt.Errorf("NOTICE is missing required text %q", phrase)
+		}
 	}
 	return nil
 }
