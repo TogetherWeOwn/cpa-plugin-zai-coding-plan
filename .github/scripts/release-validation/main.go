@@ -15,7 +15,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -27,19 +26,36 @@ const (
 	hostImageAMD64Digest = "sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606"
 )
 
-var (
-	versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
-	secretPatterns = []struct {
-		name    string
-		pattern *regexp.Regexp
-	}{
-		{name: "private key", pattern: regexp.MustCompile(`-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----`)},
-		{name: "GitHub token", pattern: regexp.MustCompile(`\bgh[opusr]_[A-Za-z0-9]{36,255}\b`)},
-		{name: "AWS access key", pattern: regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`)},
-		{name: "Google API key", pattern: regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`)},
-		{name: "Slack token", pattern: regexp.MustCompile(`\bxox[baprs]-[0-9A-Za-z-]{10,}\b`)},
-	}
-)
+var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
+
+const canonicalMITLicense = `MIT License
+
+Copyright (c) 2026 TogetherWeOwn
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`
+
+const canonicalNotice = `cpa-plugin-zai-coding-plan
+Copyright (c) 2026 TogetherWeOwn
+
+This product includes software developed by TogetherWeOwn and third-party software whose licenses are recorded in the Go module dependency metadata.
+`
 
 type registry struct {
 	Plugins []registryPlugin `json:"plugins"`
@@ -67,7 +83,7 @@ func main() {
 func run(args []string) error {
 	flags := flag.NewFlagSet("release-validation", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	mode := flags.String("mode", "release", "validation mode: release or source")
+	mode := flags.String("mode", "release", "validation mode: release, source, or version")
 	root := flags.String("root", "", "repository root; defaults to the current directory")
 	tag := flags.String("tag", "", "release tag, including the v prefix")
 	version := flags.String("version", "", "release version without the v prefix")
@@ -91,6 +107,13 @@ func run(args []string) error {
 		return validateSource(*root)
 	case "release":
 		return validateRelease(*root, *dist, *tag, *version)
+	case "version":
+		resolved, err := versionFromTag(*tag)
+		if err != nil {
+			return err
+		}
+		fmt.Println(resolved)
+		return nil
 	default:
 		return fmt.Errorf("unknown mode %q", *mode)
 	}
@@ -103,11 +126,17 @@ func validateSource(root string) error {
 	if err := validateHostImagePin(root); err != nil {
 		return err
 	}
+	if err := validateWorkflowActionPins(root); err != nil {
+		return err
+	}
 	files, err := trackedFiles(root)
 	if err != nil {
 		return err
 	}
-	return scanSecrets(root, files)
+	if len(files) == 0 {
+		return errors.New("source validation found no files")
+	}
+	return nil
 }
 
 func validateRelease(root, dist, tag, version string) error {
@@ -141,13 +170,25 @@ func validateRelease(root, dist, tag, version string) error {
 }
 
 func validateVersion(tag, version string) error {
-	if !versionPattern.MatchString(version) {
-		return fmt.Errorf("version %q is not valid semantic version syntax", version)
+	resolved, err := versionFromTag(tag)
+	if err != nil {
+		return err
 	}
-	if tag != "v"+version {
+	if resolved != version {
 		return fmt.Errorf("tag %q does not match version %q", tag, version)
 	}
 	return nil
+}
+
+func versionFromTag(tag string) (string, error) {
+	if !strings.HasPrefix(tag, "v") {
+		return "", fmt.Errorf("tag %q must start with v", tag)
+	}
+	version := strings.TrimPrefix(tag, "v")
+	if !versionPattern.MatchString(version) {
+		return "", fmt.Errorf("tag %q is not valid semantic version syntax", tag)
+	}
+	return version, nil
 }
 
 func validateRegistry(root, version string) error {
@@ -203,38 +244,26 @@ func validateChangelog(root, version string) error {
 }
 
 func validateDocumentation(root string) error {
-	licensePath := filepath.Join(root, "LICENSE")
-	license, err := os.ReadFile(licensePath)
+	license, err := os.ReadFile(filepath.Join(root, "LICENSE"))
 	if err != nil {
 		return fmt.Errorf("read LICENSE: %w", err)
 	}
-	licenseText := string(license)
-	requiredLicensePhrases := []string{
-		"MIT License",
-		"Copyright (c) 2026 TogetherWeOwn",
-		"Permission is hereby granted, free of charge, to any person obtaining a copy",
-		"The above copyright notice and this permission notice shall be included",
-		"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND",
-		"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM",
-	}
-	for _, phrase := range requiredLicensePhrases {
-		if !strings.Contains(licenseText, phrase) {
-			return fmt.Errorf("LICENSE is missing canonical MIT text %q", phrase)
-		}
+	if normalizeDocument(string(license)) != normalizeDocument(canonicalMITLicense) {
+		return errors.New("LICENSE does not match the canonical MIT license")
 	}
 
-	noticePath := filepath.Join(root, "NOTICE")
-	notice, err := os.ReadFile(noticePath)
+	notice, err := os.ReadFile(filepath.Join(root, "NOTICE"))
 	if err != nil {
 		return fmt.Errorf("read NOTICE: %w", err)
 	}
-	noticeText := string(notice)
-	for _, phrase := range []string{"cpa-plugin-zai-coding-plan", "Copyright (c) 2026 TogetherWeOwn", "third-party software"} {
-		if !strings.Contains(noticeText, phrase) {
-			return fmt.Errorf("NOTICE is missing required text %q", phrase)
-		}
+	if normalizeDocument(string(notice)) != normalizeDocument(canonicalNotice) {
+		return errors.New("NOTICE does not match the canonical project notice")
 	}
 	return nil
+}
+
+func normalizeDocument(value string) string {
+	return strings.TrimSpace(strings.ReplaceAll(value, "\r\n", "\n"))
 }
 
 func validateHostImagePin(root string) error {
@@ -258,6 +287,39 @@ func validateHostImagePin(root string) error {
 	return nil
 }
 
+func validateWorkflowActionPins(root string) error {
+	paths, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.yml"))
+	if err != nil {
+		return fmt.Errorf("list workflows: %w", err)
+	}
+	if len(paths) == 0 {
+		return errors.New("no GitHub workflows found")
+	}
+	pinned := regexp.MustCompile(`^[0-9a-f]{40}$`)
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read workflow %s: %w", filepath.Base(path), err)
+		}
+		for index, line := range strings.Split(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "uses:") && !strings.HasPrefix(trimmed, "- uses:") {
+				continue
+			}
+			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
+			value = strings.TrimSpace(strings.TrimPrefix(value, "uses:"))
+			if strings.HasPrefix(value, "./") {
+				continue
+			}
+			parts := strings.Split(value, "@")
+			if len(parts) != 2 || !pinned.MatchString(strings.Fields(parts[1])[0]) {
+				return fmt.Errorf("workflow %s:%d action is not pinned to a full commit SHA", filepath.Base(path), index+1)
+			}
+		}
+	}
+	return nil
+}
+
 func trackedFiles(root string) ([]string, error) {
 	// Git's path list is the deterministic source of files to scan. It includes
 	// tracked and untracked, non-ignored files while excluding generated output.
@@ -277,52 +339,6 @@ func trackedFiles(root string) ([]string, error) {
 		}
 	}
 	return files, nil
-}
-
-func scanSecrets(root string, files []string) error {
-	if len(files) == 0 {
-		return errors.New("secret scan found no files to scan")
-	}
-	sort.Strings(files)
-	scanned := 0
-	for _, name := range files {
-		path := filepath.Join(root, filepath.FromSlash(name))
-		info, err := os.Stat(path)
-		if err != nil {
-			return fmt.Errorf("stat secret-scan file %s: %w", name, err)
-		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return fmt.Errorf("read secret-scan file %s: %w", name, err)
-		}
-		if isBinary(raw) {
-			continue
-		}
-		scanned++
-		for _, secret := range secretPatterns {
-			location := secret.pattern.FindIndex(raw)
-			if location != nil {
-				line := 1 + strings.Count(string(raw[:location[0]]), "\n")
-				return fmt.Errorf("secret scan detected %s in %s:%d", secret.name, name, line)
-			}
-		}
-	}
-	if scanned == 0 {
-		return errors.New("secret scan found no text files to scan")
-	}
-	fmt.Printf("secret scan: scanned %d text files\n", scanned)
-	return nil
-}
-
-func isBinary(data []byte) bool {
-	limit := len(data)
-	if limit > 8*1024 {
-		limit = 8 * 1024
-	}
-	return strings.IndexByte(string(data[:limit]), 0) >= 0
 }
 
 func requireNonEmpty(path string) error {

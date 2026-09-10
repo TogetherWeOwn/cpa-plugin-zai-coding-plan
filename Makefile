@@ -1,12 +1,12 @@
 VERSION ?= 0.1.0
 GO ?= go
 PLUGIN_ID = zai-coding-plan
-OUT = dist/$(PLUGIN_ID)-v$(VERSION).so
-ARCHIVE = dist/$(PLUGIN_ID)_$(VERSION)_linux_amd64.zip
-CHECKSUMS = dist/checksums.txt
+OUT ?= dist/$(PLUGIN_ID)-v$(VERSION).so
+ARCHIVE ?= dist/$(PLUGIN_ID)_$(VERSION)_linux_amd64.zip
+CHECKSUMS ?= dist/checksums.txt
 DEPLOY_DIR ?= ../../plugins/linux/amd64
 
-.PHONY: fmt-check vet lint test test-release validate-source validate-release build package deploy clean
+.PHONY: fmt-check vet lint test test-release validate-source scan-secrets validate-release test-host-image build package deploy clean
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
@@ -26,10 +26,18 @@ test-release:
 validate-source:
 	$(GO) run -buildvcs=false ./.github/scripts/release-validation -mode source
 
+scan-secrets:
+	.github/scripts/gitleaks-scan.sh
+
 validate-release:
 	test -n "$(TAG)"
 	$(GO) run -buildvcs=false ./.github/scripts/release-validation \
 		-mode release -tag "$(TAG)" -version "$(VERSION)"
+
+test-host-image:
+	test -n "$(HOST_BINARY)"
+	$(GO) run -buildvcs=false ./.github/scripts/host-integration \
+		-host-binary "$(HOST_BINARY)" -plugin "$(OUT)"
 
 build:
 	test "$$($(GO) env GOOS)" = "linux"

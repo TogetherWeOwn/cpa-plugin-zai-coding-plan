@@ -13,14 +13,27 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
-      - name: Resolve version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+      - name: Validate tag and provenance
+        id: release
+        env:
+          RAW_TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          version=$(go run -buildvcs=false ./.github/scripts/release-validation -mode version -tag "$RAW_TAG")
+          test "$(git rev-parse "$RAW_TAG^{commit}")" = "$EVENT_SHA"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$EVENT_SHA" origin/main
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Verify
         run: |
           make fmt-check
@@ -28,14 +41,20 @@ jobs:
           make test
           make test-release
           make validate-source
+          make scan-secrets
           make lint
-      - name: Scan repository with gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Package
-        run: make package VERSION="$VERSION"
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          library="dist/zai-coding-plan-v${VERSION}.so"
+          archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+          make package VERSION="$VERSION" OUT="$library" ARCHIVE="$archive"
       - name: Verify plugin-store artifact
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          RAW_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           library="dist/zai-coding-plan-v${VERSION}.so"
@@ -43,8 +62,25 @@ jobs:
           nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
           test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
-          make validate-release VERSION="$VERSION" TAG="$GITHUB_REF_NAME"
+          go run -buildvcs=false ./.github/scripts/release-validation \
+            -mode release -version "$VERSION" -tag "$RAW_TAG"
+      - name: Extract approved host image
+        id: host
+        run: |
+          set -euo pipefail
+          host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
+          printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"
+      - name: Test approved host image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          HOST_BINARY: ${{ steps.host.outputs.binary }}
+        run: |
+          set -euo pipefail
+          go run -buildvcs=false ./.github/scripts/host-integration \
+            -host-binary "$HOST_BINARY" -plugin "dist/zai-coding-plan-v${VERSION}.so"
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" "dist/zai-coding-plan-v${VERSION}.so" "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" dist/checksums.txt --verify-tag --generate-notes
+          VERSION: ${{ steps.release.outputs.version }}
+          RAW_TAG: ${{ github.ref_name }}
+        run: gh release create "$RAW_TAG" "dist/zai-coding-plan-v${VERSION}.so" "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" dist/checksums.txt --verify-tag --generate-notes

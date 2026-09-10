@@ -25,6 +25,9 @@ func TestValidateVersion(t *testing.T) {
 		{name: "tag mismatch", tag: "v0.1.1", version: "0.1.0", wantErr: true},
 		{name: "missing tag prefix", tag: "0.1.0", version: "0.1.0", wantErr: true},
 		{name: "leading zero", tag: "v0.01.0", version: "0.01.0", wantErr: true},
+		{name: "make expression", tag: "v$(shell,id)", version: "$(shell,id)", wantErr: true},
+		{name: "newline", tag: "v0.1.0\nnext", version: "0.1.0\nnext", wantErr: true},
+		{name: "slash", tag: "v0.1.0/path", version: "0.1.0/path", wantErr: true},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -95,29 +98,6 @@ func TestValidateReleaseRejectsArchiveMismatch(t *testing.T) {
 	}
 }
 
-func TestScanSecrets(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	if err := scanSecrets(root, nil); err == nil || !strings.Contains(err.Error(), "no files") {
-		t.Fatalf("scanSecrets() error = %v, want no files error", err)
-	}
-
-	if err := os.WriteFile(filepath.Join(root, "safe.txt"), []byte("token: supplied by the runtime\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := scanSecrets(root, []string{"safe.txt"}); err != nil {
-		t.Fatal(err)
-	}
-
-	secret := "-----BEGIN " + "PRIVATE KEY-----"
-	if err := os.WriteFile(filepath.Join(root, "secret.txt"), []byte(secret), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := scanSecrets(root, []string{"safe.txt", "secret.txt"}); err == nil || !strings.Contains(err.Error(), "private key") {
-		t.Fatalf("scanSecrets() error = %v, want private key error", err)
-	}
-}
-
 func TestValidateDocumentationRejectsTruncatedLicense(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -125,8 +105,8 @@ func TestValidateDocumentationRejectsTruncatedLicense(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte("MIT License\nPermission is hereby granted\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentation(root); err == nil || !strings.Contains(err.Error(), "canonical MIT text") {
-		t.Fatalf("validateDocumentation() error = %v, want canonical text error", err)
+	if err := validateDocumentation(root); err == nil || !strings.Contains(err.Error(), "canonical MIT license") {
+		t.Fatalf("validateDocumentation() error = %v, want canonical license error", err)
 	}
 }
 
@@ -137,8 +117,22 @@ func TestValidateDocumentationRejectsTruncatedNotice(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte("x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateDocumentation(root); err == nil || !strings.Contains(err.Error(), "NOTICE is missing") {
-		t.Fatalf("validateDocumentation() error = %v, want NOTICE error", err)
+	if err := validateDocumentation(root); err == nil || !strings.Contains(err.Error(), "canonical project notice") {
+		t.Fatalf("validateDocumentation() error = %v, want canonical NOTICE error", err)
+	}
+}
+
+func TestValidateDocumentationRejectsReorderedLicense(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeDocumentation(t, root)
+	paragraphs := strings.Split(canonicalMITLicense, "\n\n")
+	paragraphs[1], paragraphs[2] = paragraphs[2], paragraphs[1]
+	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(strings.Join(paragraphs, "\n\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDocumentation(root); err == nil || !strings.Contains(err.Error(), "canonical MIT license") {
+		t.Fatalf("validateDocumentation() error = %v, want reordered license rejection", err)
 	}
 }
 
@@ -160,19 +154,23 @@ func TestValidateHostImagePinRejectsDigestDrift(t *testing.T) {
 	}
 }
 
-func TestValidateSourceScansUntrackedFiles(t *testing.T) {
+func TestValidateSourceRejectsUnpinnedAction(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeDocumentation(t, root)
+	workflowDir := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workflowDir, "ci.yml"), []byte("steps:\n  - uses: actions/checkout@v7\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	command := exec.Command("git", "init", "-q", root)
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v: %s", err, output)
 	}
-	if err := os.WriteFile(filepath.Join(root, "source.go"), []byte("package source\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := validateSource(root); err != nil {
-		t.Fatal(err)
+	if err := validateSource(root); err == nil || !strings.Contains(err.Error(), "not pinned") {
+		t.Fatalf("validateSource() error = %v, want unpinned action rejection", err)
 	}
 }
 
@@ -211,19 +209,10 @@ func writeDocumentation(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, ".github", "release-host-image.json"), pinRaw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	license := strings.Join([]string{
-		"MIT License",
-		"Copyright (c) 2026 TogetherWeOwn",
-		"Permission is hereby granted, free of charge, to any person obtaining a copy",
-		"The above copyright notice and this permission notice shall be included",
-		"THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND",
-		"LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM",
-	}, "\n")
-	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(license), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(canonicalMITLicense), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	notice := "cpa-plugin-zai-coding-plan\nCopyright (c) 2026 TogetherWeOwn\nThis product includes third-party software.\n"
-	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte(notice), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte(canonicalNotice), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	changelog := "## [0.1.0] - 2026-09-08\n\n[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0\n"

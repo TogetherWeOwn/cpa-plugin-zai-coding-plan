@@ -161,11 +161,11 @@ A v0.1.0 tag is created only after all implementation slices are merged and the 
 
 1. green formatting, vet, race-test, lint, build, packaging, secret-scan, and license/notice checks;
 2. machine-checked tag, binary, archive, registry, changelog, and checksum consistency;
-3. a load test in the approved immutable `eceasy/cli-proxy-api` v7.2.67 linux/amd64 image manifest that observes scheduler, usage, and management capabilities and an authenticated status response;
+3. a load test in the approved immutable `eceasy/cli-proxy-api` v7.2.67 linux/amd64 image manifest that observes scheduler, usage, and management capabilities plus unauthenticated `401` and authenticated redacted `200` status responses;
 4. an exact-SHA code review; and
 5. a separate exact-SHA security review for credential handling and management operations.
 
-Tags trigger the release workflow. Do not publish locally built artifacts or move an existing tag.
+The release tag must point to that reviewed commit after it is merged to `main`. The tag workflow validates strict semantic-version syntax and proves the event commit is reachable from `origin/main` before any repository build or packaging command receives the version. Tags trigger the release workflow. Do not publish locally built artifacts or move an existing tag.
 
 ## Security and scope
 
