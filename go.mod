@@ -3,7 +3,7 @@ module github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan
 go 1.26.0
 
 require (
-	github.com/router-for-me/CLIProxyAPI/v7 v7.2.67
+	github.com/router-for-me/CLIProxyAPI/v7 v7.2.150
 	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -24,6 +24,7 @@ require (
 	github.com/go-playground/validator/v10 v10.20.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
