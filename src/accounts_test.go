@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 
@@ -296,7 +297,7 @@ func TestStableAuthIDsPreserveHostIterationOrder(t *testing.T) {
 	}
 }
 
-func TestStableClaudeAuthIDMatchesHostWithProxyPrefixAndHeaders(t *testing.T) {
+func TestStableClaudeAuthIDsMatchHostRecipes(t *testing.T) {
 	fixture := exactPairFixture(fixtureKey)
 	fixture.ClaudeKeys[0].ProxyURL = " https://proxy.example "
 	fixture.ClaudeKeys[0].Prefix = " zai "
@@ -305,9 +306,15 @@ func TestStableClaudeAuthIDMatchesHostWithProxyPrefixAndHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL)
-	if accounts[0].ClaudeAuthID != want {
-		t.Fatalf("Claude auth ID = %q, want host ID %q", accounts[0].ClaudeAuthID, want)
+	if got, want := formatSortedHeaders(fixture.ClaudeKeys[0].Headers), "X-A\x00first\x00X-Z\x00last\x00"; got != want {
+		t.Fatalf("sorted headers = %q, want exact bytes %q", got, want)
+	}
+	want := []string{
+		upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL),
+		upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL, "https://proxy.example", "zai", "X-A\x00first\x00X-Z\x00last\x00"),
+	}
+	if got := accounts[0].claudeAuthIDs; !slices.Equal(got, want) {
+		t.Fatalf("Claude auth IDs = %q, want host recipes %q", got, want)
 	}
 }
 
@@ -319,6 +326,8 @@ func TestStableAuthIDsMatchUpstreamFixtures(t *testing.T) {
 		want  string
 	}{
 		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:e414498ddc81"},
+		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL, "", "zai", ""}, want: "claude:apikey:be7b803aa7e1"},
+		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL, "https://proxy.example", "zai", "X-A\x00first\x00X-Z\x00last\x00"}, want: "claude:apikey:f1cf8a3b10cb"},
 		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:f09c6735a12a"},
 	}
 	for _, tt := range tests {

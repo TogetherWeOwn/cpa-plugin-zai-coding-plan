@@ -165,6 +165,39 @@ func TestSchedulerHealthyDelegatesBuiltinRoundRobin(t *testing.T) {
 	}
 }
 
+func TestSchedulerAcceptsBothClaudeHostIDRecipes(t *testing.T) {
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{DefaultPlan: "pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := accounts[0]
+	if len(item.claudeAuthIDs) != 2 {
+		t.Fatalf("Claude auth IDs = %q, want legacy and current host recipes", item.claudeAuthIDs)
+	}
+	for _, authID := range item.claudeAuthIDs {
+		runtime := schedulerTestRuntime(schedulerNow, item)
+		response, errPick := runtime.pick(schedulerRequest(authID))
+		if errPick != nil || !response.Handled || response.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+			t.Fatalf("host auth ID %q was not managed: %#v err=%v", authID, response, errPick)
+		}
+		if errUsage := runtime.handleUsage(pluginapi.UsageRecord{AuthID: authID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}}); errUsage != nil {
+			t.Fatal(errUsage)
+		}
+		_, errPick = runtime.pick(schedulerRequest(item.OpenAIAuthID))
+		assertSchedulerError(t, errPick, "zai_no_capacity")
+	}
+}
+
+func TestSchedulerRecognizesNamespacedOpenAICompatibilityProvider(t *testing.T) {
+	runtime := schedulerTestRuntime(schedulerNow, schedulerAccount("one", "claude-one", "openai-one"))
+	candidate := pluginapi.SchedulerAuthCandidate{
+		ID:       "unknown-zai",
+		Provider: "openai-compatible-" + zaiCompatName,
+	}
+	_, err := runtime.pick(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{candidate}})
+	assertSchedulerError(t, err, "zai_unmanaged_candidate")
+}
+
 func TestSchedulerDegradedExcludesSiblingsAndRoundRobinsHealthy(t *testing.T) {
 	impaired := schedulerAccount("impaired", "claude-bad", "openai-bad")
 	first := schedulerAccount("first", "claude-one", "openai-one")

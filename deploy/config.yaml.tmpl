@@ -21,16 +21,13 @@ plugins:
     zai-coding-plan:
       enabled: true
       priority: 1000
-      store:
-        version: 0.1.0
-        release-tag: v0.1.0
       cpa-config-path: /app/config.yaml
       quota-refresh-interval: 2m
       authoritative-max-age: 5m
       threshold-percent: 97
       suspend-duration: 30m
       fallback-cooldown: 10m
-      state-retention: 8d
+      state-retention: 192h
       default-plan: pro
       accounts:
         - key-suffix: ${ZAI_CODING_PLAN_KEY_SUFFIX}

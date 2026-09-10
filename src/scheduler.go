@@ -126,7 +126,13 @@ func recognizedZAICandidate(candidate pluginapi.SchedulerAuthCandidate) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(candidate.Attributes["compat_name"]), zaiCompatName) ||
-		strings.EqualFold(strings.TrimSpace(candidate.Attributes["provider_key"]), zaiCompatName)
+		isZAICompatibilityProvider(candidate.Provider) ||
+		isZAICompatibilityProvider(candidate.Attributes["provider_key"])
+}
+
+func isZAICompatibilityProvider(raw string) bool {
+	provider := strings.ToLower(strings.TrimSpace(raw))
+	return provider == zaiCompatName || provider == "openai-compatible-"+zaiCompatName
 }
 
 func schedulerScope(req pluginapi.SchedulerPickRequest) string {
