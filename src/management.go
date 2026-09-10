@@ -18,14 +18,17 @@ const (
 	managementRefreshPath       = managementBasePath + "/refresh"
 	managementUnblockPath       = managementBasePath + "/unblock"
 	managementAccountConfigPath = managementBasePath + "/account-config"
+	resourceStatusPath          = "/status"
 	managementContentType       = "application/json"
+	resourceContentType         = "text/html; charset=utf-8"
 	maxManagementRequestBody    = 64 << 10
 	minQuotaTimeout             = time.Second
 	maxQuotaTimeout             = 30 * time.Second
 )
 
 type managementRoutes struct {
-	Routes []managementRoute `json:"routes"`
+	Routes    []managementRoute `json:"routes"`
+	Resources []resourceRoute   `json:"resources,omitempty"`
 }
 
 type managementRoute struct {
@@ -34,13 +37,24 @@ type managementRoute struct {
 	Description string `json:"description,omitempty"`
 }
 
+type resourceRoute struct {
+	Path        string `json:"path"`
+	Menu        string `json:"menu"`
+	Description string `json:"description,omitempty"`
+}
+
 func managementRegistration() managementRoutes {
-	return managementRoutes{Routes: []managementRoute{
-		{Method: http.MethodGet, Path: managementStatusPath, Description: "Reports redacted Z.ai coding-plan quota status."},
-		{Method: http.MethodPost, Path: managementRefreshPath, Description: "Forces a bounded quota refresh."},
-		{Method: http.MethodPost, Path: managementUnblockPath, Description: "Recomputes account availability without erasing usage."},
-		{Method: http.MethodPost, Path: managementAccountConfigPath, Description: "Updates validated non-secret account and polling settings."},
-	}}
+	return managementRoutes{
+		Routes: []managementRoute{
+			{Method: http.MethodGet, Path: managementStatusPath, Description: "Reports redacted Z.ai coding-plan quota status."},
+			{Method: http.MethodPost, Path: managementRefreshPath, Description: "Forces a bounded quota refresh."},
+			{Method: http.MethodPost, Path: managementUnblockPath, Description: "Recomputes account availability without erasing usage."},
+			{Method: http.MethodPost, Path: managementAccountConfigPath, Description: "Updates validated non-secret account and polling settings."},
+		},
+		Resources: []resourceRoute{
+			{Path: resourceStatusPath, Menu: "Z.ai Quota", Description: "Shows Z.ai Coding Plan quota and account health."},
+		},
+	}
 }
 
 func managementHandle(request []byte) ([]byte, error) {
@@ -53,6 +67,9 @@ func managementHandle(request []byte) ([]byte, error) {
 }
 
 func (r *pluginRuntime) handleManagement(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
+	if req.Method == http.MethodGet && isResourceStatusPath(req.Path) {
+		return r.resourceStatusResponse()
+	}
 	if len(req.Body) > maxManagementRequestBody {
 		return managementError(http.StatusRequestEntityTooLarge, "request_too_large", "management request body exceeds 64 KiB")
 	}
@@ -130,6 +147,44 @@ func managementJSON(status int, value any) pluginapi.ManagementResponse {
 		Body:       body,
 	}
 }
+
+func isResourceStatusPath(path string) bool {
+	path = strings.TrimRight(strings.TrimSpace(path), "/")
+	return path == resourceStatusPath || path == "/v0/resource/plugins/"+pluginID+resourceStatusPath
+}
+
+func (r *pluginRuntime) resourceStatusResponse() pluginapi.ManagementResponse {
+	return pluginapi.ManagementResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type":            []string{resourceContentType},
+			"Content-Security-Policy": []string{"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"},
+			"Referrer-Policy":         []string{"no-referrer"},
+			"X-Content-Type-Options":  []string{"nosniff"},
+			"Cache-Control":           []string{"no-store"},
+		},
+		Body: []byte(resourceStatusHTML),
+	}
+}
+
+const resourceStatusHTML = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Z.ai Quota</title>
+<style>
+:root{color-scheme:light dark;font:14px/1.45 system-ui,sans-serif;background:#111;color:#eee}body{margin:0;padding:24px}main{max-width:900px;margin:auto}h1{font-size:24px;margin:0}.meta{color:#aaa;margin:4px 0 20px}.notice{padding:14px 16px;border:1px solid #555;border-radius:10px;background:#222}a{color:#58a6ff}@media(prefers-color-scheme:light){:root{background:#f7f7f7;color:#222}.meta{color:#666}.notice{background:white;border-color:#ddd}}
+</style>
+</head>
+<body>
+<main>
+<h1>Z.ai Coding Plan quota</h1>
+<p class="meta">Five-hour and weekly utilization is available through the plugin's authenticated management API.</p>
+<div class="notice">This host deliberately keeps plugin resource pages unauthenticated, so this page never receives or embeds the management key. Use the Management Center's Quota-page integration when available, or query <code>/v0/management/plugins/zai-coding-plan/status</code> with your normal management client.</div>
+</main>
+</body>
+</html>`
 
 func managementError(status int, code, message string) pluginapi.ManagementResponse {
 	return managementJSONUnsafe(status, managementErrorBody{Error: managementErrorDetail{Code: code, Message: boundedStatus(message)}})

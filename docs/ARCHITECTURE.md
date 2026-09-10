@@ -370,7 +370,7 @@ The scheduler performs no disk, network, or host callback while holding its lock
 
 Collector-facing status is locked by `src/testdata/status_authoritative.golden.json` and `src/testdata/status_fallback.golden.json`. Utilizations are ratios in `[0,1]`; `quota_source` is `quota_api` or `estimate`. Freshness, reset, off-peak, health, and estimator-integrity fields are machine-visible. `quota_error` is omitted when empty and otherwise contains only a bounded redacted message. Status never contains full keys, derived account identities, request bodies, authorization headers, or management credentials.
 
-CPA must reject unauthenticated management HTTP requests before dispatch. If a resource route provides UI, it serves only a static shell; data still comes from the authenticated management endpoint.
+CPA must reject unauthenticated management HTTP requests before dispatch. The plugin registers `/v0/resource/plugins/zai-coding-plan/status` as a Management Center menu entry, but CPA deliberately dispatches resource routes without management authentication. The resource therefore serves only a static explanatory shell with a restrictive content-security policy; quota data remains exclusively on the authenticated management endpoint.
 
 ## Persistence and concurrency
 

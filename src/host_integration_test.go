@@ -51,10 +51,14 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 		t.Fatalf("management.register: %v", err)
 	}
 	registered := decodeEnvelopeResult[struct {
-		Routes []pluginapi.ManagementRoute `json:"routes"`
+		Routes    []pluginapi.ManagementRoute `json:"routes"`
+		Resources []pluginapi.ResourceRoute   `json:"resources"`
 	}](t, registerRaw, pluginabi.MethodManagementRegister)
 	if len(registered.Routes) != 4 {
 		t.Fatalf("management.register routes = %#v, want four", registered.Routes)
+	}
+	if len(registered.Resources) != 1 || registered.Resources[0].Path != resourceStatusPath || registered.Resources[0].Menu != "Z.ai Quota" {
+		t.Fatalf("management.register resources = %#v, want Z.ai quota menu", registered.Resources)
 	}
 	route := registered.Routes[0]
 	if !strings.EqualFold(route.Method, http.MethodGet) || route.Path != managementStatusPath {
