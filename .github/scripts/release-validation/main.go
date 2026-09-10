@@ -75,6 +75,14 @@ type registryRelease struct {
 	Checksums string `json:"checksums"`
 }
 
+type canonicalRunStep struct {
+	name             string
+	id               string
+	workingDirectory string
+	env              map[string]string
+	command          string
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -646,13 +654,135 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	if len(sourceCheckoutWith) != 4 || sourceCheckoutWith["fetch-depth"] != "0" || sourceCheckoutWith["persist-credentials"] != "false" || sourceCheckoutWith["ref"] != "${{ steps.target.outputs.tag }}" || sourceCheckoutWith["path"] != "release-source" {
 		return errors.New("release source checkout must use only the selected immutable tag without credentials")
 	}
-	for _, index := range []int{5, 6, 8, 9, 10, 11, 12} {
-		step, err := yamlMapping(buildSteps.Content[index], fmt.Sprintf("release source step %d", index+1))
+	canonicalRunSteps := map[int]canonicalRunStep{
+		2: {
+			name:             "Validate trusted release controls",
+			workingDirectory: "release-controls",
+			command: `set -euo pipefail
+				go test ./.github/scripts/release-validation
+				go run -buildvcs=false ./.github/scripts/release-validation -mode source
+				.github/scripts/select-release-tag_test.sh`,
+		},
+		3: {
+			name:             "Select release tag",
+			id:               "target",
+			workingDirectory: "release-controls",
+			env: map[string]string{
+				"EVENT_NAME":       "${{ github.event_name }}",
+				"EVENT_REF":        "${{ github.ref }}",
+				"EVENT_SHA":        "${{ github.sha }}",
+				"WORKFLOW_RUN_SHA": "${{ github.event.workflow_run.head_sha }}",
+			},
+			command: `set -euo pipefail
+				raw_tag=$(.github/scripts/select-release-tag.sh \
+				  "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" "$WORKFLOW_RUN_SHA" .)
+				tag_object=$(git rev-parse "$raw_tag")
+				printf 'tag=%s\n' "$raw_tag" >> "$GITHUB_OUTPUT"
+				printf 'tag_object=%s\n' "$tag_object" >> "$GITHUB_OUTPUT"`,
+		},
+		5: {
+			name:             "Validate tag and provenance",
+			id:               "release",
+			workingDirectory: "release-source",
+			env: map[string]string{
+				"RAW_TAG":             "${{ steps.target.outputs.tag }}",
+				"EXPECTED_TAG_OBJECT": "${{ steps.target.outputs.tag_object }}",
+			},
+			command: `set -euo pipefail
+				version=$(go run -buildvcs=false ./.github/scripts/release-validation -mode version -tag "$RAW_TAG")
+				test "$(git rev-parse "$RAW_TAG")" = "$EXPECTED_TAG_OBJECT"
+				release_sha=$(git rev-parse "$RAW_TAG^{commit}")
+				test "$(git rev-parse HEAD)" = "$release_sha"
+				git fetch --no-tags origin main
+				git merge-base --is-ancestor "$release_sha" origin/main
+				printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"`,
+		},
+		6: {
+			name:             "Verify",
+			workingDirectory: "release-source",
+			command: `make fmt-check
+				make vet
+				make test
+				make test-release
+				make validate-source
+				make scan-secrets`,
+		},
+		8: {
+			name:             "Package",
+			workingDirectory: "release-source",
+			env: map[string]string{
+				"VERSION": "${{ steps.release.outputs.version }}",
+			},
+			command: `set -euo pipefail
+				library="dist/zai-coding-plan-v${VERSION}.so"
+				archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+				make package VERSION="$VERSION" OUT="$library" ARCHIVE="$archive"`,
+		},
+		9: {
+			name:             "Verify plugin-store artifact",
+			workingDirectory: "release-source",
+			env: map[string]string{
+				"VERSION": "${{ steps.release.outputs.version }}",
+				"RAW_TAG": "${{ steps.target.outputs.tag }}",
+			},
+			command: `set -euo pipefail
+				library="dist/zai-coding-plan-v${VERSION}.so"
+				archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+				nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
+				test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
+				cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
+				go run -buildvcs=false ./.github/scripts/release-validation \
+				  -mode release -version "$VERSION" -tag "$RAW_TAG"`,
+		},
+		10: {
+			name:             "Extract approved host image",
+			id:               "host",
+			workingDirectory: "release-source",
+			command: `set -euo pipefail
+				host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
+				printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"`,
+		},
+		11: {
+			name:             "Test approved host image",
+			workingDirectory: "release-source",
+			env: map[string]string{
+				"VERSION":     "${{ steps.release.outputs.version }}",
+				"HOST_BINARY": "${{ steps.host.outputs.binary }}",
+			},
+			command: `set -euo pipefail
+				go run -buildvcs=false ./.github/scripts/host-integration \
+				  -host-binary "$HOST_BINARY" -plugin "dist/zai-coding-plan-v${VERSION}.so"`,
+		},
+		12: {
+			name:             "Stage release artifacts",
+			workingDirectory: "release-source",
+			env: map[string]string{
+				"VERSION": "${{ steps.release.outputs.version }}",
+			},
+			command: `set -euo pipefail
+				mkdir release-artifacts
+				cp "dist/zai-coding-plan-v${VERSION}.so" \
+				   "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" \
+				   dist/checksums.txt release-artifacts/`,
+		},
+	}
+	for index, canonical := range canonicalRunSteps {
+		step, err := yamlMapping(buildSteps.Content[index], fmt.Sprintf("release build command step %d", index+1))
 		if err != nil {
 			return err
 		}
-		if yamlScalarValue(step["working-directory"]) != "release-source" {
-			return fmt.Errorf("release source step %d must execute in the immutable source checkout", index+1)
+		if yamlScalarValue(step["name"]) != canonical.name || yamlScalarValue(step["id"]) != canonical.id || yamlScalarValue(step["working-directory"]) != canonical.workingDirectory {
+			return fmt.Errorf("release build step %d must use the canonical identity and working directory", index+1)
+		}
+		env, err := yamlStringMap(step["env"], fmt.Sprintf("release build step %d environment", index+1))
+		if err != nil {
+			return err
+		}
+		if !equalStringMaps(env, canonical.env) {
+			return fmt.Errorf("release build step %d must use only the canonical environment", index+1)
+		}
+		if normalizeShellCommand(yamlScalarValue(step["run"])) != normalizeShellCommand(canonical.command) {
+			return fmt.Errorf("release build step %d must use the canonical command", index+1)
 		}
 	}
 	publish, err := yamlMapping(jobs["publish"], "release publish job")
@@ -787,6 +917,18 @@ func requireOnlyYAMLKeys(mapping map[string]*yaml.Node, context string, allowed 
 		}
 	}
 	return nil
+}
+
+func equalStringMaps(actual, expected map[string]string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for key, expectedValue := range expected {
+		if actual[key] != expectedValue {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeShellCommand(value string) string {

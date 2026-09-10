@@ -288,6 +288,26 @@ func TestValidateReleaseWorkflowBoundaryAcceptsCanonicalWorkflow(t *testing.T) {
 	}
 }
 
+func TestValidateReleaseWorkflowBoundaryRejectsBuildCommandMutation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "          make package VERSION=\"$VERSION\" OUT=\"$library\" ARCHIVE=\"$archive\"", "          make package VERSION=\"$VERSION\" OUT=\"$library\" ARCHIVE=\"$archive\"\n          printf injected >> \"$library\"", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical command") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want command mutation rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildEnvironmentMutation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        env:\n          VERSION: ${{ steps.release.outputs.version }}\n        run: |\n          set -euo pipefail\n          library=", "        env:\n          VERSION: ${{ steps.release.outputs.version }}\n          BASH_ENV: ../release-controls/attacker.sh\n        run: |\n          set -euo pipefail\n          library=", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical environment") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want environment mutation rejection", err)
+	}
+}
+
 func TestValidateReleaseWorkflowBoundaryRejectsRecoveryWeakening(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -299,7 +319,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsRecoveryWeakening(t *testing.T) {
 		{name: "broad recovery branch", old: "branches: [release-recovery/v0.1.0]", new: "branches: [release-recovery/*]"},
 		{name: "failed upstream accepted", old: "github.event.workflow_run.conclusion == 'success'", new: "github.event.workflow_run.conclusion != ''"},
 		{name: "mutable control checkout", old: "ref: ${{ github.sha }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
-		{name: "control validation removed", old: "working-directory: release-controls\n        run: printf controls", new: "working-directory: release-source\n        run: printf controls"},
+		{name: "control validation removed", old: "working-directory: release-controls\n        run: |\n          set -euo pipefail", new: "working-directory: release-source\n        run: |\n          set -euo pipefail"},
 		{name: "mutable recovery checkout", old: "ref: ${{ steps.target.outputs.tag }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
 		{name: "branch-derived publish tag", old: "RAW_TAG: ${{ needs.build.outputs.tag }}", new: "RAW_TAG: ${{ github.ref_name }}"},
 		{name: "missing publish tag object", old: "EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag_object }}", new: "EXPECTED_TAG_OBJECT: deadbeef"},
@@ -374,13 +394,26 @@ jobs:
           cache: true
       - name: Validate trusted release controls
         working-directory: release-controls
-        run: printf controls
+        run: |
+          set -euo pipefail
+          go test ./.github/scripts/release-validation
+          go run -buildvcs=false ./.github/scripts/release-validation -mode source
+          .github/scripts/select-release-tag_test.sh
       - name: Select release tag
         id: target
         working-directory: release-controls
         env:
           EVENT_NAME: ${{ github.event_name }}
-        run: printf target
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          raw_tag=$(.github/scripts/select-release-tag.sh \
+            "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" "$WORKFLOW_RUN_SHA" .)
+          tag_object=$(git rev-parse "$raw_tag")
+          printf 'tag=%s\n' "$raw_tag" >> "$GITHUB_OUTPUT"
+          printf 'tag_object=%s\n' "$tag_object" >> "$GITHUB_OUTPUT"
       - name: Check out immutable release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -391,10 +424,27 @@ jobs:
       - name: Validate tag and provenance
         id: release
         working-directory: release-source
-        run: printf validate
+        env:
+          RAW_TAG: ${{ steps.target.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ steps.target.outputs.tag_object }}
+        run: |
+          set -euo pipefail
+          version=$(go run -buildvcs=false ./.github/scripts/release-validation -mode version -tag "$RAW_TAG")
+          test "$(git rev-parse "$RAW_TAG")" = "$EXPECTED_TAG_OBJECT"
+          release_sha=$(git rev-parse "$RAW_TAG^{commit}")
+          test "$(git rev-parse HEAD)" = "$release_sha"
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$release_sha" origin/main
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Verify
         working-directory: release-source
-        run: printf verify
+        run: |
+          make fmt-check
+          make vet
+          make test
+          make test-release
+          make validate-source
+          make scan-secrets
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
         with:
@@ -402,20 +452,53 @@ jobs:
           working-directory: release-source
       - name: Package
         working-directory: release-source
-        run: printf package
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          library="dist/zai-coding-plan-v${VERSION}.so"
+          archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+          make package VERSION="$VERSION" OUT="$library" ARCHIVE="$archive"
       - name: Verify plugin-store artifact
         working-directory: release-source
-        run: printf artifact
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          RAW_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          library="dist/zai-coding-plan-v${VERSION}.so"
+          archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+          nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
+          test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
+          cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
+          go run -buildvcs=false ./.github/scripts/release-validation \
+            -mode release -version "$VERSION" -tag "$RAW_TAG"
       - name: Extract approved host image
         id: host
         working-directory: release-source
-        run: printf host
+        run: |
+          set -euo pipefail
+          host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
+          printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"
       - name: Test approved host image
         working-directory: release-source
-        run: printf integration
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          HOST_BINARY: ${{ steps.host.outputs.binary }}
+        run: |
+          set -euo pipefail
+          go run -buildvcs=false ./.github/scripts/host-integration \
+            -host-binary "$HOST_BINARY" -plugin "dist/zai-coding-plan-v${VERSION}.so"
       - name: Stage release artifacts
         working-directory: release-source
-        run: printf stage
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir release-artifacts
+          cp "dist/zai-coding-plan-v${VERSION}.so" \
+             "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" \
+             dist/checksums.txt release-artifacts/
       - name: Upload release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
