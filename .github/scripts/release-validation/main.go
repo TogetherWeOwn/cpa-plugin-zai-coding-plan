@@ -338,7 +338,9 @@ func collectWorkflowUses(node *yaml.Node, uses *[]*yaml.Node) {
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			key := node.Content[index]
 			value := node.Content[index+1]
-			if key.Value == "uses" {
+			if key.Kind != yaml.ScalarNode {
+				*uses = append(*uses, key)
+			} else if key.Value == "uses" {
 				*uses = append(*uses, value)
 			}
 			collectWorkflowUses(value, uses)

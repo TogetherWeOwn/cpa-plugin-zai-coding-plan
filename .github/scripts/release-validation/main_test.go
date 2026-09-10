@@ -180,6 +180,15 @@ func TestValidateWorkflowActionPinsRejectsAlias(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowActionPinsRejectsAliasedKey(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", "name: &uses uses\nsteps:\n  - *uses: attacker/example@main\n")
+	if err := validateWorkflowActionPins(root); err == nil || !strings.Contains(err.Error(), "cannot use YAML aliases") {
+		t.Fatalf("validateWorkflowActionPins() error = %v, want aliased key rejection", err)
+	}
+}
+
 func TestValidateWorkflowActionPinsRejectsUnpinnedYAMLWorkflow(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
