@@ -158,7 +158,7 @@ func (r *pluginRuntime) resourceStatusResponse() pluginapi.ManagementResponse {
 		StatusCode: http.StatusOK,
 		Headers: http.Header{
 			"Content-Type":            []string{resourceContentType},
-			"Content-Security-Policy": []string{"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"},
+			"Content-Security-Policy": []string{"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"},
 			"Referrer-Policy":         []string{"no-referrer"},
 			"X-Content-Type-Options":  []string{"nosniff"},
 			"Cache-Control":           []string{"no-store"},

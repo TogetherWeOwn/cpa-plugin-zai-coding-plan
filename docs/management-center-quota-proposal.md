@@ -2,14 +2,15 @@
 
 ## Finding
 
-CLIProxyAPI v7.2.151 and v7.2.157 have no plugin hook for extending the Management Center Quota grid. A plugin can register authenticated Management API routes and unauthenticated browser resource menus, but it cannot:
+CLIProxyAPI v7.2.151 and v7.2.157 have no plugin hook for extending the Management Center Quota grid. A plugin can register authenticated Management API routes and unauthenticated browser resource menus. It can also call `host.auth.save`, which writes a physical JSON auth file and upserts the runtime auth record. That makes a synthesized auth-file row technically available, but it is not a suitable Quota-page integration here:
 
-- add a `QuotaProviderType` or `QuotaAdapter` to the panel;
-- synthesize or mutate an auth-file row;
-- publish quota into another credential's `quota.signals`; or
-- opt an API-key provider into the host's passive quota observations.
+- the panel still cannot add a plugin-defined `QuotaProviderType` or `QuotaAdapter` at runtime;
+- the plugin would have to manufacture and continuously own credential-shaped state solely for presentation;
+- the Quota page would still classify the row through five compiled adapters and would not know how to render Z.ai fields;
+- writing into another real credential's `quota.signals` would incorrectly couple plugin quota state to that credential; and
+- API-key providers cannot opt into the host's passive quota observations, which remain hard-coded to `claude` and `codex`.
 
-The host exposes `quota` and `model_quotas` only from its in-memory auth registry. `ProviderSupportsQuotaObservation` is hard-coded to `claude` and `codex`, and the Management Center currently ignores those generic fields anyway: the Quota page classifies auth files through five compiled adapters and calls each provider's upstream usage endpoint.
+The host exposes `quota` and `model_quotas` from its in-memory auth registry, but the Management Center currently ignores those generic fields: the Quota page classifies auth files through five compiled adapters and calls each provider's upstream usage endpoint. The safer integration is therefore a panel adapter that reads the plugin's authenticated management endpoint, rather than a synthetic auth file created through `host.auth.save`.
 
 ## Proposed upstream change
 

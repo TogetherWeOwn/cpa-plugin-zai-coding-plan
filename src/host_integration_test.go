@@ -103,6 +103,56 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 	}
 }
 
+func TestResourceRouteEndToEndAllowsCrossOriginManagementCenterFrame(t *testing.T) {
+	binary, err := buildTestPlugin(t)
+	if err != nil {
+		t.Fatalf("build plugin: %v", err)
+	}
+	client, err := abiclient.Open(binary)
+	if err != nil {
+		t.Fatalf("open plugin: %v", err)
+	}
+	defer client.Close()
+
+	registerRaw, err := client.Call(pluginabi.MethodManagementRegister, []byte("{}"))
+	if err != nil {
+		t.Fatalf("management.register: %v", err)
+	}
+	registered := decodeEnvelopeResult[struct {
+		Resources []pluginapi.ResourceRoute `json:"resources"`
+	}](t, registerRaw, pluginabi.MethodManagementRegister)
+	if len(registered.Resources) != 1 {
+		t.Fatalf("management.register resources = %#v, want one", registered.Resources)
+	}
+	resource := registered.Resources[0]
+	if resource.Path != resourceStatusPath || resource.Menu != "Z.ai Quota" {
+		t.Fatalf("resource route = %#v", resource)
+	}
+
+	requestBody, err := json.Marshal(map[string]any{
+		"method": http.MethodGet,
+		"path":   "/v0/resource/plugins/" + pluginID + resource.Path,
+		"headers": http.Header{
+			"Origin": []string{"https://management.example.test"},
+		},
+		"host_callback_id": "test-callback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handleRaw, err := client.Call(pluginabi.MethodManagementHandle, requestBody)
+	if err != nil {
+		t.Fatalf("management.handle resource: %v", err)
+	}
+	response := decodeEnvelopeResult[pluginapi.ManagementResponse](t, handleRaw, pluginabi.MethodManagementHandle)
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(response.Body), "Z.ai Coding Plan quota") {
+		t.Fatalf("resource response = %d %q", response.StatusCode, response.Body)
+	}
+	if csp := response.Headers.Get("Content-Security-Policy"); strings.Contains(csp, "frame-ancestors") {
+		t.Fatalf("resource CSP %q blocks a cross-origin Management Center iframe", csp)
+	}
+}
+
 // normalizeManagementRouteForTest reproduces the host's route normalization
 // (internal/pluginhost management.go): trim, force a leading slash, strip a
 // redundant /v0/management prefix (keeping the leading slash), strip trailing

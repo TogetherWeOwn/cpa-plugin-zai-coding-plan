@@ -66,8 +66,14 @@ func TestResourceStatusPageDoesNotExposeQuotaOrManagementAuthentication(t *testi
 			t.Fatalf("resource page missing %q", required)
 		}
 	}
-	if got := response.Headers.Get("Content-Security-Policy"); !strings.Contains(got, "default-src 'none'") {
-		t.Fatalf("content security policy = %q", got)
+	csp := response.Headers.Get("Content-Security-Policy")
+	for _, directive := range []string{"default-src 'none'", "style-src 'unsafe-inline'", "base-uri 'none'", "form-action 'none'"} {
+		if !strings.Contains(csp, directive) {
+			t.Fatalf("content security policy %q missing %q", csp, directive)
+		}
+	}
+	if strings.Contains(csp, "frame-ancestors") {
+		t.Fatalf("content security policy %q blocks documented cross-origin Management Center embedding", csp)
 	}
 }
 
