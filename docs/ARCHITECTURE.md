@@ -28,7 +28,7 @@ import (
 )
 ```
 
-The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork. Its repository was not publicly readable during this research, so a version label alone is not proof of compatibility. Release requires a load test against the exact approved image digest; the immutable linux/amd64 manifest digest is recorded in `.github/release-host-image.json` rather than replaced by a mutable tag.
+The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork, so a version label alone is not proof of compatibility. Release requires the compatibility smoke against the exact operator-reported linux/amd64 manifest in `deploy/deployed-host-image.json` and the latest Docker Hub tag resolved to an immutable manifest at CI time; `.github/host-images.json` retains the historical v7.2.67 baseline.
 
 ### C ABI
 
@@ -368,7 +368,9 @@ The scheduler performs no disk, network, or host callback while holding its lock
 | `POST /v0/management/plugins/zai-coding-plan/unblock` | Clear transient blocks, then recompute retained quota/usage. |
 | `POST /v0/management/plugins/zai-coding-plan/account-config` | Save/clear non-key plan metadata. |
 
-Collector-facing status is locked by `src/testdata/status_authoritative.golden.json` and `src/testdata/status_fallback.golden.json`. Utilizations are ratios in `[0,1]`; `quota_source` is `quota_api` or `estimate`. Freshness, reset, off-peak, health, and estimator-integrity fields are machine-visible. `quota_error` is omitted when empty and otherwise contains only a bounded redacted message. Status never contains full keys, derived account identities, request bodies, authorization headers, or management credentials.
+Collector-facing status is locked by `src/testdata/status_authoritative.golden.json` and `src/testdata/status_fallback.golden.json`. Utilizations are finite ratios in `[0,1]`; `quota_age_seconds` is a non-negative integer; timestamp fields are RFC 3339; `quota_source` is `quota_api` or `estimate`; and unknown top-level or account fields fail closed. Freshness, reset, off-peak, health, and estimator-integrity fields are machine-visible. `quota_error` is omitted when empty and otherwise contains only a bounded redacted message. Status never contains full keys, derived account identities, request bodies, authorization headers, or management credentials. A retained snapshot returned with `status=reconfigure_rejected` is projected only as stale `config_error` capacity and cannot be selected as healthy capacity; live installation verification rejects that state outright.
+
+The host collector writes its separate sanitized lane file only beneath a pre-created root-owned real directory. It rejects symlinked or substituted output parents, holds an `O_DIRECTORY|O_NOFOLLOW` descriptor across mode enforcement, same-directory temporary creation, atomic replacement, and directory fsync, and writes the final file as mode `0600`. This root-owned collector output is distinct from the unprivileged CPA state directory below.
 
 CPA must reject unauthenticated management HTTP requests before dispatch. The plugin registers `/v0/resource/plugins/zai-coding-plan/status` as a Management Center menu entry, but CPA deliberately dispatches resource routes without management authentication. The resource therefore serves only a static explanatory shell with a restrictive content-security policy; quota data remains exclusively on the authenticated management endpoint.
 
@@ -476,7 +478,7 @@ Unit/property coverage:
 - lossy usage delivery, persistence-failure integrity state, and heuristic dedup collision/replay cases;
 - shutdown cancels and joins every background worker before callback teardown/unload;
 - permissions, atomic replacement, corrupt files, symlinks; and
-- collector status golden JSON.
+- collector status golden JSON plus adversarial strict-schema, RFC JSON, timestamp, integer-age, rejected-reconfiguration, one-line-key, and output-parent substitution probes.
 
 ABI/integration coverage:
 

@@ -139,12 +139,12 @@ func TestValidateHostImagePinRejectsDigestDrift(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeDocumentation(t, root)
-	path := filepath.Join(root, ".github", "release-host-image.json")
+	path := filepath.Join(root, ".github", "host-images.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw = []byte(strings.Replace(string(raw), hostImageAMD64Digest, "sha256:"+strings.Repeat("0", 64), 1))
+	raw = []byte(strings.Replace(string(raw), baselineHostImageAMD64Digest, "sha256:"+strings.Repeat("0", 64), 1))
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsBuildEnvironmentMutation(t *testi
 func TestValidateReleaseWorkflowBoundaryRejectsFoldedBuildCommand(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", "        run: >-\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", 1)
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", "        run: >-\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", 1)
 	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded build command rejection", err)
@@ -321,7 +321,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsFoldedBuildCommand(t *testing.T) 
 func TestValidateReleaseWorkflowBoundaryRejectsChangedRunChomping(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", "        run: |-\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", 1)
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", "        run: |-\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", 1)
 	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly run: |") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want changed chomping rejection", err)
@@ -503,22 +503,19 @@ jobs:
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
           go run -buildvcs=false ./.github/scripts/release-validation \
             -mode release -version "$VERSION" -tag "$RAW_TAG"
-      - name: Extract approved host image
-        id: host
+      - name: Resolve immutable host image matrix
         working-directory: release-source
         run: |
           set -euo pipefail
-          host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
-          printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"
-      - name: Test approved host image
+          .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
+      - name: Test host compatibility matrix
         working-directory: release-source
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          HOST_BINARY: ${{ steps.host.outputs.binary }}
+          HOST_MATRIX_NAMESPACE: root
         run: |
           set -euo pipefail
-          go run -buildvcs=false ./.github/scripts/host-integration \
-            -host-binary "$HOST_BINARY" -plugin "dist/zai-coding-plan-v${VERSION}.so"
+          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
       - name: Stage release artifacts
         working-directory: release-source
         env:
@@ -589,18 +586,48 @@ func writeDocumentation(t *testing.T, root string) {
 	if err := os.MkdirAll(filepath.Join(root, ".github"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pin := map[string]string{
-		"repository":      hostImageRepository,
-		"tag":             hostImageTag,
-		"platform":        "linux/amd64",
-		"manifest_digest": hostImageAMD64Digest,
+	matrix := map[string]any{
+		"repository": hostImageRepository,
+		"platform":   "linux/amd64",
+		"baseline": map[string]string{
+			"tag":             baselineHostImageTag,
+			"manifest_digest": baselineHostImageAMD64Digest,
+		},
 	}
-	pinRaw, err := json.Marshal(pin)
+	matrixRaw, err := json.Marshal(matrix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".github", "release-host-image.json"), pinRaw, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".github", "host-images.json"), matrixRaw, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "deploy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deployed := map[string]string{
+		"repository":      hostImageRepository,
+		"tag":             "v7.2.151",
+		"platform":        "linux/amd64",
+		"manifest_digest": "sha256:" + strings.Repeat("1", 64),
+	}
+	deployedRaw, err := json.Marshal(deployed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "deploy", "deployed-host-image.json"), deployedRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(root, ".github", "scripts", "resolve-host-images.sh"),
+		filepath.Join(root, ".github", "scripts", "run-host-matrix.sh"),
+		filepath.Join(root, ".github", "workflows", "host-compatibility.yml"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(canonicalMITLicense), 0o644); err != nil {
 		t.Fatal(err)

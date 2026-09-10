@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 )
 
@@ -32,6 +33,7 @@ type account struct {
 	WeeklyCredits           int64  `json:"weekly_credits"`
 	ClaudeAuthID            string `json:"claude_auth_id"`
 	OpenAIAuthID            string `json:"openai_auth_id"`
+	claudeAuthIDs           []string
 	key                     string
 	planExplicit            bool
 	fiveHourCreditsExplicit bool
@@ -63,7 +65,7 @@ func (g *stableIDGenerator) next(kind string, parts ...string) string {
 	return kind + ":" + short
 }
 
-// stableAuthID deliberately reproduces CLIProxyAPI's v7.2 non-security
+// stableAuthID deliberately reproduces CLIProxyAPI's non-security
 // interoperability identifier. The host contract requires these exact bytes.
 func stableAuthID(kind string, parts ...string) string {
 	encoded := make([]byte, 0, len(kind)+len(parts)*16)
@@ -81,6 +83,25 @@ func stableAuthID(kind string, parts ...string) string {
 func sha256Hex(value []byte) string {
 	digest := sha256.Sum256(value) // codeql[go/weak-sensitive-data-hashing] Upstream non-security ID contract.
 	return hex.EncodeToString(digest[:])
+}
+
+func formatSortedHeaders(headers map[string]string) string {
+	if len(headers) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(headers))
+	for key := range headers {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	var encoded strings.Builder
+	for _, key := range keys {
+		encoded.WriteString(key)
+		encoded.WriteByte(0)
+		encoded.WriteString(headers[key])
+		encoded.WriteByte(0)
+	}
+	return encoded.String()
 }
 
 func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, error) {
@@ -146,28 +167,40 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		return nil, err
 	}
 
-	claudeIDs := make(map[string]string, len(pairs))
-	idGen := newStableIDGenerator()
+	legacyClaudeIDs := make(map[string]string, len(pairs))
+	currentClaudeIDs := make(map[string]string, len(pairs))
+	legacyIDGen := newStableIDGenerator()
+	currentIDGen := newStableIDGenerator()
 	for i := range cpa.ClaudeKeys {
 		entry := cpa.ClaudeKeys[i]
 		key := strings.TrimSpace(entry.APIKey)
 		if key == "" {
 			continue
 		}
-		id := idGen.next(
+		legacyID := legacyIDGen.next(
 			"claude:apikey",
 			key,
 			strings.TrimSpace(entry.BaseURL),
 		)
+		currentID := currentIDGen.next(
+			"claude:apikey",
+			key,
+			strings.TrimSpace(entry.BaseURL),
+			strings.TrimSpace(entry.ProxyURL),
+			strings.TrimSpace(entry.Prefix),
+			formatSortedHeaders(entry.Headers),
+		)
 		baseURL, err := normalizedBaseURL(entry.BaseURL)
 		if err == nil {
 			if pair := pairs[key]; pair != nil && pair.claudeCount == 1 && pair.openAIEntryCount == 1 && baseURL == zaiAnthropicBaseURL {
-				claudeIDs[key] = id
+				legacyClaudeIDs[key] = legacyID
+				currentClaudeIDs[key] = currentID
 			}
 		}
 	}
 
 	openAIIDs := make(map[string]string, len(pairs))
+	openAIIDGen := newStableIDGenerator()
 	for i := range cpa.OpenAICompatibility {
 		compat := cpa.OpenAICompatibility[i]
 		if compat.Disabled {
@@ -185,7 +218,7 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 				continue
 			}
 			idKind := "openai-compatibility:" + providerName
-			id := idGen.next(idKind, key, strings.TrimSpace(compat.BaseURL), strings.TrimSpace(entry.ProxyURL))
+			id := openAIIDGen.next(idKind, key, strings.TrimSpace(compat.BaseURL), strings.TrimSpace(entry.ProxyURL))
 			if baseRecognized && providerName == zaiCompatName && baseURL == zaiOpenAIBaseURL {
 				openAIIDs[key] = id
 			}
@@ -201,22 +234,56 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 			continue
 		}
 		item := account{
-			Identity:     accountIdentity(key),
-			KeySuffix:    displaySuffix(key),
-			ClaudeAuthID: claudeIDs[key],
-			OpenAIAuthID: openAIIDs[key],
-			key:          key,
+			Identity:      accountIdentity(key),
+			KeySuffix:     displaySuffix(key),
+			ClaudeAuthID:  legacyClaudeIDs[key],
+			OpenAIAuthID:  openAIIDs[key],
+			claudeAuthIDs: uniqueStrings(legacyClaudeIDs[key], currentClaudeIDs[key]),
+			key:           key,
 		}
-		if item.ClaudeAuthID == "" || item.OpenAIAuthID == "" {
+		if len(item.claudeAuthIDs) == 0 || item.OpenAIAuthID == "" {
 			return nil, fmt.Errorf("paired account %s has incomplete auth IDs", item.KeySuffix)
 		}
 		ordered = append(ordered, item)
 	}
 
+	if err := validateAccountAuthIDs(ordered); err != nil {
+		return nil, err
+	}
 	if err := applyAccountOverrides(ordered, cfg); err != nil {
 		return nil, err
 	}
 	return ordered, nil
+}
+
+func validateAccountAuthIDs(accounts []account) error {
+	owners := make(map[string]string, len(accounts)*3)
+	for _, item := range accounts {
+		for _, authID := range accountAuthIDs(item) {
+			if owner := owners[authID]; owner != "" && owner != item.Identity {
+				return fmt.Errorf("host auth ID collision between validated accounts")
+			}
+			owners[authID] = item.Identity
+		}
+	}
+	return nil
+}
+
+func uniqueStrings(values ...string) []string {
+	unique := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
 }
 
 func authenticationHeader(headers map[string]string) (string, bool) {

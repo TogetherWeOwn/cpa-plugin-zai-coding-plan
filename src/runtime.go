@@ -169,8 +169,7 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 		}
 		healthState := restorePersistedHealth(persisted.Health[accounts[i].Identity], now)
 		health[accounts[i].Identity] = quotaCapacityHealth(healthState, state.view(now, accounts[i], cfg), cfg.ThresholdPercent)
-		byAuthID[accounts[i].ClaudeAuthID] = accounts[i].Identity
-		byAuthID[accounts[i].OpenAIAuthID] = accounts[i].Identity
+		indexAccountAuthIDs(byAuthID, accounts[i])
 		byIdentity[accounts[i].Identity] = accounts[i]
 	}
 	staged := &runtimeSnapshot{

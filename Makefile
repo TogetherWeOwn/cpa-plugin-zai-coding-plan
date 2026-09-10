@@ -6,7 +6,7 @@ ARCHIVE ?= dist/$(PLUGIN_ID)_$(VERSION)_linux_amd64.zip
 CHECKSUMS ?= dist/checksums.txt
 DEPLOY_DIR ?= ../../plugins/linux/amd64
 
-.PHONY: fmt-check vet lint test test-release validate-source scan-secrets validate-release test-host-image build package deploy clean
+.PHONY: fmt-check vet lint test test-release validate-source scan-secrets validate-release build-host-integration test-host-image test-host-matrix build package deploy clean
 
 fmt-check:
 	test -z "$$(gofmt -l .)"
@@ -35,10 +35,17 @@ validate-release:
 	$(GO) run -buildvcs=false ./.github/scripts/release-validation \
 		-mode release -tag "$(TAG)" -version "$(VERSION)"
 
-test-host-image:
+build-host-integration:
+	$(GO) build -buildvcs=false -o .github/scripts/host-integration/host-integration ./.github/scripts/host-integration
+
+test-host-image: build-host-integration
 	test -n "$(HOST_BINARY)"
-	$(GO) run -buildvcs=false ./.github/scripts/host-integration \
-		-host-binary "$(HOST_BINARY)" -plugin "$(OUT)"
+	.github/scripts/host-integration/host-integration \
+		-host-binary "$(HOST_BINARY)" -plugin "$(OUT)" -image "$(HOST_IMAGE)"
+
+test-host-matrix: build-host-integration
+	test -n "$(HOST_IMAGES)"
+	.github/scripts/run-host-matrix.sh "$(OUT)" "$(HOST_IMAGES)" "$(HOST_MATRIX_WORK)"
 
 build:
 	test "$$($(GO) env GOOS)" = "linux"
