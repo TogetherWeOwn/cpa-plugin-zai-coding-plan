@@ -60,7 +60,9 @@ curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --max-time 5 --max-filesize 1048577 \
   "$CLIPROXY_DASHBOARD_URL" >"$dashboard_file"
 
-journalctl --unit "$CLIPROXY_SERVICE_UNIT" --since '-15 minutes' --no-pager --output=cat --lines=2000 >"$log_file"
+journalctl --unit "$CLIPROXY_SERVICE_UNIT" --since '-15 minutes' --no-pager --output=cat --lines=2000 \
+  | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
+  >"$log_file"
 
 python3 - "$CLIPROXY_USAGE_DIR/zai.json" "$dashboard_file" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
 import json, pathlib, re, sys

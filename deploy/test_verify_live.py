@@ -94,6 +94,10 @@ class VerifyLiveTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertNotIn("fixture-management-marker", curl_argv)
 
+    def test_oversized_service_log_is_rejected_before_full_capture(self):
+        completed, _ = self.run_verify(service_log="x" * 1_048_577)
+        self.assertNotEqual(completed.returncode, 0)
+
     def test_bounded_scans_reject_management_or_plan_markers_without_printing_them(self):
         for source, value in (
             ("projected", "fixture-plan-marker"),
