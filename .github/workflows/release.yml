@@ -114,9 +114,9 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
           RAW_TAG: ${{ github.ref_name }}
-        run: >-
-          gh release create "$RAW_TAG"
-          "release-artifacts/zai-coding-plan-v${VERSION}.so"
-          "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip"
-          release-artifacts/checksums.txt
-          --verify-tag --generate-notes
+        run: |
+          gh release create "$RAW_TAG" \
+            "release-artifacts/zai-coding-plan-v${VERSION}.so" \
+            "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
+            release-artifacts/checksums.txt \
+            --verify-tag --generate-notes

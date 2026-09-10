@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -154,25 +153,94 @@ func TestValidateHostImagePinRejectsDigestDrift(t *testing.T) {
 	}
 }
 
-func TestValidateSourceRejectsUnpinnedAction(t *testing.T) {
+func TestValidateWorkflowActionPinsRejectsUnpinnedAction(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeDocumentation(t, root)
+	writeWorkflow(t, root, "ci.yml", "steps:\n  - uses: actions/checkout@v7\n")
+	if err := validateWorkflowActionPins(root); err == nil || !strings.Contains(err.Error(), "not pinned") {
+		t.Fatalf("validateWorkflowActionPins() error = %v, want unpinned action rejection", err)
+	}
+}
+
+func TestValidateWorkflowActionPinsRejectsFlowSyntax(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", "steps:\n  - { uses: attacker/example@main }\n")
+	if err := validateWorkflowActionPins(root); err == nil || !strings.Contains(err.Error(), "not pinned") {
+		t.Fatalf("validateWorkflowActionPins() error = %v, want flow-style unpinned action rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := validReleaseWorkflow + "      - name: Exfiltrate\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: printf '%s' \"$GH_TOKEN\" >/dev/null\n"
+	writeWorkflow(t, root, "release.yml", workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want canonical publication rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishAction(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n", "      - { uses: attacker/example@"+strings.Repeat("a", 40)+" }\n      - name: Publish GitHub release\n", 1)
+	writeWorkflow(t, root, "release.yml", workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "approved action") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want approved action rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryAcceptsCanonicalWorkflow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeWorkflow(t, root, "release.yml", validReleaseWorkflow)
+	if err := validateReleaseWorkflowBoundary(root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeWorkflow(t *testing.T, root, name, contents string) {
+	t.Helper()
 	workflowDir := filepath.Join(root, ".github", "workflows")
 	if err := os.MkdirAll(workflowDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(workflowDir, "ci.yml"), []byte("steps:\n  - uses: actions/checkout@v7\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workflowDir, name), []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	command := exec.Command("git", "init", "-q", root)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, output)
-	}
-	if err := validateSource(root); err == nil || !strings.Contains(err.Error(), "not pinned") {
-		t.Fatalf("validateSource() error = %v, want unpinned action rejection", err)
-	}
 }
+
+const validReleaseWorkflow = `name: Release
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps: []
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-artifacts
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          RAW_TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$RAW_TAG" \
+            "release-artifacts/zai-coding-plan-v${VERSION}.so" \
+            "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
+            release-artifacts/checksums.txt \
+            --verify-tag --generate-notes
+`
 
 func writeReleaseFixture(t *testing.T, root, version string) {
 	t.Helper()

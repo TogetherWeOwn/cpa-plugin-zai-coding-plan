@@ -306,23 +306,41 @@ func validateWorkflowActionPins(root string) error {
 		if err != nil {
 			return fmt.Errorf("read workflow %s: %w", filepath.Base(path), err)
 		}
-		for index, line := range strings.Split(string(raw), "\n") {
-			trimmed := strings.TrimSpace(line)
-			if !strings.HasPrefix(trimmed, "uses:") && !strings.HasPrefix(trimmed, "- uses:") {
-				continue
-			}
-			value := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
-			value = strings.TrimSpace(strings.TrimPrefix(value, "uses:"))
+		var document yaml.Node
+		if err := yaml.Unmarshal(raw, &document); err != nil {
+			return fmt.Errorf("parse workflow %s: %w", filepath.Base(path), err)
+		}
+		var uses []*yaml.Node
+		collectWorkflowUses(&document, &uses)
+		for _, node := range uses {
+			value := strings.TrimSpace(node.Value)
 			if strings.HasPrefix(value, "./") {
 				continue
 			}
 			parts := strings.Split(value, "@")
-			if len(parts) != 2 || !pinned.MatchString(strings.Fields(parts[1])[0]) {
-				return fmt.Errorf("workflow %s:%d action is not pinned to a full commit SHA", filepath.Base(path), index+1)
+			if len(parts) != 2 || !pinned.MatchString(parts[1]) {
+				return fmt.Errorf("workflow %s:%d action is not pinned to a full commit SHA", filepath.Base(path), node.Line)
 			}
 		}
 	}
 	return nil
+}
+
+func collectWorkflowUses(node *yaml.Node, uses *[]*yaml.Node) {
+	if node.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(node.Content); index += 2 {
+			key := node.Content[index]
+			value := node.Content[index+1]
+			if key.Value == "uses" && value.Kind == yaml.ScalarNode {
+				*uses = append(*uses, value)
+			}
+			collectWorkflowUses(value, uses)
+		}
+		return
+	}
+	for _, child := range node.Content {
+		collectWorkflowUses(child, uses)
+	}
 }
 
 func validateReleaseWorkflowBoundary(root string) error {
@@ -371,28 +389,40 @@ func validateReleaseWorkflowBoundary(root string) error {
 			return fmt.Errorf("release job %q must not have contents write permission", name)
 		}
 	}
+	const downloadArtifactAction = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
+	const publishCommand = `gh release create "$RAW_TAG" \
+  "release-artifacts/zai-coding-plan-v${VERSION}.so" \
+  "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
+  release-artifacts/checksums.txt \
+  --verify-tag --generate-notes`
 	var downloaded, published bool
 	for _, step := range publish.Steps {
-		if strings.HasPrefix(step.Uses, "actions/checkout@") || strings.HasPrefix(step.Uses, "./") {
-			return errors.New("release publish job must not check out or execute repository code")
-		}
-		if strings.HasPrefix(step.Uses, "actions/download-artifact@") && step.With.Name == "release-artifacts" {
-			downloaded = true
-		}
-		if step.Run != "" {
-			if !strings.Contains(step.Run, "gh release create") || !strings.Contains(step.Run, "release-artifacts/checksums.txt") {
-				return errors.New("release publish job may only publish the staged release artifacts")
+		switch {
+		case step.Uses != "":
+			if step.Uses != downloadArtifactAction || step.With.Name != "release-artifacts" || downloaded {
+				return errors.New("release publish job may only download the staged release artifacts with the approved action")
 			}
-			if step.Env["GH_REPO"] == "" {
-				return errors.New("release publish job must set GH_REPO without a checkout")
+			downloaded = true
+		case step.Run != "":
+			if normalizeShellCommand(step.Run) != normalizeShellCommand(publishCommand) || published {
+				return errors.New("release publish job must use the canonical publication command")
+			}
+			if step.Env["GH_TOKEN"] != "${{ github.token }}" || step.Env["GH_REPO"] != "${{ github.repository }}" || step.Env["VERSION"] != "${{ needs.build.outputs.version }}" || step.Env["RAW_TAG"] != "${{ github.ref_name }}" {
+				return errors.New("release publish job must use the canonical publication environment")
 			}
 			published = true
+		default:
+			return errors.New("release publish job contains an inert step")
 		}
 	}
-	if !downloaded || !published {
-		return errors.New("release publish job must download and publish the named artifact")
+	if !downloaded || !published || len(publish.Steps) != 2 {
+		return errors.New("release publish job must contain exactly the artifact download and canonical publication steps")
 	}
 	return nil
+}
+
+func normalizeShellCommand(value string) string {
+	return strings.Join(strings.Fields(value), " ")
 }
 
 func trackedFiles(root string) ([]string, error) {

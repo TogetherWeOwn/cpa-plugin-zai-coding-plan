@@ -231,16 +231,16 @@ func authenticationHeader(headers map[string]string) (string, bool) {
 
 func validatePairs(pairs map[string]*pairCandidate) error {
 	for _, pair := range pairs {
-		suffix := displaySuffix(pair.key)
+		reference := accountReference(pair.key)
 		switch {
 		case pair.claudeCount > 1:
-			return fmt.Errorf("duplicate Z.ai Anthropic entry for key suffix %s", suffix)
+			return fmt.Errorf("duplicate Z.ai Anthropic entry for account %s", reference)
 		case pair.openAIEntryCount > 1:
-			return fmt.Errorf("duplicate zai-coding-plan entry for key suffix %s", suffix)
+			return fmt.Errorf("duplicate zai-coding-plan entry for account %s", reference)
 		case pair.claudeCount == 0:
-			return fmt.Errorf("missing Z.ai Anthropic sibling for key suffix %s", suffix)
+			return fmt.Errorf("missing Z.ai Anthropic sibling for account %s", reference)
 		case pair.openAIEntryCount == 0:
-			return fmt.Errorf("missing zai-coding-plan sibling for key suffix %s", suffix)
+			return fmt.Errorf("missing zai-coding-plan sibling for account %s", reference)
 		}
 	}
 	return nil
@@ -358,6 +358,11 @@ func accountIdentity(key string) string {
 	mac := hmac.New(sha256.New, []byte(pluginID+":account-identity:v1"))
 	_, _ = mac.Write([]byte(strings.TrimSpace(key)))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func accountReference(key string) string {
+	identity := accountIdentity(key)
+	return identity[:12]
 }
 
 func displaySuffix(key string) string {

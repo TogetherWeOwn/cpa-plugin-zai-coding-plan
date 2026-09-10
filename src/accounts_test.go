@@ -116,6 +116,22 @@ func TestDiscoverAccountsPairingErrors(t *testing.T) {
 	}
 }
 
+func TestPairingErrorDoesNotExposeKeySuffix(t *testing.T) {
+	const key = "prefix-secret-finalbytes"
+	fixture := exactPairFixture(key)
+	fixture.OpenAICompatibility = nil
+	_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err == nil {
+		t.Fatal("expected pairing error")
+	}
+	if strings.Contains(err.Error(), "finalbytes") || strings.Contains(err.Error(), key) {
+		t.Fatalf("pairing error exposed key bytes: %v", err)
+	}
+	if !strings.Contains(err.Error(), accountReference(key)) {
+		t.Fatalf("pairing error = %v, want non-key account reference", err)
+	}
+}
+
 func TestShortKeyIsFullyRedacted(t *testing.T) {
 	accounts, err := discoverAccounts(exactPairFixture("short"), pluginConfig{DefaultPlan: "pro"})
 	if err != nil {

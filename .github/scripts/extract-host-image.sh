@@ -22,11 +22,15 @@ resolved=$(sha256sum "$manifest" | cut -d' ' -f1)
 
 index=0
 while IFS= read -r layer; do
+  [[ "$layer" =~ ^sha256:([0-9a-f]{64})$ ]]
+  expected="${BASH_REMATCH[1]}"
   index=$((index + 1))
   blob="$out/layer-${index}.tar.gz"
   curl --fail --location --silent --show-error \
     -H "Authorization: Bearer $auth" \
     "https://registry-1.docker.io/v2/${repository}/blobs/${layer}" > "$blob"
+  actual=$(sha256sum "$blob" | cut -d' ' -f1)
+  [[ "$actual" == "$expected" ]]
   tar -xzf "$blob" -C "$out/rootfs" --overwrite --exclude='dev/*'
 done < <(jq -er '.layers[].digest' "$manifest")
 
