@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - "v*"
+    branches:
+      - "release-recovery/v0.1.0"
 
 permissions:
   contents: read
@@ -13,12 +15,23 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.target.outputs.tag }}
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Select release tag
+        id: target
+        env:
+          EVENT_REF: ${{ github.ref }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          raw_tag=$(.github/scripts/select-release-tag.sh "$EVENT_REF" "$EVENT_SHA")
+          git checkout --detach "$raw_tag^{commit}"
+          printf 'tag=%s\n' "$raw_tag" >> "$GITHUB_OUTPUT"
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -27,14 +40,14 @@ jobs:
       - name: Validate tag and provenance
         id: release
         env:
-          RAW_TAG: ${{ github.ref_name }}
-          EVENT_SHA: ${{ github.sha }}
+          RAW_TAG: ${{ steps.target.outputs.tag }}
         run: |
           set -euo pipefail
           version=$(go run -buildvcs=false ./.github/scripts/release-validation -mode version -tag "$RAW_TAG")
-          test "$(git rev-parse "$RAW_TAG^{commit}")" = "$EVENT_SHA"
+          release_sha=$(git rev-parse "$RAW_TAG^{commit}")
+          test "$(git rev-parse HEAD)" = "$release_sha"
           git fetch --no-tags origin main
-          git merge-base --is-ancestor "$EVENT_SHA" origin/main
+          git merge-base --is-ancestor "$release_sha" origin/main
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - name: Verify
         run: |
@@ -59,7 +72,7 @@ jobs:
       - name: Verify plugin-store artifact
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          RAW_TAG: ${{ github.ref_name }}
+          RAW_TAG: ${{ steps.target.outputs.tag }}
         run: |
           set -euo pipefail
           library="dist/zai-coding-plan-v${VERSION}.so"
@@ -116,7 +129,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
-          RAW_TAG: ${{ github.ref_name }}
+          RAW_TAG: ${{ needs.build.outputs.tag }}
         run: |
           gh release create "$RAW_TAG" \
             "release-artifacts/zai-coding-plan-v${VERSION}.so" \

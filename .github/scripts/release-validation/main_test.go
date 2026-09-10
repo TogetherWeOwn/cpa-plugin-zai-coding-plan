@@ -275,6 +275,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.target.outputs.tag }}
     steps: []
   publish:
     needs: build
@@ -292,7 +294,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
-          RAW_TAG: ${{ github.ref_name }}
+          RAW_TAG: ${{ needs.build.outputs.tag }}
         run: |
           gh release create "$RAW_TAG" \
             "release-artifacts/zai-coding-plan-v${VERSION}.so" \

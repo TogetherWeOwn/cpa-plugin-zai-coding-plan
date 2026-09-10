@@ -366,6 +366,7 @@ func validateReleaseWorkflowBoundary(root string) error {
 		Jobs        map[string]struct {
 			Needs       string            `yaml:"needs"`
 			Permissions map[string]string `yaml:"permissions"`
+			Outputs     map[string]string `yaml:"outputs"`
 			Steps       []struct {
 				Uses string `yaml:"uses"`
 				Run  string `yaml:"run"`
@@ -388,6 +389,9 @@ func validateReleaseWorkflowBoundary(root string) error {
 	}
 	if build.Permissions["contents"] == "write" {
 		return errors.New("release build job must not have contents write permission")
+	}
+	if build.Outputs["tag"] != "${{ steps.target.outputs.tag }}" {
+		return errors.New("release build job must export the selected release tag")
 	}
 	publish, exists := workflow.Jobs["publish"]
 	if !exists {
@@ -419,7 +423,7 @@ func validateReleaseWorkflowBoundary(root string) error {
 			if normalizeShellCommand(step.Run) != normalizeShellCommand(publishCommand) || published {
 				return errors.New("release publish job must use the canonical publication command")
 			}
-			if step.Env["GH_TOKEN"] != "${{ github.token }}" || step.Env["GH_REPO"] != "${{ github.repository }}" || step.Env["VERSION"] != "${{ needs.build.outputs.version }}" || step.Env["RAW_TAG"] != "${{ github.ref_name }}" {
+			if step.Env["GH_TOKEN"] != "${{ github.token }}" || step.Env["GH_REPO"] != "${{ github.repository }}" || step.Env["VERSION"] != "${{ needs.build.outputs.version }}" || step.Env["RAW_TAG"] != "${{ needs.build.outputs.tag }}" {
 				return errors.New("release publish job must use the canonical publication environment")
 			}
 			published = true
