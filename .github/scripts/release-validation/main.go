@@ -293,9 +293,13 @@ func validateHostImagePin(root string) error {
 }
 
 func validateWorkflowActionPins(root string) error {
-	paths, err := filepath.Glob(filepath.Join(root, ".github", "workflows", "*.yml"))
-	if err != nil {
-		return fmt.Errorf("list workflows: %w", err)
+	var paths []string
+	for _, extension := range []string{"*.yml", "*.yaml"} {
+		matches, err := filepath.Glob(filepath.Join(root, ".github", "workflows", extension))
+		if err != nil {
+			return fmt.Errorf("list workflows: %w", err)
+		}
+		paths = append(paths, matches...)
 	}
 	if len(paths) == 0 {
 		return errors.New("no GitHub workflows found")
@@ -348,6 +352,9 @@ func validateReleaseWorkflowBoundary(root string) error {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read release workflow: %w", err)
+	}
+	if err := validateReleaseWorkflowShape(raw); err != nil {
+		return err
 	}
 	var workflow struct {
 		Permissions map[string]string `yaml:"permissions"`
@@ -417,6 +424,139 @@ func validateReleaseWorkflowBoundary(root string) error {
 	}
 	if !downloaded || !published || len(publish.Steps) != 2 {
 		return errors.New("release publish job must contain exactly the artifact download and canonical publication steps")
+	}
+	return nil
+}
+
+func validateReleaseWorkflowShape(raw []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return fmt.Errorf("parse release workflow structure: %w", err)
+	}
+	workflow, err := yamlMapping(&document, "release workflow")
+	if err != nil {
+		return err
+	}
+	jobs, err := yamlMapping(workflow["jobs"], "release workflow jobs")
+	if err != nil {
+		return err
+	}
+	publish, err := yamlMapping(jobs["publish"], "release publish job")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(publish, "release publish job", "needs", "runs-on", "permissions", "steps"); err != nil {
+		return err
+	}
+	if yamlScalarValue(publish["runs-on"]) != "ubuntu-24.04" {
+		return errors.New("release publish job must use the approved runner")
+	}
+	permissions, err := yamlStringMap(publish["permissions"], "release publish job permissions")
+	if err != nil {
+		return err
+	}
+	if len(permissions) != 1 || permissions["contents"] != "write" {
+		return errors.New("release publish job must hold only contents write permission")
+	}
+	steps := publish["steps"]
+	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 2 {
+		return errors.New("release publish job must contain exactly the artifact download and canonical publication steps")
+	}
+	download, err := yamlMapping(steps.Content[0], "release artifact download step")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(download, "release artifact download step", "name", "uses", "with"); err != nil {
+		return err
+	}
+	downloadWith, err := yamlStringMap(download["with"], "release artifact download inputs")
+	if err != nil {
+		return err
+	}
+	if len(downloadWith) != 2 || downloadWith["name"] != "release-artifacts" || downloadWith["path"] != "release-artifacts" {
+		return errors.New("release artifact download step must use the canonical inputs")
+	}
+	publication, err := yamlMapping(steps.Content[1], "release publication step")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(publication, "release publication step", "name", "env", "run"); err != nil {
+		return err
+	}
+	publicationEnv, err := yamlStringMap(publication["env"], "release publication environment")
+	if err != nil {
+		return err
+	}
+	if len(publicationEnv) != 4 {
+		return errors.New("release publication environment must contain exactly the canonical variables")
+	}
+	return nil
+}
+
+func yamlMapping(node *yaml.Node, context string) (map[string]*yaml.Node, error) {
+	if node == nil {
+		return nil, fmt.Errorf("%s is missing", context)
+	}
+	if node.Kind == yaml.DocumentNode {
+		if len(node.Content) != 1 {
+			return nil, fmt.Errorf("%s is not a single document", context)
+		}
+		node = node.Content[0]
+	}
+	if node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", context)
+	}
+	result := make(map[string]*yaml.Node, len(node.Content)/2)
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key := node.Content[index]
+		if key.Kind != yaml.ScalarNode || key.Tag != "!!str" || key.Value == "" {
+			return nil, fmt.Errorf("%s contains a non-string key at line %d", context, key.Line)
+		}
+		if _, exists := result[key.Value]; exists {
+			return nil, fmt.Errorf("%s contains duplicate key %q", context, key.Value)
+		}
+		result[key.Value] = node.Content[index+1]
+	}
+	return result, nil
+}
+
+func yamlStringMap(node *yaml.Node, context string) (map[string]string, error) {
+	if node == nil {
+		return map[string]string{}, nil
+	}
+	mapping, err := yamlMapping(node, context)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]string, len(mapping))
+	for key, value := range mapping {
+		if value.Kind != yaml.ScalarNode {
+			return nil, fmt.Errorf("%s value %q must be a scalar", context, key)
+		}
+		result[key] = value.Value
+	}
+	return result, nil
+}
+
+func yamlScalarValue(node *yaml.Node) string {
+	if node == nil || node.Kind != yaml.ScalarNode {
+		return ""
+	}
+	return node.Value
+}
+
+func requireOnlyYAMLKeys(mapping map[string]*yaml.Node, context string, allowed ...string) error {
+	allowlist := make(map[string]struct{}, len(allowed))
+	for _, key := range allowed {
+		allowlist[key] = struct{}{}
+	}
+	for key := range mapping {
+		if _, exists := allowlist[key]; !exists {
+			return fmt.Errorf("%s contains unapproved key %q", context, key)
+		}
 	}
 	return nil
 }

