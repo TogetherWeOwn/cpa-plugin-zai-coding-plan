@@ -178,64 +178,90 @@ class CollectorZaiTest(unittest.TestCase):
             [("/v0/management/plugins/zai-coding-plan/status", "Bearer fixture-management-marker")],
         )
 
-    def test_atomic_write_enforces_modes_on_initial_and_replacement(self):
+    def trusted_output(self, root):
+        parent = root / "srv" / "cliproxy-usage"
+        parent.mkdir(parents=True)
+        parent.chmod(0o700)
+        return pathlib.Path("/srv/cliproxy-usage/zai.json"), parent
+
+    def write_trusted(self, root, path, payload, expected_owner_uid=None):
+        collector.write_atomic(
+            path,
+            payload,
+            expected_owner_uid=os.getuid() if expected_owner_uid is None else expected_owner_uid,
+            trusted_output=pathlib.Path("/srv/cliproxy-usage/zai.json"),
+            filesystem_root=root,
+        )
+
+    def test_atomic_write_enforces_initial_and_replacement_file_mode(self):
         payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
         with tempfile.TemporaryDirectory() as directory:
-            parent = pathlib.Path(directory) / "collector"
-            path = parent / "zai.json"
-            collector.write_atomic(path, payload, expected_owner_uid=os.getuid())
+            root = pathlib.Path(directory)
+            path, parent = self.trusted_output(root)
+            self.write_trusted(root, path, payload)
+            output = parent / "zai.json"
             self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
-            os.chmod(parent, 0o755)
-            os.chmod(path, 0o644)
-            collector.write_atomic(path, payload, expected_owner_uid=os.getuid())
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
+            os.chmod(output, 0o644)
+            self.write_trusted(root, path, payload)
             self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o700)
-            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
 
-    def test_atomic_write_rejects_symlinked_or_wrong_owner_parent(self):
+    def test_atomic_write_rejects_wrong_root_path_without_chmod(self):
+        payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path, parent = self.trusted_output(root)
+            parent.chmod(0o755)
+            wrong = pathlib.Path("/srv/caller-selected/zai.json")
+            with self.assertRaisesRegex(ValueError, "exactly"):
+                self.write_trusted(root, wrong, payload)
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
+            self.assertFalse((root / wrong.relative_to("/")).exists())
+
+    def test_atomic_write_rejects_symlinked_ancestor_component(self):
         payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             victim = root / "victim"
             victim.mkdir()
-            link = root / "usage"
-            link.symlink_to(victim, target_is_directory=True)
-            with self.assertRaises(ValueError):
-                collector.write_atomic(link / "zai.json", payload, expected_owner_uid=os.getuid())
-            self.assertFalse((victim / "zai.json").exists())
-            real = root / "real"
-            real.mkdir()
-            with self.assertRaisesRegex(ValueError, "wrong owner"):
-                collector.write_atomic(real / "zai.json", payload, expected_owner_uid=os.getuid() + 1)
+            victim.chmod(0o700)
+            (root / "srv").symlink_to(victim, target_is_directory=True)
+            path = pathlib.Path("/srv/cliproxy-usage/zai.json")
+            with self.assertRaisesRegex(ValueError, "could not be opened securely"):
+                self.write_trusted(root, path, payload)
+            self.assertFalse((victim / "cliproxy-usage" / "zai.json").exists())
 
-    def test_atomic_write_detects_parent_substitution_before_replace(self):
+    def test_atomic_write_rejects_wrong_owner_or_mode_without_chmod(self):
         payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
-            parent = root / "collector"
-            parent.mkdir()
-            replacement = root / "replacement"
-            replacement.mkdir()
-            real_lstat = collector.os.lstat
-            calls = 0
+            path, parent = self.trusted_output(root)
+            with self.assertRaisesRegex(ValueError, "wrong owner"):
+                self.write_trusted(root, path, payload, expected_owner_uid=os.getuid() + 1)
+            parent.chmod(0o755)
+            with self.assertRaisesRegex(ValueError, "mode 0700"):
+                self.write_trusted(root, path, payload)
+            self.assertEqual(stat.S_IMODE(parent.stat().st_mode), 0o755)
 
-            def substitute_before_final_check(path, *args, **kwargs):
-                nonlocal calls
-                calls += 1
-                if calls == 2:
-                    parent.rename(root / "original")
-                    replacement.rename(parent)
-                return real_lstat(path, *args, **kwargs)
-
-            with mock.patch.object(collector.os, "lstat", side_effect=substitute_before_final_check):
-                with self.assertRaisesRegex(ValueError, "substituted"):
-                    collector.write_atomic(parent / "zai.json", payload, expected_owner_uid=os.getuid())
-            self.assertFalse((parent / "zai.json").exists())
+    def test_atomic_write_rejects_symlinked_output_component(self):
+        payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            path, parent = self.trusted_output(root)
+            victim = root / "victim.json"
+            victim.write_text("unchanged")
+            (parent / "zai.json").symlink_to(victim)
+            with self.assertRaisesRegex(ValueError, "must not be a symlink"):
+                self.write_trusted(root, path, payload)
+            self.assertEqual(victim.read_text(), "unchanged")
 
     def test_atomic_write_fsyncs_file_and_parent_directory(self):
         payload = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(collector.os, "fsync", wraps=os.fsync) as fsync:
-            collector.write_atomic(pathlib.Path(directory) / "collector" / "zai.json", payload, expected_owner_uid=os.getuid())
+            root = pathlib.Path(directory)
+            path, _ = self.trusted_output(root)
+            self.write_trusted(root, path, payload)
             self.assertEqual(fsync.call_count, 2)
 
 

@@ -87,13 +87,46 @@ PY
 test "$(stat -c %a "$config")" = 600
 systemctl reload cliproxy.service || systemctl restart cliproxy.service
 
-# After config reload exposes the custom source, install the exact release.
-curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+# After config reload exposes the custom source, install the exact release. Keep the
+# response body in a root-only bounded file so an error page never reaches operator output.
+install_response=$(mktemp)
+install_error=$(mktemp)
+trap 'rm -f "$curl_config" "$install_response" "$install_error"' EXIT
+if curl --fail --fail-early --max-redirs 0 --silent --show-error \
+  --connect-timeout 2 --max-time 10 --max-filesize 1048576 \
   --config "$curl_config" \
+  --output "$install_response" --stderr "$install_error" \
   -X POST \
   -H 'Content-Type: application/json' \
   --data '{"version":"0.1.0"}' \
   'http://127.0.0.1:8317/v0/management/plugin-store/zai-coding-plan/install'
+then
+  :
+else
+  rc=$?
+  printf 'plugin install request failed (curl exit %s; response body suppressed)\n' "$rc" >&2
+  if grep -Eq '^curl: \([0-9]+\) (Connection|Could not|Failed|Operation timed out|Maximum file size exceeded|Received HTTP code|The requested URL returned error)[[:print:]]{0,240}$' "$install_error"; then
+    tr -d '\r\n' <"$install_error" >&2
+    printf '\n' >&2
+  fi
+  exit "$rc"
+fi
+python3 - "$install_response" <<'PY'
+import json, pathlib, sys
+path=pathlib.Path(sys.argv[1])
+if path.stat().st_size > 1_048_576:
+    raise SystemExit("plugin install response exceeded 1 MiB")
+try:
+    response=json.loads(path.read_text())
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit("plugin install response was not valid JSON")
+expected={"id":"zai-coding-plan","version":"0.1.0","install_type":"github-release"}
+if any(response.get(key) != value for key, value in expected.items()):
+    raise SystemExit("plugin install response did not confirm the expected release")
+path_value=response.get("path")
+if not isinstance(path_value, str) or "/linux/amd64/" not in path_value or "0.1.0" not in path_value:
+    raise SystemExit("plugin install response did not report the expected versioned linux/amd64 path")
+PY
 
 usage_dir=/srv/cliproxy-usage
 install -d -o root -g root -m 0700 "$usage_dir"

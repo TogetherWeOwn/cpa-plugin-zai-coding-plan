@@ -45,6 +45,23 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn("os.fsync(directory_fd)", rollback)
         self.assertIn("systemctl reload cliproxy.service || systemctl restart cliproxy.service", rollback)
 
+    def test_plugin_install_curl_is_bounded_and_suppresses_error_bodies(self):
+        install = README.read_text().split("# After config reload exposes the custom source", 1)[1].split("usage_dir=", 1)[0]
+        for option in (
+            "--fail",
+            "--fail-early",
+            "--max-redirs 0",
+            "--connect-timeout 2",
+            "--max-time 10",
+            "--max-filesize 1048576",
+            '--output "$install_response"',
+            '--stderr "$install_error"',
+        ):
+            self.assertIn(option, install)
+        self.assertNotIn("--fail-with-body", install)
+        self.assertIn("response body suppressed", install)
+        self.assertIn("plugin install response did not confirm the expected release", install)
+
     def test_runbook_passes_both_secret_marker_files_to_live_verification(self):
         text = README.read_text()
         self.assertIn("CLIPROXY_MANAGEMENT_KEY_FILE=", text)

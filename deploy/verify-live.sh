@@ -93,8 +93,7 @@ PY
   --management-key-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
   --secret-marker-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
   --secret-marker-file "$ZAI_CODING_PLAN_KEY_FILE" \
-  --url "$status_url" \
-  --output "$CLIPROXY_USAGE_DIR/zai.json"
+  --url "$status_url"
 
 curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --max-time 5 --max-filesize 1048576 \

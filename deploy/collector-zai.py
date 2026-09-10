@@ -75,6 +75,7 @@ RATIO_FIELDS = {"five_hour_utilization", "weekly_utilization"}
 MAX_STRING_BYTES = 512
 MAX_ACCOUNTS = 64
 DEFAULT_ALLOWED_ORIGINS = ("http://127.0.0.1:8317", "http://[::1]:8317", "http://localhost:8317")
+TRUSTED_OUTPUT = pathlib.Path("/srv/cliproxy-usage/zai.json")
 
 
 class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -285,44 +286,52 @@ def read_single_line_secret(path: pathlib.Path, label: str) -> str:
         fail(f"{label} file must contain valid UTF-8")
 
 
-def open_output_directory(parent: pathlib.Path, expected_owner_uid: int) -> int:
-    try:
-        parent_stat = os.lstat(parent)
-    except FileNotFoundError:
-        try:
-            os.mkdir(parent, 0o700)
-            parent_stat = os.lstat(parent)
-        except OSError:
-            fail("output directory could not be created securely")
-    except OSError:
-        fail("output directory could not be inspected securely")
-    if stat.S_ISLNK(parent_stat.st_mode) or not stat.S_ISDIR(parent_stat.st_mode):
-        fail("output directory must be a real directory, not a link")
+def open_trusted_output_directory(
+    path: pathlib.Path,
+    expected_owner_uid: int,
+    trusted_output: pathlib.Path,
+    filesystem_root: pathlib.Path,
+) -> int:
+    if not path.is_absolute() or path != trusted_output or trusted_output != TRUSTED_OUTPUT:
+        fail(f"output path must be exactly {TRUSTED_OUTPUT}")
+    if not filesystem_root.is_absolute():
+        fail("filesystem root must be absolute")
+    parts = path.parts[1:-1]
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        directory_fd = os.open(parent, flags)
+        directory_fd = os.open(filesystem_root, flags)
     except OSError:
-        fail("output directory could not be opened securely")
+        fail("filesystem root could not be opened securely")
     try:
+        for component in parts:
+            try:
+                next_fd = os.open(component, flags, dir_fd=directory_fd)
+            except OSError:
+                fail("trusted output directory path could not be opened securely")
+            os.close(directory_fd)
+            directory_fd = next_fd
         opened_stat = os.fstat(directory_fd)
-        current_stat = os.lstat(parent)
-        if (opened_stat.st_dev, opened_stat.st_ino) != (current_stat.st_dev, current_stat.st_ino):
-            fail("output directory was substituted during validation")
+        if not stat.S_ISDIR(opened_stat.st_mode):
+            fail("trusted output directory must be a real directory")
         if opened_stat.st_uid != expected_owner_uid:
-            fail("output directory has the wrong owner")
-        os.fchmod(directory_fd, 0o700)
+            fail("trusted output directory has the wrong owner")
+        if stat.S_IMODE(opened_stat.st_mode) != 0o700:
+            fail("trusted output directory must have mode 0700")
         return directory_fd
     except Exception:
         os.close(directory_fd)
         raise
 
 
-def write_atomic(path: pathlib.Path, payload: dict[str, Any], expected_owner_uid: int = 0) -> None:
-    if not path.is_absolute() or not path.name or path.name in {".", ".."}:
-        fail("output path must be an absolute file path")
-    if path.parent.parent != path.parent and not path.parent.parent.exists():
-        fail("output directory parent must already exist")
-    directory_fd = open_output_directory(path.parent, expected_owner_uid)
+def write_atomic(
+    path: pathlib.Path,
+    payload: dict[str, Any],
+    expected_owner_uid: int = 0,
+    *,
+    trusted_output: pathlib.Path = TRUSTED_OUTPUT,
+    filesystem_root: pathlib.Path = pathlib.Path("/"),
+) -> None:
+    directory_fd = open_trusted_output_directory(path, expected_owner_uid, trusted_output, filesystem_root)
     temporary_name = f".{path.name}.tmp-{os.getpid()}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -331,11 +340,18 @@ def write_atomic(path: pathlib.Path, payload: dict[str, Any], expected_owner_uid
         except (TypeError, ValueError):
             fail("collector payload is not strict JSON")
         try:
+            target_stat = os.stat(path.name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            target_stat = None
+        except OSError:
+            fail("trusted output file could not be inspected securely")
+        if target_stat is not None and stat.S_ISLNK(target_stat.st_mode):
+            fail("trusted output file must not be a symlink")
+        try:
             fd = os.open(temporary_name, flags, 0o600, dir_fd=directory_fd)
         except OSError:
             fail("temporary output file could not be created securely")
         try:
-            os.fchmod(fd, stat.S_IRUSR | stat.S_IWUSR)
             with os.fdopen(fd, "wb") as handle:
                 handle.write(raw)
                 handle.flush()
@@ -346,10 +362,6 @@ def write_atomic(path: pathlib.Path, payload: dict[str, Any], expected_owner_uid
             except OSError:
                 pass
             raise
-        current_stat = os.lstat(path.parent)
-        opened_stat = os.fstat(directory_fd)
-        if (opened_stat.st_dev, opened_stat.st_ino) != (current_stat.st_dev, current_stat.st_ino):
-            fail("output directory was substituted before persistence")
         os.replace(temporary_name, path.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
         os.fsync(directory_fd)
     finally:
@@ -365,7 +377,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default="http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan/status")
     parser.add_argument("--allowed-origin", action="append", default=[])
-    parser.add_argument("--output", default="/srv/cliproxy-usage/zai.json")
     parser.add_argument("--management-key-file", required=True)
     parser.add_argument("--secret-marker-file", action="append", default=[])
     parser.add_argument("--timeout", type=float, default=5)
@@ -377,7 +388,7 @@ def main() -> int:
     allowed_origins = DEFAULT_ALLOWED_ORIGINS + tuple(args.allowed_origin)
     observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     payload = project(fetch_status(args.url, management_key, args.timeout, allowed_origins), observed_at, secret_markers)
-    write_atomic(pathlib.Path(args.output), payload)
+    write_atomic(TRUSTED_OUTPUT, payload)
     return 0
 
 

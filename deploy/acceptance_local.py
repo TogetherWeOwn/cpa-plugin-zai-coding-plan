@@ -32,9 +32,19 @@ def main() -> int:
     fixture = json.loads((ROOT / "deploy/testdata/status-authoritative.json").read_text())
     projected = collector.project(fixture, "2026-09-10T15:00:00Z")
     with tempfile.TemporaryDirectory() as directory:
-        output = pathlib.Path(directory) / "zai.json"
-        collector.write_atomic(output, projected, expected_owner_uid=os.getuid())
-        raw = output.read_text()
+        root = pathlib.Path(directory)
+        output_dir = root / "srv" / "cliproxy-usage"
+        output_dir.mkdir(parents=True)
+        output_dir.chmod(0o700)
+        trusted_output = pathlib.Path("/srv/cliproxy-usage/zai.json")
+        collector.write_atomic(
+            trusted_output,
+            projected,
+            expected_owner_uid=os.getuid(),
+            trusted_output=trusted_output,
+            filesystem_root=root,
+        )
+        raw = (output_dir / "zai.json").read_text()
         if any(value in raw for value in FORBIDDEN_VALUES) or FORBIDDEN_FIELDS.search(raw):
             raise SystemExit("projected collector output contains a forbidden secret marker")
         decoded = json.loads(raw)

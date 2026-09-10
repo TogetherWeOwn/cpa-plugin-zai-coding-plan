@@ -67,8 +67,8 @@ class VerifyLiveTest(unittest.TestCase):
                 bin_dir / "collector-zai",
                 f"""
                 #!/usr/bin/env python3
-                import json, os, pathlib, sys
-                output=pathlib.Path(sys.argv[sys.argv.index("--output") + 1])
+                import json, os, pathlib
+                output=pathlib.Path({str(usage_dir / "zai.json")!r})
                 output.parent.mkdir(parents=True, exist_ok=True)
                 os.chmod(output.parent, 0o700)
                 output.write_text(json.dumps({{
