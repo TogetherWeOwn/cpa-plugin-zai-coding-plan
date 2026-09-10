@@ -341,7 +341,7 @@ func validateAccountQuotaState(state accountQuotaState, now time.Time) error {
 			return fmt.Errorf("invalid authoritative observation time")
 		}
 		for _, window := range []quotaWindow{state.Authoritative.FiveHour, state.Authoritative.Weekly} {
-			if window.ConsumedMicrocredits < 0 || window.BucketMicrocredits <= 0 || window.ConsumedMicrocredits > window.BucketMicrocredits || window.ResetsAt.IsZero() {
+			if window.ConsumedMicrocredits < 0 || window.BucketMicrocredits <= 0 || window.ConsumedMicrocredits > window.BucketMicrocredits || !window.ResetsAt.After(state.Authoritative.ObservedAt) {
 				return fmt.Errorf("invalid authoritative quota")
 			}
 		}

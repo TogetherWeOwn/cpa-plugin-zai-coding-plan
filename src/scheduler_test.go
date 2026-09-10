@@ -99,6 +99,35 @@ func TestAuthSuspensionPrecedesExhaustionAndBothRecover(t *testing.T) {
 	}
 }
 
+func TestExhaustedCapacityWithStaleResetRemainsFailClosed(t *testing.T) {
+	account := schedulerAccount("one", "claude-one", "openai-one")
+	runtime := &pluginRuntime{now: func() time.Time { return schedulerNow }}
+	snapshot := schedulerSnapshot(account)
+	snapshot.Quota = nil
+	if err := runtime.commitSnapshot(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	generation := runtime.snapshot.Generation
+	if !runtime.updateCapacity(generation, account.Identity, capacityUpdate{Exhausted: true, ResetAt: schedulerNow.Add(-time.Second), Source: "authoritative"}) {
+		t.Fatal("exhausted capacity update rejected")
+	}
+	for _, authID := range []string{account.ClaudeAuthID, account.OpenAIAuthID} {
+		_, err := runtime.pick(schedulerRequest(authID))
+		assertSchedulerError(t, err, "zai_no_capacity")
+	}
+	health, ok := runtime.health(account.Identity)
+	if !ok || health.Status != healthExhausted || !health.ResetAt.IsZero() {
+		t.Fatalf("health = %#v, ok = %v, want fail-closed exhaustion without stale reset hint", health, ok)
+	}
+	if !runtime.updateCapacity(generation, account.Identity, capacityUpdate{Exhausted: false, Source: "fresh authoritative"}) {
+		t.Fatal("fresh recovery update rejected")
+	}
+	response, err := runtime.pick(schedulerRequest(account.ClaudeAuthID, account.OpenAIAuthID))
+	if err != nil || !response.Handled || response.DelegateBuiltin != pluginapi.SchedulerBuiltinRoundRobin {
+		t.Fatalf("fresh non-exhausted observation did not recover scheduler: %#v err=%v", response, err)
+	}
+}
+
 func TestCapacityGenerationBoundaryAndRecovery(t *testing.T) {
 	account := schedulerAccount("one", "claude-one", "openai-one")
 	runtime := schedulerTestRuntime(schedulerNow, account)

@@ -163,7 +163,7 @@ func parseQuotaResponse(raw []byte, observedAt time.Time) (quotaSnapshot, error)
 		if *target != nil {
 			return quotaSnapshot{}, fmt.Errorf("duplicate quota limit")
 		}
-		window, err := parseQuotaWindow(limit)
+		window, err := parseQuotaWindow(limit, observedAt)
 		if err != nil {
 			return quotaSnapshot{}, err
 		}
@@ -182,7 +182,7 @@ func parseQuotaResponse(raw []byte, observedAt time.Time) (quotaSnapshot, error)
 	return quotaSnapshot{Plan: plan, FiveHour: *fiveHour, Weekly: *weekly, ObservedAt: observedAt.UTC()}, nil
 }
 
-func parseQuotaWindow(limit quotaWireLimit) (quotaWindow, error) {
+func parseQuotaWindow(limit quotaWireLimit, observedAt time.Time) (quotaWindow, error) {
 	usage, err := strictNonnegativeInt64(limit.Usage)
 	if err != nil || usage <= 0 {
 		return quotaWindow{}, fmt.Errorf("quota limit has invalid usage")
@@ -201,7 +201,7 @@ func parseQuotaWindow(limit quotaWireLimit) (quotaWindow, error) {
 		return quotaWindow{}, fmt.Errorf("quota limit has invalid nextResetTime")
 	}
 	reset := time.UnixMilli(resetMilliseconds).UTC()
-	if reset.Year() < 2000 || reset.Year() > 2200 {
+	if reset.Year() < 2000 || reset.Year() > 2200 || !reset.After(observedAt.UTC()) {
 		return quotaWindow{}, fmt.Errorf("quota limit has invalid nextResetTime")
 	}
 	if usage > int64(^uint64(0)>>1)/creditScale || current > int64(^uint64(0)>>1)/creditScale {
