@@ -171,6 +171,15 @@ func TestValidateWorkflowActionPinsRejectsFlowSyntax(t *testing.T) {
 	}
 }
 
+func TestValidateWorkflowActionPinsRejectsAlias(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeWorkflow(t, root, "ci.yml", "unpinned: &unpinned attacker/example@main\nsteps:\n  - uses: *unpinned\n")
+	if err := validateWorkflowActionPins(root); err == nil || !strings.Contains(err.Error(), "cannot use YAML aliases") {
+		t.Fatalf("validateWorkflowActionPins() error = %v, want aliased action rejection", err)
+	}
+}
+
 func TestValidateWorkflowActionPinsRejectsUnpinnedYAMLWorkflow(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

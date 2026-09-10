@@ -317,6 +317,9 @@ func validateWorkflowActionPins(root string) error {
 		var uses []*yaml.Node
 		collectWorkflowUses(&document, &uses)
 		for _, node := range uses {
+			if node.Kind != yaml.ScalarNode {
+				return fmt.Errorf("workflow %s:%d action uses must be a scalar and cannot use YAML aliases", filepath.Base(path), node.Line)
+			}
 			value := strings.TrimSpace(node.Value)
 			if strings.HasPrefix(value, "./") {
 				continue
@@ -335,7 +338,7 @@ func collectWorkflowUses(node *yaml.Node, uses *[]*yaml.Node) {
 		for index := 0; index+1 < len(node.Content); index += 2 {
 			key := node.Content[index]
 			value := node.Content[index+1]
-			if key.Value == "uses" && value.Kind == yaml.ScalarNode {
+			if key.Value == "uses" {
 				*uses = append(*uses, value)
 			}
 			collectWorkflowUses(value, uses)
