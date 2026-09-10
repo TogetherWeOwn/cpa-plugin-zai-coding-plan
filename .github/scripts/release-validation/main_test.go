@@ -308,6 +308,36 @@ func TestValidateReleaseWorkflowBoundaryRejectsBuildEnvironmentMutation(t *testi
 	}
 }
 
+func TestValidateReleaseWorkflowBoundaryRejectsFoldedBuildCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", "        run: >-\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded build command rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsChangedRunChomping(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", "        run: |-\n          set -euo pipefail\n          go run -buildvcs=false ./.github/scripts/host-integration", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly run: |") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want changed chomping rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsFoldedPublicationCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          actual_tag_object=", "        run: >-\n          set -euo pipefail\n          actual_tag_object=", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded publication command rejection", err)
+	}
+}
+
 func TestValidateReleaseWorkflowBoundaryRejectsRecoveryWeakening(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {

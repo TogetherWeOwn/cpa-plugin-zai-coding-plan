@@ -4,6 +4,7 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -781,6 +782,9 @@ func validateReleaseWorkflowShape(raw []byte) error {
 		if !equalStringMaps(env, canonical.env) {
 			return fmt.Errorf("release build step %d must use only the canonical environment", index+1)
 		}
+		if err := requireCanonicalRunScalar(raw, step["run"], fmt.Sprintf("release build step %d", index+1)); err != nil {
+			return err
+		}
 		if normalizeShellCommand(yamlScalarValue(step["run"])) != normalizeShellCommand(canonical.command) {
 			return fmt.Errorf("release build step %d must use the canonical command", index+1)
 		}
@@ -833,6 +837,28 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	}
 	if len(publicationEnv) != 5 || publicationEnv["GH_TOKEN"] != "${{ github.token }}" || publicationEnv["GH_REPO"] != "${{ github.repository }}" || publicationEnv["VERSION"] != "${{ needs.build.outputs.version }}" || publicationEnv["RAW_TAG"] != "${{ needs.build.outputs.tag }}" || publicationEnv["EXPECTED_TAG_OBJECT"] != "${{ needs.build.outputs.tag_object }}" {
 		return errors.New("release publication environment must contain exactly the canonical variables")
+	}
+	if err := requireCanonicalRunScalar(raw, publication["run"], "release publication step"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func requireCanonicalRunScalar(raw []byte, node *yaml.Node, context string) error {
+	if node == nil || node.Kind != yaml.ScalarNode || node.Tag != "!!str" || node.Style != yaml.LiteralStyle {
+		return fmt.Errorf("%s run command must use literal block style", context)
+	}
+	lineStart := node.Line - 1
+	if lineStart < 0 {
+		return fmt.Errorf("%s run command has an invalid source position", context)
+	}
+	lines := bytes.Split(raw, []byte{'\n'})
+	if lineStart >= len(lines) {
+		return fmt.Errorf("%s run command has an invalid source position", context)
+	}
+	declaration := strings.TrimSpace(string(lines[lineStart]))
+	if declaration != "run: |" {
+		return fmt.Errorf("%s run command must use exactly run: |", context)
 	}
 	return nil
 }
