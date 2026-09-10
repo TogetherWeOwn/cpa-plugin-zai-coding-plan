@@ -311,7 +311,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsBuildEnvironmentMutation(t *testi
 func TestValidateReleaseWorkflowBoundaryRejectsFoldedBuildCommand(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          make test-host-matrix", "        run: >-\n          set -euo pipefail\n          make test-host-matrix", 1)
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", "        run: >-\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", 1)
 	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded build command rejection", err)
@@ -321,7 +321,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsFoldedBuildCommand(t *testing.T) 
 func TestValidateReleaseWorkflowBoundaryRejectsChangedRunChomping(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          make test-host-matrix", "        run: |-\n          set -euo pipefail\n          make test-host-matrix", 1)
+	workflow := strings.Replace(validReleaseWorkflow, "        run: |\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", "        run: |-\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", 1)
 	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly run: |") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want changed chomping rejection", err)
