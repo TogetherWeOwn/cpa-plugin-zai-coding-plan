@@ -162,11 +162,12 @@ func TestAccountOverridesAndAmbiguity(t *testing.T) {
 
 func TestRenameAndKeyRotationIdentity(t *testing.T) {
 	fixture := exactPairFixture(fixtureKey)
-	base, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Name: "old", Plan: "pro"}}})
+	keySuffix := fixtureKey[len(fixtureKey)-8:]
+	base, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Name: "old", Plan: "pro"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	renamed, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Name: "new", Plan: "pro"}}})
+	renamed, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Name: "new", Plan: "pro"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,8 +302,8 @@ func TestStableAuthIDsMatchUpstreamFixtures(t *testing.T) {
 		parts []string
 		want  string
 	}{
-		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:ae1542c0f164"},
-		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:2ad86d46dbc6"},
+		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:e414498ddc81"},
+		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:f09c6735a12a"},
 	}
 	for _, tt := range tests {
 		if got := gen.next(tt.kind, tt.parts...); got != tt.want {

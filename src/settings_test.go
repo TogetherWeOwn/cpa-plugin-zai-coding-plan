@@ -261,7 +261,8 @@ func TestStoredSettingsValidation(t *testing.T) {
 }
 
 func TestStoredSettingsPreserveConfigDisabledWhenUnset(t *testing.T) {
-	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Plan: "pro", Disabled: true}}})
+	keySuffix := fixtureKey[len(fixtureKey)-8:]
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Plan: "pro", Disabled: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +278,8 @@ func TestStoredSettingsPreserveConfigDisabledWhenUnset(t *testing.T) {
 }
 
 func TestStoredSettingsCanExplicitlyEnableAccount(t *testing.T) {
-	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Plan: "pro", Disabled: true}}})
+	keySuffix := fixtureKey[len(fixtureKey)-8:]
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Plan: "pro", Disabled: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
