@@ -81,6 +81,8 @@ The plugin-store response must report `id=zai-coding-plan`, `version=0.1.0`, `in
 ```sh
 set -euo pipefail
 umask 077
+config=/home/ubuntu/cliproxy/config.yaml
+backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 curl_config=$(mktemp)
 trap 'rm -f "$curl_config"' EXIT

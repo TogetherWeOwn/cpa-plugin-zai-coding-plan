@@ -27,6 +27,12 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn("sha256sum --check", readme)
         self.assertEqual(hashlib.sha256(REGISTRY.read_bytes()).hexdigest(), PINNED_DIGEST)
 
+    def test_rollback_defines_recorded_config_and_backup_paths(self):
+        rollback = README.read_text().split("## Rollback", 1)[1]
+        self.assertIn("config=/home/ubuntu/cliproxy/config.yaml", rollback)
+        self.assertIn("backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-", rollback)
+        self.assertLess(rollback.index("backup="), rollback.index('install -m 0600 "$backup" "$config"'))
+
     def test_runbook_passes_both_secret_marker_files_to_live_verification(self):
         text = README.read_text()
         self.assertIn("CLIPROXY_MANAGEMENT_KEY_FILE=", text)
