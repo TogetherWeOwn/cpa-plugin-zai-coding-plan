@@ -353,6 +353,32 @@ func collectWorkflowUses(node *yaml.Node, uses *[]*yaml.Node) {
 }
 
 func validateReleaseWorkflowBoundary(root string) error {
+	ciPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+	ciRaw, err := os.ReadFile(ciPath)
+	if err != nil {
+		return fmt.Errorf("read CI workflow: %w", err)
+	}
+	var ciDocument yaml.Node
+	if err := yaml.Unmarshal(ciRaw, &ciDocument); err != nil {
+		return fmt.Errorf("parse CI workflow: %w", err)
+	}
+	ciWorkflow, err := yamlMapping(&ciDocument, "CI workflow")
+	if err != nil {
+		return err
+	}
+	ciTrigger, err := yamlMapping(ciWorkflow["on"], "CI workflow trigger")
+	if err != nil {
+		return err
+	}
+	ciPush, err := yamlMapping(ciTrigger["push"], "CI push trigger")
+	if err != nil {
+		return err
+	}
+	ciBranches, err := yamlStringSequence(ciPush["branches"], "CI push branches")
+	if err != nil || len(ciBranches) != 2 || ciBranches[0] != "main" || ciBranches[1] != "release-recovery/v0.1.0" {
+		return errors.New("CI push trigger must contain only main and release-recovery/v0.1.0")
+	}
+
 	path := filepath.Join(root, ".github", "workflows", "release.yml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -446,9 +472,69 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	if err != nil {
 		return err
 	}
+	trigger, err := yamlMapping(workflow["on"], "release workflow trigger")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(trigger, "release workflow trigger", "push", "workflow_run"); err != nil {
+		return err
+	}
+	push, err := yamlMapping(trigger["push"], "release push trigger")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(push, "release push trigger", "tags"); err != nil {
+		return err
+	}
+	tags, err := yamlStringSequence(push["tags"], "release tag trigger")
+	if err != nil || len(tags) != 1 || tags[0] != "v*" {
+		return errors.New("release push trigger must contain only v* tags")
+	}
+	workflowRun, err := yamlMapping(trigger["workflow_run"], "release recovery trigger")
+	if err != nil {
+		return err
+	}
+	if err := requireOnlyYAMLKeys(workflowRun, "release recovery trigger", "workflows", "types", "branches"); err != nil {
+		return err
+	}
+	workflows, err := yamlStringSequence(workflowRun["workflows"], "release recovery workflows")
+	if err != nil || len(workflows) != 1 || workflows[0] != "CI" {
+		return errors.New("release recovery trigger must use only the CI workflow")
+	}
+	types, err := yamlStringSequence(workflowRun["types"], "release recovery event types")
+	if err != nil || len(types) != 1 || types[0] != "completed" {
+		return errors.New("release recovery trigger must use only completed events")
+	}
+	branches, err := yamlStringSequence(workflowRun["branches"], "release recovery branches")
+	if err != nil || len(branches) != 1 || branches[0] != "release-recovery/v0.1.0" {
+		return errors.New("release recovery trigger must use only release-recovery/v0.1.0")
+	}
 	jobs, err := yamlMapping(workflow["jobs"], "release workflow jobs")
 	if err != nil {
 		return err
+	}
+	build, err := yamlMapping(jobs["build"], "release build job")
+	if err != nil {
+		return err
+	}
+	const recoveryGuard = "github.event_name == 'push' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == 'release-recovery/v0.1.0' && github.event.workflow_run.head_sha == github.workflow_sha)"
+	if normalizeShellCommand(yamlScalarValue(build["if"])) != recoveryGuard {
+		return errors.New("release build job must use the canonical recovery event guard")
+	}
+	buildSteps := build["steps"]
+	if buildSteps == nil || buildSteps.Kind != yaml.SequenceNode || len(buildSteps.Content) == 0 {
+		return errors.New("release build job must contain steps")
+	}
+	checkout, err := yamlMapping(buildSteps.Content[0], "release checkout step")
+	if err != nil {
+		return err
+	}
+	checkoutWith, err := yamlStringMap(checkout["with"], "release checkout inputs")
+	if err != nil {
+		return err
+	}
+	if checkoutWith["fetch-depth"] != "0" || checkoutWith["persist-credentials"] != "false" || checkoutWith["ref"] != "${{ github.event_name == 'workflow_run' && 'refs/tags/v0.1.0' || github.ref }}" {
+		return errors.New("release checkout must select only the immutable recovery tag without credentials")
 	}
 	publish, err := yamlMapping(jobs["publish"], "release publish job")
 	if err != nil {
@@ -513,9 +599,9 @@ func yamlMapping(node *yaml.Node, context string) (map[string]*yaml.Node, error)
 		node = node.Content[0]
 	}
 	if node.Kind == yaml.AliasNode {
-		node = node.Alias
+		return nil, fmt.Errorf("%s cannot use YAML aliases", context)
 	}
-	if node == nil || node.Kind != yaml.MappingNode {
+	if node.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", context)
 	}
 	result := make(map[string]*yaml.Node, len(node.Content)/2)
@@ -528,6 +614,20 @@ func yamlMapping(node *yaml.Node, context string) (map[string]*yaml.Node, error)
 			return nil, fmt.Errorf("%s contains duplicate key %q", context, key.Value)
 		}
 		result[key.Value] = node.Content[index+1]
+	}
+	return result, nil
+}
+
+func yamlStringSequence(node *yaml.Node, context string) ([]string, error) {
+	if node == nil || node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("%s must be a sequence", context)
+	}
+	result := make([]string, 0, len(node.Content))
+	for _, value := range node.Content {
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			return nil, fmt.Errorf("%s values must be strings", context)
+		}
+		result = append(result, value.Value)
 	}
 	return result, nil
 }
