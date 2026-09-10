@@ -168,6 +168,24 @@ func TestSecureStoreRejectsDirectoryReplacementWithSymlink(t *testing.T) {
 	}
 }
 
+func TestPersistedStateRejectsFutureAuthoritativeAndEventTimes(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	identity := accountIdentity(fixtureKey)
+	validQuota := quotaWindow{ConsumedMicrocredits: creditScale, BucketMicrocredits: 2 * creditScale, ResetsAt: now.Add(time.Hour)}
+	for _, state := range []accountQuotaState{
+		{Authoritative: &quotaSnapshot{ObservedAt: now.Add(maxPersistedClockSkew + time.Second), FiveHour: validQuota, Weekly: validQuota}},
+		{Events: []creditEvent{{At: now.Add(maxPersistedClockSkew + time.Second), Microcredits: creditScale, Model: "glm-5.3"}}},
+	} {
+		if err := validatePersistedStateAt(persistedState{Version: 1, Accounts: map[string]accountQuotaState{identity: state}}, now); err == nil {
+			t.Fatalf("future persisted timestamp within state %#v was accepted", state)
+		}
+	}
+	withinBound := accountQuotaState{Events: []creditEvent{{At: now.Add(maxPersistedClockSkew), Microcredits: creditScale, Model: "glm-5.3"}}}
+	if err := validatePersistedStateAt(persistedState{Version: 1, Accounts: map[string]accountQuotaState{identity: withinBound}}, now); err != nil {
+		t.Fatalf("timestamp at conservative skew bound was rejected: %v", err)
+	}
+}
+
 func TestPersistedStateValidation(t *testing.T) {
 	identity := accountIdentity(fixtureKey)
 	tests := []struct {

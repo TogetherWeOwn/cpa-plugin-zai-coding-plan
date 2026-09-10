@@ -67,6 +67,32 @@ func TestRuntimeRejectsNonExclusiveSchedulerDeployment(t *testing.T) {
 	}
 }
 
+func TestRuntimeReconfigureClosesSupersededAndShutdownClosesFinalStore(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.yaml")
+	writeCPAConfigFixture(t, configPath, filepath.Join(root, "auth-one"), fixtureKey)
+	rawConfig := []byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")
+	var runtime pluginRuntime
+	if err := runtime.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	first := runtime.snapshot.Store
+	writeCPAConfigFixture(t, configPath, filepath.Join(root, "auth-two"), fixtureKey)
+	if err := runtime.reconfigure(rawConfig); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.validateDirectory(); err == nil {
+		t.Fatal("superseded secure store remained open")
+	}
+	final := runtime.snapshot.Store
+	if err := runtime.shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	if err := final.validateDirectory(); err == nil {
+		t.Fatal("final secure store remained open after shutdown")
+	}
+}
+
 func TestRuntimeReconfigureKeepsLastValidSnapshot(t *testing.T) {
 	root := t.TempDir()
 	cpaPath := filepath.Join(root, "config.yaml")

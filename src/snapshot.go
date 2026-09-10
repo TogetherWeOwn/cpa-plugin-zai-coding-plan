@@ -11,11 +11,12 @@ func newRuntimeSnapshot(config pluginConfig, accounts []account, store *secureSt
 		byIdentity[accounts[i].Identity] = accounts[i]
 	}
 	return &runtimeSnapshot{
-		Config:     config,
-		Accounts:   accounts,
-		Store:      store,
-		Health:     health,
-		byAuthID:   byAuthID,
-		byIdentity: byIdentity,
+		Config:       config,
+		BaseAccounts: append([]account(nil), accounts...),
+		Accounts:     accounts,
+		Store:        store,
+		Health:       health,
+		byAuthID:     byAuthID,
+		byIdentity:   byIdentity,
 	}
 }

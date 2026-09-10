@@ -58,10 +58,10 @@ type quotaWireLimit struct {
 	NextResetTime json.Number `json:"nextResetTime"`
 }
 
-func newQuotaHTTPClient() *http.Client {
+func newQuotaHTTPClient(timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	client := &http.Client{Transport: transport, Timeout: defaultQuotaTimeout}
+	client := &http.Client{Transport: transport, Timeout: quotaTimeout(timeout)}
 	client.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}

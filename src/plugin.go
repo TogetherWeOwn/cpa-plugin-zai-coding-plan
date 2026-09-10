@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -28,8 +27,7 @@ type envelopeError struct {
 	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
-func (e *envelopeError) Error() string { return e.Code + ": " + e.Message }
-
+func (e *envelopeError) Error() string            { return e.Code + ": " + e.Message }
 func (e *envelopeError) WireError() envelopeError { return *e }
 
 func newSchedulerError(code, message string) error {
@@ -53,16 +51,6 @@ type capabilities struct {
 	ManagementAPI bool `json:"management_api"`
 }
 
-// managementStatusPath is the full Management API path the host dispatches:
-// ServeManagementHTTP forwards r.URL.Path verbatim (internal/pluginhost
-// management.go), and normalizeManagementRoute resolves this declaration to
-// the same routing key. Registration and the handler share one constant so
-// the advertised route and the served route can never drift apart.
-const managementStatusPath = "/v0/management/plugins/zai-coding-plan/status"
-
-// managementContentType is served with every management response body.
-const managementContentType = "application/json"
-
 func pluginRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
@@ -82,30 +70,6 @@ func pluginRegistration() registration {
 			ManagementAPI: true,
 		},
 	}
-}
-
-// managementRegistration declares the routes this plugin serves. Handler
-// fields stay nil on the wire; the host injects its own dispatcher.
-func managementRegistration() managementRoutes {
-	return managementRoutes{
-		Routes: []managementRoute{
-			{
-				Method:      http.MethodGet,
-				Path:        managementStatusPath,
-				Description: "Reports zai-coding-plan plugin status.",
-			},
-		},
-	}
-}
-
-type managementRoutes struct {
-	Routes []managementRoute `json:"routes"`
-}
-
-type managementRoute struct {
-	Method      string `json:"method"`
-	Path        string `json:"path"`
-	Description string `json:"description,omitempty"`
 }
 
 // schedulerPick explicitly delegates healthy traffic to CPA's built-in
@@ -135,34 +99,6 @@ func usageHandle(request []byte) ([]byte, error) {
 	return okEnvelope(struct{}{})
 }
 
-// managementHandle serves the registered management routes. The host
-// forwards ManagementRequest as-is with the full request path, and decodes
-// the envelope result as pluginapi.ManagementResponse (StatusCode, Headers,
-// base64 Body). Requests for any other path are rejected so misrouted
-// calls surface in host logs.
-func managementHandle(request []byte) ([]byte, error) {
-	var req pluginapi.ManagementRequest
-	if err := json.Unmarshal(request, &req); err != nil {
-		return nil, err
-	}
-	if req.Path != managementStatusPath {
-		return nil, &envelopeError{Code: "not_found", Message: "unknown management route"}
-	}
-	status := "registered"
-	if runtimeState.validationStatus() != "" {
-		status = "reconfigure_rejected"
-	}
-	body, err := json.Marshal(runtimeState.managementStatus(status))
-	if err != nil {
-		return nil, err
-	}
-	return okEnvelope(pluginapi.ManagementResponse{
-		StatusCode: http.StatusOK,
-		Headers:    http.Header{"Content-Type": []string{managementContentType}},
-		Body:       body,
-	})
-}
-
 // managementStatusBody is the redacted JSON served at the status route.
 type managementStatusBody struct {
 	Plugin          string                    `json:"plugin"`
@@ -174,26 +110,26 @@ type managementStatusBody struct {
 }
 
 type managementAccountStatus struct {
-	Name                   string    `json:"name"`
-	KeySuffix              string    `json:"key_suffix"`
-	Plan                   string    `json:"plan"`
-	FiveHourUtilization    float64   `json:"five_hour_utilization"`
-	WeeklyUtilization      float64   `json:"weekly_utilization"`
-	FiveHourResetsAt       time.Time `json:"five_hour_resets_at,omitempty"`
-	WeeklyResetsAt         time.Time `json:"weekly_resets_at,omitempty"`
-	QuotaSource            string    `json:"quota_source"`
-	QuotaObservedAt        time.Time `json:"quota_observed_at,omitempty"`
-	QuotaAgeSeconds        int64     `json:"quota_age_seconds"`
-	QuotaStale             bool      `json:"quota_stale"`
-	QuotaError             string    `json:"quota_error,omitempty"`
-	Offpeak                bool      `json:"offpeak"`
-	Health                 string    `json:"health"`
-	EstimatorCompleteSince time.Time `json:"estimator_complete_since,omitempty"`
-	DeliveryWarning        bool      `json:"delivery_warning"`
-	PersistenceWarning     bool      `json:"persistence_warning"`
-	UnknownModelWarning    bool      `json:"unknown_model_warning"`
-	HeuristicDedupWarning  bool      `json:"heuristic_dedup_warning"`
-	DedupMode              string    `json:"dedup_mode"`
+	Name                   string     `json:"name"`
+	KeySuffix              string     `json:"key_suffix"`
+	Plan                   string     `json:"plan"`
+	FiveHourUtilization    float64    `json:"five_hour_utilization"`
+	WeeklyUtilization      float64    `json:"weekly_utilization"`
+	FiveHourResetsAt       *time.Time `json:"five_hour_resets_at"`
+	WeeklyResetsAt         *time.Time `json:"weekly_resets_at"`
+	QuotaSource            string     `json:"quota_source"`
+	QuotaObservedAt        time.Time  `json:"quota_observed_at,omitempty"`
+	QuotaAgeSeconds        int64      `json:"quota_age_seconds"`
+	QuotaStale             bool       `json:"quota_stale"`
+	QuotaError             string     `json:"quota_error,omitempty"`
+	Offpeak                bool       `json:"offpeak"`
+	Health                 string     `json:"health"`
+	EstimatorCompleteSince time.Time  `json:"estimator_complete_since,omitempty"`
+	DeliveryWarning        bool       `json:"delivery_warning"`
+	PersistenceWarning     bool       `json:"persistence_warning"`
+	UnknownModelWarning    bool       `json:"unknown_model_warning"`
+	HeuristicDedupWarning  bool       `json:"heuristic_dedup_warning"`
+	DedupMode              string     `json:"dedup_mode"`
 }
 
 func okEnvelope(value any) ([]byte, error) {
@@ -202,11 +138,6 @@ func okEnvelope(value any) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(envelope{OK: true, Result: raw})
-}
-
-func errorEnvelope(code, message string) []byte {
-	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
-	return raw
 }
 
 type wireError interface {
@@ -221,4 +152,9 @@ func errorEnvelopeFor(err error) []byte {
 		return raw
 	}
 	return errorEnvelope("plugin_error", err.Error())
+}
+
+func errorEnvelope(code, message string) []byte {
+	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
+	return raw
 }

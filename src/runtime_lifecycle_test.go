@@ -129,13 +129,16 @@ func TestUpstreamPlanSyncsFallbackBuckets(t *testing.T) {
 	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
 	item := account{Identity: accountIdentity("account"), Name: "account", Plan: "max", FiveHourCredits: 28_000, WeeklyCredits: 140_000, ClaudeAuthID: "auth", key: quotaFixtureKey}
 	runtime := quotaTestRuntime(t, now, []account{item})
+	state := runtime.snapshot.Quota[item.Identity]
+	state.Events = []creditEvent{{At: now.Add(-time.Hour), Microcredits: 1_980 * creditScale, Model: "glm-5.3"}}
+	runtime.snapshot.Quota[item.Identity] = state
 	runtime.httpClient = roundTripDoer(func(*http.Request) (*http.Response, error) {
 		return quotaHTTPResponse(200, quotaFixture("lite", []string{
-			quotaLimitFixture(3, 5, 2_000, 1_000, 1_000, now.Add(time.Hour).UnixMilli()),
-			quotaLimitFixture(6, 1, 10_000, 3_000, 7_000, now.Add(24*time.Hour).UnixMilli()),
+			quotaLimitFixture(3, 5, 2_000, 1_980, 20, now.Add(time.Hour).UnixMilli()),
+			quotaLimitFixture(6, 1, 10_000, 9_900, 100, now.Add(24*time.Hour).UnixMilli()),
 		})), nil
 	})
-	if err := runtime.pollOnce(context.Background(), runtime.snapshot.Generation, item.Identity, item.key); err != nil {
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation, runtime.snapshot.Config.QuotaTimeout); err != nil {
 		t.Fatal(err)
 	}
 	fake := runtime.clock.(*fakeClock)
@@ -149,6 +152,12 @@ func TestUpstreamPlanSyncsFallbackBuckets(t *testing.T) {
 	}
 	if view.Weekly.BucketMicrocredits != 10_000*creditScale {
 		t.Fatalf("weekly fallback bucket = %d, want lite %d", view.Weekly.BucketMicrocredits, 10_000*creditScale)
+	}
+	if got := runtime.snapshot.byIdentity[item.Identity]; got.Plan != "lite" || got.FiveHourCredits != 2_000 || got.WeeklyCredits != 10_000 {
+		t.Fatalf("indexed account retained stale plan: %#v", got)
+	}
+	if health, ok := runtime.health(item.Identity); !ok || health.Status != healthExhausted {
+		t.Fatalf("health did not enforce upstream lite buckets: %#v ok=%v", health, ok)
 	}
 }
 
@@ -213,7 +222,7 @@ func TestFutureAuthoritativeTimestampGoesStale(t *testing.T) {
 	// moves backward so the observation is in the future relative to the view.
 	fake := runtime.clock.(*fakeClock)
 	fake.set(now.Add(10 * time.Minute))
-	if err := runtime.pollOnce(context.Background(), runtime.snapshot.Generation, item.Identity, item.key); err != nil {
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation, runtime.snapshot.Config.QuotaTimeout); err != nil {
 		t.Fatal(err)
 	}
 	fake.set(now)
@@ -278,7 +287,7 @@ func TestPollOnceResultBindsToSnapshotGeneration(t *testing.T) {
 	oldGeneration := runtime.snapshot.Generation
 	pollDone := make(chan error, 1)
 	go func() {
-		pollDone <- runtime.pollOnce(context.Background(), oldGeneration, item.Identity, item.key)
+		pollDone <- runtime.pollOnce(context.Background(), item.Identity, item.key, oldGeneration, runtime.snapshot.Config.QuotaTimeout)
 	}()
 	<-blockFetch
 
@@ -341,6 +350,24 @@ func TestCommitSnapshotCarriesForwardSameStoreNamedPlan(t *testing.T) {
 	if got.Plan != "lite" || got.FiveHourCredits != 2_000 || got.WeeklyCredits != 10_000 {
 		t.Fatalf("same-store commit reverted live plan: %#v", got)
 	}
+	indexed := runtime.snapshot.byIdentity[identity]
+	if indexed.Plan != "lite" || indexed.FiveHourCredits != 2_000 || indexed.WeeklyCredits != 10_000 {
+		t.Fatalf("same-store commit left stale plan index: %#v", indexed)
+	}
+
+	// The disabled fixture prevents poller startup during commit; enable the
+	// published account afterward to exercise the health and scheduler indexes.
+	runtime.snapshot.Accounts[0].Disabled = false
+	indexed.Disabled = false
+	runtime.snapshot.byIdentity[identity] = indexed
+	state := runtime.snapshot.Quota[identity]
+	state.Events = []creditEvent{{At: now, Microcredits: 2_000 * creditScale, Model: "glm-5.3"}}
+	runtime.snapshot.Quota[identity] = state
+	if health, ok := runtime.health(identity); !ok || health.Status != healthExhausted {
+		t.Fatalf("carried plan health = %#v, %t, want exhausted", health, ok)
+	}
+	_, err := runtime.pick(schedulerRequest(live.ClaudeAuthID))
+	assertSchedulerError(t, err, "zai_no_capacity")
 }
 
 func TestCommitSnapshotKeepsStagedExplicitPlanOverride(t *testing.T) {
@@ -494,6 +521,8 @@ func TestConcurrentUsageAndReconfigureStress(t *testing.T) {
 	identity := runtime.snapshot.Accounts[0].Identity
 
 	var wg sync.WaitGroup
+	var firstUsage sync.Once
+	accepted := make(chan struct{})
 	stop := make(chan struct{})
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
@@ -507,9 +536,21 @@ func TestConcurrentUsageAndReconfigureStress(t *testing.T) {
 				default:
 				}
 				at++
-				_ = runtime.handleUsage(pluginapi.UsageRecord{AuthID: authID, Model: "glm-5.3", RequestedAt: now.Add(time.Duration(at*100+i) * time.Millisecond), Detail: pluginapi.UsageDetail{InputTokens: 1}})
+				// Keep stress timestamps within the persisted skew bound; this test
+				// exercises ordering/reconfigure behavior, not future-time rejection.
+				requestedAt := now.Add(-time.Minute).Add(time.Duration(at*3+i) * time.Microsecond)
+				if err := runtime.handleUsage(pluginapi.UsageRecord{AuthID: authID, Model: "glm-5.3", RequestedAt: requestedAt, Detail: pluginapi.UsageDetail{InputTokens: 1}}); err == nil {
+					firstUsage.Do(func() { close(accepted) })
+				}
 			}
 		}(i)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		close(stop)
+		wg.Wait()
+		t.Fatal("usage workers did not accept a record before reconfigure")
 	}
 	for i := 0; i < 5; i++ {
 		if err := runtime.reconfigure([]byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")); err != nil {
@@ -553,10 +594,16 @@ func TestShutdownFlushPersistsAcceptedEvents(t *testing.T) {
 	if err := runtime.handleUsage(pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Model: "glm-5.3", RequestedAt: now, Detail: pluginapi.UsageDetail{InputTokens: 10_000}}); err != nil {
 		t.Fatal(err)
 	}
+	authDir := filepath.Dir(runtime.snapshot.Store.dir)
 	if err := runtime.shutdown(); err != nil {
 		t.Fatal(err)
 	}
-	persisted, err := runtime.snapshot.Store.loadState()
+	store, err := newSecureStore(authDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.close() }()
+	persisted, err := store.loadState()
 	if err != nil {
 		t.Fatal(err)
 	}

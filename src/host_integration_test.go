@@ -53,12 +53,12 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 	registered := decodeEnvelopeResult[struct {
 		Routes []pluginapi.ManagementRoute `json:"routes"`
 	}](t, registerRaw, pluginabi.MethodManagementRegister)
-	if len(registered.Routes) != 1 {
-		t.Fatalf("management.register routes = %#v, want exactly one", registered.Routes)
+	if len(registered.Routes) != 4 {
+		t.Fatalf("management.register routes = %#v, want four", registered.Routes)
 	}
 	route := registered.Routes[0]
-	if !strings.EqualFold(route.Method, http.MethodGet) {
-		t.Fatalf("route method = %q, want GET", route.Method)
+	if !strings.EqualFold(route.Method, http.MethodGet) || route.Path != managementStatusPath {
+		t.Fatalf("status route = %#v, want GET %s", route, managementStatusPath)
 	}
 
 	// normalizeManagementRoute (identical in v7.2.67 and v7.2.151): a leading

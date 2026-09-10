@@ -38,6 +38,7 @@ type pluginConfig struct {
 	CPAConfigPath       string
 	QuotaRefresh        time.Duration
 	AuthoritativeMaxAge time.Duration
+	QuotaTimeout        time.Duration
 	ThresholdPercent    int
 	SuspendDuration     time.Duration
 	FallbackCooldown    time.Duration
@@ -107,6 +108,7 @@ func parsePluginConfig(raw []byte) (pluginConfig, error) {
 		CPAConfigPath:       strings.TrimSpace(input.CPAConfigPath),
 		QuotaRefresh:        defaultQuotaRefresh,
 		AuthoritativeMaxAge: defaultAuthoritativeMaxAge,
+		QuotaTimeout:        defaultQuotaTimeout,
 		ThresholdPercent:    defaultThreshold,
 		SuspendDuration:     defaultSuspend,
 		FallbackCooldown:    defaultFallback,

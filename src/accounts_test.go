@@ -244,7 +244,7 @@ func TestStableAuthIDsPreserveHostIterationOrder(t *testing.T) {
 	}
 }
 
-func TestStableClaudeAuthIDMatchesPinnedHostRecipe(t *testing.T) {
+func TestStableClaudeAuthIDMatchesHostWithProxyPrefixAndHeaders(t *testing.T) {
 	fixture := exactPairFixture(fixtureKey)
 	fixture.ClaudeKeys[0].ProxyURL = " https://proxy.example "
 	fixture.ClaudeKeys[0].Prefix = " zai "
@@ -255,7 +255,7 @@ func TestStableClaudeAuthIDMatchesPinnedHostRecipe(t *testing.T) {
 	}
 	want := upstreamStableID("claude:apikey", fixtureKey, zaiAnthropicBaseURL)
 	if accounts[0].ClaudeAuthID != want {
-		t.Fatalf("Claude auth ID = %q, want %q", accounts[0].ClaudeAuthID, want)
+		t.Fatalf("Claude auth ID = %q, want host ID %q", accounts[0].ClaudeAuthID, want)
 	}
 }
 

@@ -33,35 +33,54 @@ func (realClock) Sleep(ctx context.Context, delay time.Duration) error {
 }
 
 type runtimeSnapshot struct {
-	Config     pluginConfig
-	Accounts   []account
-	Store      *secureStore
-	Quota      map[string]accountQuotaState
-	Health     map[string]accountHealthState
-	Routing    routingState
-	byAuthID   map[string]string
-	byIdentity map[string]account
-	Generation uint64
+	Config       pluginConfig
+	BaseAccounts []account
+	Accounts     []account
+	Store        *secureStore
+	Quota        map[string]accountQuotaState
+	Health       map[string]accountHealthState
+	Routing      routingState
+	byAuthID     map[string]string
+	byIdentity   map[string]account
+	Generation   uint64
+}
+
+type refreshGeneration struct {
+	done       chan struct{}
+	err        error
+	generation uint64
+	accounts   []account
+	timeout    time.Duration
 }
 
 type pluginRuntime struct {
-	mu           sync.RWMutex
-	snapshot     *runtimeSnapshot
-	lastErr      error
-	stopped      bool
-	reconfigures sync.WaitGroup
-	workers      sync.WaitGroup
-	usage        sync.WaitGroup
-	cancel       context.CancelFunc
-	clock        clock
-	httpClient   httpDoer
-	endpoint     string
-	persist      func(*secureStore, persistedState) error
-	pollersMu    sync.Mutex
-	persistMu    sync.Mutex
-	persistNext  atomic.Uint64
-	persisted    atomic.Uint64
-	now          func() time.Time
+	mu             sync.RWMutex
+	snapshot       *runtimeSnapshot
+	lastErr        error
+	stopped        bool
+	reconfigures   sync.WaitGroup
+	workers        sync.WaitGroup
+	usage          sync.WaitGroup
+	refreshWorkers sync.WaitGroup
+	operations     sync.WaitGroup
+	cancel         context.CancelFunc
+	refreshContext context.Context
+	refreshCancel  context.CancelFunc
+	clock          clock
+	httpClient     httpDoer
+	endpoint       string
+	persist        func(*secureStore, persistedState) error
+	saveSettings   func(*secureStore, settingsFile) error
+	settingsMu     sync.Mutex
+	pollersMu      sync.Mutex
+	persistMu      sync.Mutex
+	persistWrite   func(*secureStore, persistedState) error
+	persistNext    atomic.Uint64
+	persisted      atomic.Uint64
+	refresh        *refreshGeneration
+	shutdownDone   chan struct{}
+	shutdownErr    error
+	now            func() time.Time
 }
 
 func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
@@ -98,18 +117,31 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
+	keepStore := false
+	defer func() {
+		if !keepStore {
+			_ = store.close()
+		}
+	}()
 	accounts, err := discoverAccounts(cpa, cfg)
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
-	settings, err := store.loadSettings()
+	baseAccounts := append([]account(nil), accounts...)
+	r.settingsMu.Lock()
+	defer r.settingsMu.Unlock()
+	settings, err := store.recoverSettings()
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
 	if err = applyStoredSettings(accounts, settings); err != nil {
 		return r.recordError(err, providerKeys...)
 	}
-	persisted, err := store.loadState()
+	cfg, err = applyStoredConfig(cfg, settings)
+	if err != nil {
+		return r.recordError(err, providerKeys...)
+	}
+	persisted, err := store.loadStateAt(r.runtimeNow())
 	if err != nil {
 		return r.recordError(err, providerKeys...)
 	}
@@ -142,10 +174,14 @@ func (r *pluginRuntime) reconfigure(rawConfig []byte) error {
 		byIdentity[accounts[i].Identity] = accounts[i]
 	}
 	staged := &runtimeSnapshot{
-		Config: cfg, Accounts: accounts, Store: store, Quota: quota, Health: health,
+		Config: cfg, BaseAccounts: baseAccounts, Accounts: accounts, Store: store, Quota: quota, Health: health,
 		byAuthID: byAuthID, byIdentity: byIdentity,
 	}
-	return r.commitSnapshot(staged)
+	if err := r.commitSnapshot(staged); err != nil {
+		return err
+	}
+	keepStore = true
+	return nil
 }
 
 func (r *pluginRuntime) recordError(err error, secrets ...string) error {
@@ -179,6 +215,7 @@ func sameSecureStore(left, right *secureStore) bool {
 
 func cloneRuntimeSnapshot(source *runtimeSnapshot) *runtimeSnapshot {
 	copySnapshot := *source
+	copySnapshot.BaseAccounts = append([]account(nil), source.BaseAccounts...)
 	copySnapshot.Accounts = append([]account(nil), source.Accounts...)
 	copySnapshot.byAuthID = make(map[string]string, len(source.byAuthID))
 	for authID, identity := range source.byAuthID {
@@ -229,6 +266,9 @@ func (r *pluginRuntime) validationStatus() string {
 }
 
 func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+
 	now := r.runtimeNow()
 	resetAt, resetReason, hasResetHint := parseRateLimitHint(record, now)
 
@@ -275,22 +315,26 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 	}
 	if record.Failed && usageDetailEmpty(record.Detail) {
 		state.DeliveryWarning = true
-	} else if hash := usageDedupHash(record); state.seenDedup(hash) {
-		// Heuristic dedup hit: keep the warning but add no event.
-	} else if estimate, err := estimateUsageCredits(record, usageTimestamp(record, now)); err != nil {
-		state.UnknownModelWarning = true
-		state.DeliveryWarning = true
 	} else {
-		at := usageTimestamp(record, now)
-		state.addEvent(creditEvent{At: at, Microcredits: estimate.Microcredits, Model: estimate.Model})
-		state.compact(now, r.snapshot.Config.StateRetention)
+		eventAt := usageTimestamp(record, now)
+		if eventAt.After(now.Add(maxPersistedClockSkew)) {
+			state.DeliveryWarning = true
+		} else if hash := usageDedupHash(record); state.seenDedup(hash) {
+			// Heuristic dedup hit: keep the warning but add no event.
+		} else if estimate, err := estimateUsageCredits(record, eventAt); err != nil {
+			state.UnknownModelWarning = true
+			state.DeliveryWarning = true
+		} else {
+			state.addEvent(creditEvent{At: eventAt, Microcredits: estimate.Microcredits, Model: estimate.Model})
+			state.compact(now, r.snapshot.Config.StateRetention)
+		}
 	}
 	r.snapshot.Quota[identity] = state
 	r.refreshCapacityLocked(identity, now)
 	persisted := r.persistenceSnapshotLocked()
 	store := r.snapshot.Store
 	r.mu.Unlock()
-	return r.persistState(store, persisted)
+	return r.persistStateLocked(store, persisted)
 }
 
 // updateCapacity is the in-memory adapter used by quota polling. Results are
@@ -363,16 +407,22 @@ func (r *pluginRuntime) startPollers(ctx context.Context, snapshot *runtimeSnaps
 			continue
 		}
 		r.workers.Add(1)
-		go r.pollAccount(ctx, snapshot.Generation, item.Identity, item.key, snapshot.Config.QuotaRefresh)
+		go r.pollAccount(ctx, item.Identity, item.key, snapshot.Generation, snapshot.Config.QuotaRefresh, snapshot.Config.QuotaTimeout)
 	}
 }
 
-// commitSnapshot is the lifecycle boundary shared with the management slice:
-// publish one complete generation, cancel and join the prior pollers, then
-// start workers from an immutable clone of the committed snapshot.
 func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
+	return r.commitSnapshotAfter(staged, nil)
+}
+
+// commitSnapshotAfter is the lifecycle boundary shared with management: the
+// persisted setting is committed under the same locks that publish its runtime
+// generation, then superseded pollers and stores are retired.
+func (r *pluginRuntime) commitSnapshotAfter(staged *runtimeSnapshot, beforeCommit func() error) error {
 	r.pollersMu.Lock()
 	defer r.pollersMu.Unlock()
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.mu.Lock()
@@ -382,9 +432,12 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 		return fmt.Errorf("plugin is shutting down")
 	}
 	previousCancel := r.cancel
+	var previousStore *secureStore
 	if r.snapshot != nil {
+		previousStore = r.snapshot.Store
 		staged.Generation = r.snapshot.Generation + 1
 		if sameSecureStore(r.snapshot.Store, staged.Store) {
+			carryForwardNamedPlans(r.snapshot, staged)
 			for identity, state := range r.snapshot.Quota {
 				if _, exists := staged.Quota[identity]; exists {
 					staged.Quota[identity] = state
@@ -395,14 +448,27 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 					staged.Health[identity] = state
 				}
 			}
-			carryForwardNamedPlans(r.snapshot, staged)
+			if previousStore != staged.Store {
+				_ = staged.Store.close()
+				staged.Store = previousStore
+			}
 		}
 	} else {
 		staged.Generation = 1
 	}
+	if beforeCommit != nil {
+		if err := beforeCommit(); err != nil {
+			r.mu.Unlock()
+			cancel()
+			return err
+		}
+	}
 	staged.Routing = routingState{}
 	staged.Routing.initialize()
 	r.cancel = cancel
+	if r.refreshContext == nil {
+		r.refreshContext, r.refreshCancel = context.WithCancel(context.Background())
+	}
 	r.snapshot = staged
 	r.lastErr = nil
 	pollerSnapshot := cloneRuntimeSnapshot(staged)
@@ -410,17 +476,21 @@ func (r *pluginRuntime) commitSnapshot(staged *runtimeSnapshot) error {
 
 	if previousCancel != nil {
 		previousCancel()
-		r.workers.Wait()
 	}
 	r.startPollers(ctx, pollerSnapshot)
+	if previousStore != nil && previousStore != staged.Store {
+		if err := previousStore.close(); err != nil {
+			return fmt.Errorf("close superseded secure store: %w", err)
+		}
+	}
 	return nil
 }
 
-func (r *pluginRuntime) pollAccount(ctx context.Context, generation uint64, identity, key string, base time.Duration) {
+func (r *pluginRuntime) pollAccount(ctx context.Context, identity, key string, generation uint64, base, timeout time.Duration) {
 	defer r.workers.Done()
 	attempt := 0
 	for {
-		if err := r.pollOnce(ctx, generation, identity, key); err != nil && errors.Is(err, context.Canceled) {
+		if err := r.pollOnce(ctx, identity, key, generation, timeout); err != nil && errors.Is(err, context.Canceled) {
 			return
 		}
 		attempt++
@@ -434,11 +504,11 @@ func (r *pluginRuntime) pollAccount(ctx context.Context, generation uint64, iden
 	}
 }
 
-func (r *pluginRuntime) pollOnce(ctx context.Context, generation uint64, identity, key string) error {
+func (r *pluginRuntime) pollOnce(ctx context.Context, identity, key string, generation uint64, timeout time.Duration) error {
 	now := r.runtimeClock().Now()
-	attemptCtx, cancel := context.WithTimeout(ctx, defaultQuotaTimeout)
+	attemptCtx, cancel := context.WithTimeout(ctx, quotaTimeout(timeout))
 	defer cancel()
-	snapshot, err := fetchQuota(attemptCtx, r.quotaClient(), r.quotaEndpoint(), key, now)
+	snapshot, err := fetchQuota(attemptCtx, r.quotaClient(timeout), r.quotaEndpoint(), key, now)
 	// A cancelled parent (shutdown or reconfigure) is not a poll failure; an
 	// attemptCtx timeout with a live parent is.
 	if err != nil && ctx.Err() != nil {
@@ -476,7 +546,9 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, generation uint64, identit
 		// selects the normal Lite/Pro/Max defaults"): a configured Max
 		// account that upstream reports as Lite must fall back to Lite
 		// capacity during an outage, not the stale configured buckets.
-		syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan)
+		if syncPlanFromUpstream(r.snapshot.Accounts, identity, snapshot.Plan) {
+			r.snapshot.byIdentity[identity] = accountByIdentity(r.snapshot.Accounts, identity)
+		}
 	}
 	r.snapshot.Quota[identity] = state
 	r.refreshCapacityLocked(identity, now)
@@ -493,13 +565,13 @@ func (r *pluginRuntime) pollOnce(ctx context.Context, generation uint64, identit
 // syncPlanFromUpstream aligns an account's plan and fallback buckets with a
 // plan reported by the quota endpoint. Explicit custom credit buckets are
 // never overridden — only named-plan defaults follow the upstream plan.
-func syncPlanFromUpstream(accounts []account, identity, plan string) {
+func syncPlanFromUpstream(accounts []account, identity, plan string) bool {
 	if plan == "" {
-		return
+		return false
 	}
 	buckets, known := planBuckets[plan]
 	if !known {
-		return
+		return false
 	}
 	for i := range accounts {
 		if accounts[i].Identity == identity {
@@ -507,16 +579,18 @@ func syncPlanFromUpstream(accounts []account, identity, plan string) {
 			// upstream-derived named-plan defaults, including persisted snapshots
 			// loaded during reconfigure.
 			if accounts[i].Plan == "custom" || accounts[i].planExplicit || accounts[i].fiveHourCreditsExplicit || accounts[i].weeklyCreditsExplicit {
-				return
+				return false
 			}
 			if accounts[i].Plan != plan {
 				accounts[i].Plan = plan
 				accounts[i].FiveHourCredits = buckets.FiveHour
 				accounts[i].WeeklyCredits = buckets.Weekly
+				return true
 			}
-			return
+			return false
 		}
 	}
+	return false
 }
 
 // carryForwardNamedPlans preserves an upstream-discovered named plan across a
@@ -543,6 +617,7 @@ func carryForwardNamedPlans(live, staged *runtimeSnapshot) {
 		staged.Accounts[i].Plan = liveAccount.Plan
 		staged.Accounts[i].FiveHourCredits = buckets.FiveHour
 		staged.Accounts[i].WeeklyCredits = buckets.Weekly
+		staged.byIdentity[staged.Accounts[i].Identity] = staged.Accounts[i]
 	}
 }
 
@@ -553,17 +628,28 @@ func carryForwardNamedPlans(live, staged *runtimeSnapshot) {
 func (r *pluginRuntime) persistState(store *secureStore, state persistedState) error {
 	r.persistMu.Lock()
 	defer r.persistMu.Unlock()
+	return r.persistStateLocked(store, state)
+}
+
+func (r *pluginRuntime) persistStateLocked(store *secureStore, state persistedState) error {
 	if state.Generation != 0 && state.Generation <= r.persisted.Load() {
 		return nil
 	}
 	persist := r.persist
+	if r.persistWrite != nil {
+		persist = r.persistWrite
+	}
 	if persist == nil {
 		persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
 	}
 	if err := persist(store, state); err != nil {
 		r.mu.Lock()
-		if r.snapshot != nil {
-			for identity, accountState := range r.snapshot.Quota {
+		if r.snapshot != nil && r.snapshot.Generation == state.RuntimeGeneration && r.snapshot.Store == store {
+			for identity := range state.Accounts {
+				accountState, exists := r.snapshot.Quota[identity]
+				if !exists {
+					continue
+				}
 				accountState.PersistenceWarning = true
 				accountState.DeliveryWarning = true
 				r.snapshot.Quota[identity] = accountState
@@ -581,7 +667,7 @@ func (r *pluginRuntime) persistState(store *secureStore, state persistedState) e
 func (r *pluginRuntime) persistenceSnapshotLocked() persistedState {
 	state := persistedState{
 		Version: persistedStateVersion, Accounts: make(map[string]accountQuotaState, len(r.snapshot.Quota)),
-		Health: make(map[string]persistedHealthState, len(r.snapshot.Health)), Generation: r.persistNext.Add(1),
+		Health: make(map[string]persistedHealthState, len(r.snapshot.Health)), Generation: r.persistNext.Add(1), RuntimeGeneration: r.snapshot.Generation,
 	}
 	for identity, accountState := range r.snapshot.Quota {
 		accountState.Events = append([]creditEvent(nil), accountState.Events...)
@@ -647,13 +733,13 @@ func (r *pluginRuntime) managementStatus(status string) managementStatusBody {
 		health := r.refreshCapacityLocked(item.Identity, now)
 		accountStatus := managementAccountStatus{
 			Name:                   item.Name,
-			KeySuffix:              item.KeySuffix,
+			KeySuffix:              "redacted",
 			Plan:                   item.Plan,
 			FiveHourUtilization:    utilization(view.FiveHour),
 			WeeklyUtilization:      utilization(view.Weekly),
-			FiveHourResetsAt:       view.FiveHour.ResetsAt,
-			WeeklyResetsAt:         view.Weekly.ResetsAt,
-			QuotaSource:            view.Source,
+			FiveHourResetsAt:       nullableTime(view.FiveHour.ResetsAt),
+			WeeklyResetsAt:         nullableTime(view.Weekly.ResetsAt),
+			QuotaSource:            managementQuotaSource(view.Source),
 			QuotaObservedAt:        view.ObservedAt,
 			QuotaStale:             view.Stale,
 			QuotaError:             view.Warning,
@@ -681,6 +767,21 @@ func utilization(window quotaWindow) float64 {
 	return float64(window.ConsumedMicrocredits) / float64(window.BucketMicrocredits)
 }
 
+func nullableTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
+}
+
+func managementQuotaSource(source string) string {
+	if source == "authoritative" {
+		return "quota_api"
+	}
+	return "estimate"
+}
+
 func maxInt64(left, right int64) int64 {
 	if left > right {
 		return left
@@ -695,11 +796,11 @@ func (r *pluginRuntime) runtimeClock() clock {
 	return realClock{}
 }
 
-func (r *pluginRuntime) quotaClient() httpDoer {
+func (r *pluginRuntime) quotaClient(timeout time.Duration) httpDoer {
 	if r.httpClient != nil {
 		return r.httpClient
 	}
-	return newQuotaHTTPClient()
+	return newQuotaHTTPClient(timeout)
 }
 
 func (r *pluginRuntime) quotaEndpoint() string {
@@ -710,26 +811,47 @@ func (r *pluginRuntime) quotaEndpoint() string {
 }
 
 func (r *pluginRuntime) shutdown() error {
+	r.pollersMu.Lock()
 	r.mu.Lock()
-	if r.stopped {
+	if r.shutdownDone != nil {
+		done := r.shutdownDone
 		r.mu.Unlock()
-		return nil
+		r.pollersMu.Unlock()
+		<-done
+		r.mu.RLock()
+		err := r.shutdownErr
+		r.mu.RUnlock()
+		return err
+	}
+	if r.stopped {
+		err := r.shutdownErr
+		r.mu.Unlock()
+		r.pollersMu.Unlock()
+		return err
 	}
 	r.stopped = true
+	r.shutdownDone = make(chan struct{})
+	done := r.shutdownDone
 	cancel := r.cancel
+	refreshCancel := r.refreshCancel
 	r.cancel = nil
+	r.refreshCancel = nil
 	r.mu.Unlock()
+	r.pollersMu.Unlock()
+
 	if cancel != nil {
 		cancel()
 	}
+	if refreshCancel != nil {
+		refreshCancel()
+	}
 	r.reconfigures.Wait()
-	r.pollersMu.Lock()
-	defer r.pollersMu.Unlock()
 	r.workers.Wait()
-	// In-flight usage handlers persist after dropping r.mu; join them so no
-	// accepted record writes state after — or is lost from — this final flush.
 	r.usage.Wait()
+	r.refreshWorkers.Wait()
+	r.operations.Wait()
 
+	r.persistMu.Lock()
 	r.mu.RLock()
 	snapshot := r.snapshot
 	var persisted persistedState
@@ -737,17 +859,45 @@ func (r *pluginRuntime) shutdown() error {
 		persisted = r.persistenceSnapshotLocked()
 	}
 	r.mu.RUnlock()
-	if snapshot == nil || snapshot.Store == nil {
-		return nil
+	var err error
+	if snapshot != nil && snapshot.Store != nil {
+		persist := r.persist
+		if r.persistWrite != nil {
+			persist = r.persistWrite
+		}
+		if persist == nil {
+			persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
+		}
+		if persisted.Generation == 0 || persisted.Generation > r.persisted.Load() {
+			if err = persist(snapshot.Store, persisted); err != nil {
+				err = fmt.Errorf("persist quota state: %w", err)
+			} else if persisted.Generation != 0 {
+				r.persisted.Store(persisted.Generation)
+			}
+		}
+		if err == nil {
+			err = snapshot.Store.flush()
+		}
 	}
-	persist := r.persist
-	if persist == nil {
-		persist = func(store *secureStore, state persistedState) error { return store.saveState(state) }
+	r.persistMu.Unlock()
+	if snapshot != nil && snapshot.Store != nil {
+		if closeErr := snapshot.Store.close(); err == nil && closeErr != nil {
+			err = closeErr
+		}
 	}
-	if err := persist(snapshot.Store, persisted); err != nil {
-		return fmt.Errorf("persist quota state: %w", err)
+
+	r.mu.Lock()
+	r.shutdownErr = err
+	close(done)
+	r.mu.Unlock()
+	return err
+}
+
+func quotaTimeout(timeout time.Duration) time.Duration {
+	if timeout == 0 {
+		return defaultQuotaTimeout
 	}
-	return snapshot.Store.flush()
+	return timeout
 }
 
 func maxPollInterval(base time.Duration) time.Duration {

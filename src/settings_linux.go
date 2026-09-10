@@ -12,8 +12,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const syscallNoFollow = unix.O_NOFOLLOW
-
 func openSecureDirectory(path string) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -22,7 +20,18 @@ func openSecureDirectory(path string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
-func writeJSONAt(dir *os.File, name string, data []byte) error {
+func openFileAt(dir *os.File, name string) (*os.File, error) {
+	if dir == nil {
+		return nil, fmt.Errorf("secure store is not initialized")
+	}
+	fd, err := unix.Openat(int(dir.Fd()), name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func writeJSONAt(dir *os.File, name string, data []byte, syncDir func(*os.File) error) error {
 	if dir == nil {
 		return fmt.Errorf("secure store is not initialized")
 	}
@@ -59,8 +68,30 @@ func writeJSONAt(dir *os.File, name string, data []byte) error {
 		return fmt.Errorf("replace %s: %w", name, errRename)
 	}
 	committed = true
-	if errSync := dir.Sync(); errSync != nil {
-		return fmt.Errorf("sync secure store directory: %w", errSync)
+	if syncDir == nil {
+		syncDir = func(dir *os.File) error { return dir.Sync() }
+	}
+	if errSync := syncDir(dir); errSync != nil {
+		return &storeWriteError{outcome: writeNeedsRecovery, err: fmt.Errorf("sync secure store directory: %w", errSync)}
+	}
+	return nil
+}
+
+func removeJSONAt(dir *os.File, name string, syncDir func(*os.File) error) error {
+	if dir == nil {
+		return fmt.Errorf("secure store is not initialized")
+	}
+	dirFD := int(dir.Fd())
+	if err := unix.Unlinkat(dirFD, name, 0); errors.Is(err, unix.ENOENT) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("remove %s: %w", name, err)
+	}
+	if syncDir == nil {
+		syncDir = func(dir *os.File) error { return dir.Sync() }
+	}
+	if err := syncDir(dir); err != nil {
+		return &storeWriteError{outcome: writeNeedsRecovery, err: fmt.Errorf("sync secure store directory: %w", err)}
 	}
 	return nil
 }
