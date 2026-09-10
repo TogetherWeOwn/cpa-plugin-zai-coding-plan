@@ -617,6 +617,7 @@ func carryForwardNamedPlans(live, staged *runtimeSnapshot) {
 		staged.Accounts[i].Plan = liveAccount.Plan
 		staged.Accounts[i].FiveHourCredits = buckets.FiveHour
 		staged.Accounts[i].WeeklyCredits = buckets.Weekly
+		staged.byIdentity[staged.Accounts[i].Identity] = staged.Accounts[i]
 	}
 }
 

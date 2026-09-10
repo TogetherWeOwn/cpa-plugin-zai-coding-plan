@@ -350,6 +350,24 @@ func TestCommitSnapshotCarriesForwardSameStoreNamedPlan(t *testing.T) {
 	if got.Plan != "lite" || got.FiveHourCredits != 2_000 || got.WeeklyCredits != 10_000 {
 		t.Fatalf("same-store commit reverted live plan: %#v", got)
 	}
+	indexed := runtime.snapshot.byIdentity[identity]
+	if indexed.Plan != "lite" || indexed.FiveHourCredits != 2_000 || indexed.WeeklyCredits != 10_000 {
+		t.Fatalf("same-store commit left stale plan index: %#v", indexed)
+	}
+
+	// The disabled fixture prevents poller startup during commit; enable the
+	// published account afterward to exercise the health and scheduler indexes.
+	runtime.snapshot.Accounts[0].Disabled = false
+	indexed.Disabled = false
+	runtime.snapshot.byIdentity[identity] = indexed
+	state := runtime.snapshot.Quota[identity]
+	state.Events = []creditEvent{{At: now, Microcredits: 2_000 * creditScale, Model: "glm-5.3"}}
+	runtime.snapshot.Quota[identity] = state
+	if health, ok := runtime.health(identity); !ok || health.Status != healthExhausted {
+		t.Fatalf("carried plan health = %#v, %t, want exhausted", health, ok)
+	}
+	_, err := runtime.pick(schedulerRequest(live.ClaudeAuthID))
+	assertSchedulerError(t, err, "zai_no_capacity")
 }
 
 func TestCommitSnapshotKeepsStagedExplicitPlanOverride(t *testing.T) {
@@ -503,6 +521,8 @@ func TestConcurrentUsageAndReconfigureStress(t *testing.T) {
 	identity := runtime.snapshot.Accounts[0].Identity
 
 	var wg sync.WaitGroup
+	var firstUsage sync.Once
+	accepted := make(chan struct{})
 	stop := make(chan struct{})
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
@@ -519,9 +539,18 @@ func TestConcurrentUsageAndReconfigureStress(t *testing.T) {
 				// Keep stress timestamps within the persisted skew bound; this test
 				// exercises ordering/reconfigure behavior, not future-time rejection.
 				requestedAt := now.Add(-time.Minute).Add(time.Duration(at*3+i) * time.Microsecond)
-				_ = runtime.handleUsage(pluginapi.UsageRecord{AuthID: authID, Model: "glm-5.3", RequestedAt: requestedAt, Detail: pluginapi.UsageDetail{InputTokens: 1}})
+				if err := runtime.handleUsage(pluginapi.UsageRecord{AuthID: authID, Model: "glm-5.3", RequestedAt: requestedAt, Detail: pluginapi.UsageDetail{InputTokens: 1}}); err == nil {
+					firstUsage.Do(func() { close(accepted) })
+				}
 			}
 		}(i)
+	}
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		close(stop)
+		wg.Wait()
+		t.Fatal("usage workers did not accept a record before reconfigure")
 	}
 	for i := 0; i < 5; i++ {
 		if err := runtime.reconfigure([]byte("cpa-config-path: " + configPath + "\ndefault-plan: pro\n")); err != nil {
