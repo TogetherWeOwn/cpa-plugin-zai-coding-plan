@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -19,8 +21,17 @@ type envelope struct {
 }
 
 type envelopeError struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code       string `json:"code"`
+	Message    string `json:"message"`
+	Retryable  bool   `json:"retryable,omitempty"`
+	HTTPStatus int    `json:"http_status,omitempty"`
+}
+
+func (e *envelopeError) Error() string            { return e.Code + ": " + e.Message }
+func (e *envelopeError) WireError() envelopeError { return *e }
+
+func newSchedulerError(code, message string) error {
+	return &envelopeError{Code: code, Message: message, Retryable: false}
 }
 
 type registration struct {
@@ -29,6 +40,11 @@ type registration struct {
 	Capabilities  capabilities       `json:"capabilities"`
 }
 
+// capabilities mirrors the rpcCapabilities wire schema of CLIProxyAPI's
+// internal/pluginhost. Every true field must be backed by a handler in
+// pluginCall: the host rejects registrations that advertise no capability
+// (internal/pluginhost/host.go validPlugin) and warns on every advertised
+// method that fails to answer.
 type capabilities struct {
 	Scheduler     bool `json:"scheduler"`
 	UsagePlugin   bool `json:"usage_plugin"`
@@ -44,8 +60,76 @@ func pluginRegistration() registration {
 			Author:           "TogetherWeOwn",
 			GitHubRepository: "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
 		},
-		Capabilities: capabilities{},
+		// Advertised per docs/ARCHITECTURE.md: quota-aware scheduler,
+		// usage accounting feed, and management status endpoints. The
+		// scheduler declines every pick until quota state exists, which
+		// keeps the host's native scheduler in control.
+		Capabilities: capabilities{
+			Scheduler:     true,
+			UsagePlugin:   true,
+			ManagementAPI: true,
+		},
 	}
+}
+
+// schedulerPick explicitly delegates healthy traffic to CPA's built-in
+// round-robin scheduler and takes over only while managed accounts are
+// impaired. A hard scheduler error prevents fallback to known-bad capacity.
+func schedulerPick(request []byte) ([]byte, error) {
+	var pick pluginapi.SchedulerPickRequest
+	if err := json.Unmarshal(request, &pick); err != nil {
+		return nil, fmt.Errorf("decode scheduler request")
+	}
+	response, err := runtimeState.pick(pick)
+	if err != nil {
+		return nil, err
+	}
+	return okEnvelope(response)
+}
+
+// usageHandle consumes a lossy best-effort usage observation. Persistence
+// failures are surfaced in estimator integrity state, but the response remains
+// successful because CPA discards usage-plugin RPC errors.
+func usageHandle(request []byte) ([]byte, error) {
+	var record pluginapi.UsageRecord
+	if err := json.Unmarshal(request, &record); err != nil {
+		return nil, fmt.Errorf("decode usage record")
+	}
+	_ = runtimeState.handleUsage(record)
+	return okEnvelope(struct{}{})
+}
+
+// managementStatusBody is the redacted JSON served at the status route.
+type managementStatusBody struct {
+	Plugin          string                    `json:"plugin"`
+	Status          string                    `json:"status"`
+	Version         string                    `json:"version"`
+	GeneratedAt     time.Time                 `json:"generated_at"`
+	ValidationError string                    `json:"validation_error,omitempty"`
+	Accounts        []managementAccountStatus `json:"accounts,omitempty"`
+}
+
+type managementAccountStatus struct {
+	Name                   string     `json:"name"`
+	KeySuffix              string     `json:"key_suffix"`
+	Plan                   string     `json:"plan"`
+	FiveHourUtilization    float64    `json:"five_hour_utilization"`
+	WeeklyUtilization      float64    `json:"weekly_utilization"`
+	FiveHourResetsAt       *time.Time `json:"five_hour_resets_at"`
+	WeeklyResetsAt         *time.Time `json:"weekly_resets_at"`
+	QuotaSource            string     `json:"quota_source"`
+	QuotaObservedAt        time.Time  `json:"quota_observed_at,omitempty"`
+	QuotaAgeSeconds        int64      `json:"quota_age_seconds"`
+	QuotaStale             bool       `json:"quota_stale"`
+	QuotaError             string     `json:"quota_error,omitempty"`
+	Offpeak                bool       `json:"offpeak"`
+	Health                 string     `json:"health"`
+	EstimatorCompleteSince time.Time  `json:"estimator_complete_since,omitempty"`
+	DeliveryWarning        bool       `json:"delivery_warning"`
+	PersistenceWarning     bool       `json:"persistence_warning"`
+	UnknownModelWarning    bool       `json:"unknown_model_warning"`
+	HeuristicDedupWarning  bool       `json:"heuristic_dedup_warning"`
+	DedupMode              string     `json:"dedup_mode"`
 }
 
 func okEnvelope(value any) ([]byte, error) {
@@ -54,6 +138,20 @@ func okEnvelope(value any) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(envelope{OK: true, Result: raw})
+}
+
+type wireError interface {
+	error
+	WireError() envelopeError
+}
+
+func errorEnvelopeFor(err error) []byte {
+	if typed, ok := err.(wireError); ok {
+		wire := typed.WireError()
+		raw, _ := json.Marshal(envelope{OK: false, Error: &wire})
+		return raw
+	}
+	return errorEnvelope("plugin_error", err.Error())
 }
 
 func errorEnvelope(code, message string) []byte {

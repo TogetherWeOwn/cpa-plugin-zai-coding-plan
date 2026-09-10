@@ -118,6 +118,24 @@ func TestScanSecrets(t *testing.T) {
 	}
 }
 
+func TestValidateHostImagePinRejectsDigestDrift(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeDocumentation(t, root)
+	path := filepath.Join(root, ".github", "release-host-image.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw = []byte(strings.Replace(string(raw), hostImageAMD64Digest, "sha256:"+strings.Repeat("0", 64), 1))
+	if err := os.WriteFile(path, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateHostImagePin(root); err == nil || !strings.Contains(err.Error(), "approved v7.2.67") {
+		t.Fatalf("validateHostImagePin() error = %v, want digest mismatch", err)
+	}
+}
+
 func TestValidateSourceScansUntrackedFiles(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -153,6 +171,22 @@ func writeReleaseFixture(t *testing.T, root, version string) {
 
 func writeDocumentation(t *testing.T, root string) {
 	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pin := map[string]string{
+		"repository":      hostImageRepository,
+		"tag":             hostImageTag,
+		"platform":        "linux/amd64",
+		"manifest_digest": hostImageAMD64Digest,
+	}
+	pinRaw, err := json.Marshal(pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".github", "release-host-image.json"), pinRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	license := "MIT License\n\nPermission is hereby granted, free of charge.\n"
 	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(license), 0o644); err != nil {
 		t.Fatal(err)

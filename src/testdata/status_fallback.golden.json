@@ -1,0 +1,30 @@
+{
+  "plugin": "zai-coding-plan",
+  "status": "registered",
+  "version": "0.0.0-dev",
+  "generated_at": "2026-09-08T08:00:00Z",
+  "accounts": [
+    {
+      "name": "zai-pro-1",
+      "key_suffix": "redacted",
+      "plan": "pro",
+      "five_hour_utilization": 0.1,
+      "weekly_utilization": 0.02,
+      "five_hour_resets_at": null,
+      "weekly_resets_at": null,
+      "quota_source": "estimate",
+      "quota_observed_at": "2026-09-08T07:59:40Z",
+      "quota_age_seconds": 20,
+      "quota_stale": false,
+      "quota_error": "quota request failed",
+      "offpeak": false,
+      "health": "healthy",
+      "estimator_complete_since": "2026-09-08T08:00:00Z",
+      "delivery_warning": true,
+      "persistence_warning": false,
+      "unknown_model_warning": false,
+      "heuristic_dedup_warning": false,
+      "dedup_mode": "bounded_hash_heuristic"
+    }
+  ]
+}

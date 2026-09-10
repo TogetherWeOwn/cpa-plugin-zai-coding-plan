@@ -20,8 +20,11 @@ import (
 )
 
 const (
-	pluginID    = "zai-coding-plan"
-	libraryName = pluginID + ".so"
+	pluginID             = "zai-coding-plan"
+	libraryName          = pluginID + ".so"
+	hostImageRepository  = "eceasy/cli-proxy-api"
+	hostImageTag         = "v7.2.67"
+	hostImageAMD64Digest = "sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606"
 )
 
 var (
@@ -95,6 +98,9 @@ func run(args []string) error {
 
 func validateSource(root string) error {
 	if err := validateDocumentation(root); err != nil {
+		return err
+	}
+	if err := validateHostImagePin(root); err != nil {
 		return err
 	}
 	files, err := trackedFiles(root)
@@ -214,6 +220,27 @@ func validateDocumentation(root string) error {
 	}
 	if len(strings.TrimSpace(string(notice))) == 0 {
 		return errors.New("NOTICE is empty")
+	}
+	return nil
+}
+
+func validateHostImagePin(root string) error {
+	path := filepath.Join(root, ".github", "release-host-image.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read release host image pin: %w", err)
+	}
+	var pin struct {
+		Repository     string `json:"repository"`
+		Tag            string `json:"tag"`
+		Platform       string `json:"platform"`
+		ManifestDigest string `json:"manifest_digest"`
+	}
+	if err := json.Unmarshal(raw, &pin); err != nil {
+		return fmt.Errorf("parse release host image pin: %w", err)
+	}
+	if pin.Repository != hostImageRepository || pin.Tag != hostImageTag || pin.Platform != "linux/amd64" || pin.ManifestDigest != hostImageAMD64Digest {
+		return fmt.Errorf("release host image pin does not match the approved v7.2.67 linux/amd64 manifest")
 	}
 	return nil
 }

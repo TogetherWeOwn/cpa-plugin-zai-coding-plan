@@ -8,7 +8,7 @@ Version 0.1 will:
 
 1. discover and pair the two CPA credentials backed by each plan key;
 2. poll Z.AI's plan-quota endpoint for authoritative five-hour and weekly utilization, with local credit estimation as a degraded fallback;
-3. keep CPA's native scheduler in control while every account is healthy, but exclude an entire paired account when it is exhausted, suspended, disabled, or invalid; and
+3. remain CPA's sole active scheduler plugin, delegate to CPA's native scheduler while every account is healthy, and exclude an entire paired account when it is exhausted, suspended, disabled, or invalid; and
 4. expose authenticated management status and recovery operations.
 
 The plugin does not proxy inference, rewrite requests, or mint credentials. Its primary quota signal is `GET https://api.z.ai/api/monitor/usage/quota/limit`, queried per account with that account's plan key. Local accounting is a conservative fallback when the endpoint fails, and an observed upstream `429` remains authoritative.
@@ -28,7 +28,7 @@ import (
 )
 ```
 
-The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork. Its repository was not publicly readable during this research, so a version label alone is not proof of compatibility. Release requires a load test against the exact approved image digest; the immutable digest is recorded in the release workflow/configuration rather than replaced by a mutable tag.
+The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork. Its repository was not publicly readable during this research, so a version label alone is not proof of compatibility. Release requires a load test against the exact approved image digest; the immutable linux/amd64 manifest digest is recorded in `.github/release-host-image.json` rather than replaced by a mutable tag.
 
 ### C ABI
 
@@ -57,8 +57,8 @@ typedef struct {
 } cliproxy_host_api;
 
 typedef int (*cliproxy_plugin_call_fn)(
-    char* method,
-    uint8_t* request,
+    const char* method,
+    const uint8_t* request,
     size_t request_len,
     cliproxy_buffer* response
 );
@@ -111,7 +111,7 @@ Version 0.1 implements:
 |---|---|---|
 | `plugin.register` | `pluginabi.MethodPluginRegister` | Parse configuration, discover accounts, load state, return metadata/capabilities. |
 | `plugin.reconfigure` | `pluginabi.MethodPluginReconfigure` | Atomically rebuild configuration and account indexes after CPA reload. |
-| `scheduler.pick` | `pluginabi.MethodSchedulerPick` | Decline when all candidates are healthy; otherwise choose only healthy candidates. |
+| `scheduler.pick` | `pluginabi.MethodSchedulerPick` | Explicitly delegate healthy traffic to built-in round-robin, select healthy candidates during degradation, and hard-fail when managed capacity is exhausted. |
 | `usage.handle` | `pluginabi.MethodUsageHandle` | Consume usage/failure records, update credit windows, classify 401/403/429. |
 | `management.register` | `pluginabi.MethodManagementRegister` | Register management routes and optional non-sensitive resource shell. |
 | `management.handle` | `pluginabi.MethodManagementHandle` | Serve status, refresh, unblock, and account configuration. |
@@ -172,7 +172,9 @@ openai-compatibility:
       - api-key: "<same-plan-key>"
 ```
 
-Discovery accepts only this provider name and these normalized base URLs. It pairs by full-key equality in memory, computes CPA's synthesized auth IDs using the v7.2 stable-ID algorithm, then removes the full key from derived state. An unpaired entry is a configuration error and is not managed. Never pair by suffix.
+Discovery accepts only this provider name and these normalized base URLs. It pairs by full-key equality in memory and computes CPA's synthesized auth IDs using the v7.2 stable-ID algorithm. The full key remains only in the in-memory account object for quota authentication; it is never persisted, returned, or logged. Never pair by suffix.
+
+A valid logical account has exactly one matching Claude entry and exactly one matching OpenAI-compatible key entry. A recognized Z.ai entry that is unpaired, duplicated on either side, or ambiguously matched makes the whole candidate snapshot invalid. Registration/reconfiguration rejects that snapshot and keeps the last valid snapshot; first registration fails rather than leaving recognized Z.ai credentials unmanaged and eligible for built-in selection.
 
 ### Plugin schema
 
@@ -180,32 +182,36 @@ Proposed v0.1 configuration:
 
 ```yaml
 plugins:
-  installed:
+  enabled: true
+  configs:
     zai-coding-plan:
       enabled: true
-      config:
-        cpa-config-path: /app/config.yaml
-        quota-endpoint: https://api.z.ai/api/monitor/usage/quota/limit
-        quota-refresh-interval: 2m
-        threshold-percent: 97
-        suspend-duration: 30m
-        fallback-cooldown: 10m
-        state-retention: 8d
-        default-plan: pro
-        accounts:
-          - key-suffix: "display-or-override-match"
-            name: "zai-pro-1"
-            plan: pro
-            disabled: false
-            five-hour-credits: 12000
-            weekly-credits: 60000
+      priority: 1000
+      cpa-config-path: /app/config.yaml
+      quota-endpoint: https://api.z.ai/api/monitor/usage/quota/limit
+      quota-refresh-interval: 2m
+      authoritative-max-age: 5m
+      threshold-percent: 97
+      suspend-duration: 30m
+      fallback-cooldown: 10m
+      state-retention: 8d
+      default-plan: pro
+      accounts:
+        - key-suffix: "display-or-override-match"
+          name: "zai-pro-1"
+          plan: pro
+          disabled: false
+          five-hour-credits: 12000
+          weekly-credits: 60000
 ```
 
 | Field | Default | Rule |
 |---|---:|---|
+| `priority` | `1000` | Host-level `PluginInstanceConfig` field, not plugin payload. V0.1 requires this plugin to be the only enabled scheduler; the high value makes accidental lower-priority schedulers non-winning but is not a substitute for exclusivity validation. |
 | `cpa-config-path` | `config.yaml` | Host config path readable by the plugin. |
-| `quota-endpoint` | Z.AI monitor URL | HTTPS endpoint for authoritative plan quota. Custom endpoints require explicit opt-in and must not downgrade transport security. |
+| `quota-endpoint` | Z.AI monitor URL | Fixed to `https://api.z.ai/api/monitor/usage/quota/limit` in production v0.1; test builds may inject a local fixture server. |
 | `quota-refresh-interval` | `2m` | Base jittered interval; accept only one to three minutes in v0.1. |
+| `authoritative-max-age` | `5m` | Maximum age for scheduling from the last successful quota response before switching to the estimator. Must exceed the maximum jittered poll interval. |
 | `threshold-percent` | `97` | Integer 1–100; either window reaching it exhausts the account. |
 | `suspend-duration` | `30m` | Positive duration for 401/403. |
 | `fallback-cooldown` | `10m` | Conservative 429 block when no trustworthy reset is present. |
@@ -226,7 +232,7 @@ Published plan buckets:
 | Pro | 12,000 | 60,000 |
 | Max | 28,000 | 140,000 |
 
-Reject the complete reconfiguration on ambiguous suffixes, duplicate names, invalid durations, or non-positive buckets. Keep the last valid snapshot active and expose the validation error.
+Reject the complete initial registration on invalid account cardinality, ambiguous suffixes, duplicate names, invalid durations, or non-positive buckets. On an invalid reconfiguration, do **not** return an RPC error or an invalid/empty registration: CPA v7.2.67 omits such a plugin from the rebuilt capability snapshot. Instead, retain the last valid internal snapshot and return a successful, valid registration for that retained state; expose the rejected configuration and validation error through bounded redacted status/log fields. An invalid initial registration does not advertise scheduler capability.
 
 ## Identity and pairing
 
@@ -254,11 +260,15 @@ GET https://api.z.ai/api/monitor/usage/quota/limit
 Authorization: Bearer <plan key>
 ```
 
-A successful response contains `CREDIT_LIMIT` records. Map `unit: 3, number: 5` to the five-hour bucket and `unit: 6, number: 1` to the weekly bucket. Treat `currentValue / usage` as utilization, `remaining` as advisory cross-check data, and `nextResetTime` as an epoch-millisecond reset instant. The server-reported plan `level` selects the normal Lite/Pro/Max defaults unless an explicit, validated account override is required.
+A successful response contains `CREDIT_LIMIT` records. Map `unit: 3, number: 5` to the five-hour bucket and `unit: 6, number: 1` to the weekly bucket. Treat `currentValue / usage` as utilization, `remaining` as advisory cross-check data, and `nextResetTime` as an epoch-millisecond reset instant. Require exactly one valid record for each bucket; missing or duplicate records make the response unusable. The server-reported plan `level` selects the normal Lite/Pro/Max defaults unless an explicit, validated account override is required.
 
-Quota state records the source (`authoritative` or `estimated`), last successful refresh, next reset times, and any redacted warning. Poll asynchronously every one to three minutes with deterministic jitter per account; coalesce concurrent refreshes, bound connect/total timeouts and response bytes, validate all numeric fields, and retain the last non-stale authoritative result during a transient failure. Scheduler calls perform no network I/O.
+Quota state records the source (`authoritative` or `estimated`), last successful refresh, next reset times, and any redacted warning. Poll asynchronously every one to three minutes with deterministic jitter per account; coalesce concurrent refreshes, bound connect/total timeouts and response bytes, validate all numeric fields, and retain the last result only through `authoritative-max-age`. Scheduler calls perform no network I/O.
 
-Premium credits are discounted to 0.5× off peak; peak is Monday through Friday, 06:00–10:00 UTC. Expose an `offpeak` status flag computed from an injected UTC clock. Do not alter authoritative utilization to re-derive Z.AI's accounting.
+When a poll recovers after estimated mode, replace routing utilization and resets atomically with the authoritative response. Retain the estimator ledger only for future outages; do not add estimated consumption to `currentValue`, and do not let a lower estimate clear an upstream 429 block. Record the source transition and divergence as redacted diagnostics.
+
+The quota client keeps each plan key only in process memory for the active configuration lifetime and zeroes/drops replaced account snapshots as far as Go permits. V0.1 fixes the request origin to `https://api.z.ai`: custom quota endpoints are disabled in production builds. The client rejects redirects instead of forwarding `Authorization`, does not honor ambient HTTP proxy variables by default, sends no body, caps response headers/body, validates the JSON schema and status code, and never logs raw headers or bodies.
+
+Premium credits are discounted to 0.5× off peak; peak is Monday through Friday, 06:00–10:00 UTC. Expose an `offpeak` status flag computed from an injected UTC clock. Apply the 0.5× multiplier only to fallback credit events timestamped off peak; do not alter authoritative utilization to re-derive Z.AI's accounting.
 
 ### Fallback formula
 
@@ -280,13 +290,14 @@ Model names use an explicit alias allowlist derived from observed CPA records. A
 
 Token rules:
 
-- cached input is charged at the cached rate;
-- if CPA input includes cache reads, subtract cached input before applying the normal input rate;
-- cache-write tokens not covered by the published formula use the normal input rate unless Z.ai documents otherwise;
+- bind published cached-input pricing to `UsageDetail.CacheReadTokens` only;
+- bind cache writes to `UsageDetail.CacheCreationTokens` and charge them at the normal input rate unless Z.ai documents a separate rate;
+- never use generic `UsageDetail.CachedTokens` for pricing because the v7.2.67 Claude usage helper can substitute cache-creation tokens into that field when it is zero;
+- subtract `CacheReadTokens` from `InputTokens` only when a redacted real fixture proves that CPA's input count includes cache reads; otherwise treat the fields as disjoint and fail the contract test rather than double-subtracting;
 - a failed request with no usage adds no estimated credits; and
-- a failure that includes usage is accounted once.
+- a failure that includes usage is accounted on best effort.
 
-Persist a deterministic record identity to prevent double charging after replay/reconfigure. If CPA supplies no request ID, hash stable non-secret record fields and retain a bounded dedup set.
+`usage.handle` is a lossy observation channel, not an authoritative ledger: its interface has no acknowledgment, CPA discards RPC errors, delivery may be skipped after request-context cancellation, and `UsageRecord` contains no request ID. The estimator therefore reports an integrity state (`complete_since`, `delivery_warning`, and `dedup_mode`) and becomes conservative when persistence or delivery uncertainty is observed; it never claims exact consumption and never clears an upstream 429. A bounded hash of stable non-secret fields may suppress obvious replays across restart/reconfigure, but collisions can suppress legitimate identical records, so hash dedup is explicitly heuristic rather than replay-safe.
 
 ### Fallback rolling windows
 
@@ -334,16 +345,19 @@ A real 429 overrides a lower estimate. Repeated failures extend, never shorten, 
 
 ## Scheduler
 
+CPA v7.2.67 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `zai-coding-plan`. Startup/dogfood validation inspects the configured and registered capability set and refuses the Z.ai lane if any second scheduler is enabled or if this plugin is not first. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
+
 For `scheduler.pick`:
 
-1. Map candidates to logical accounts.
+1. Map candidates to logical accounts and reject the call with a scheduler error if any recognized Z.ai candidate is absent from the validated snapshot.
 2. Recompute expired health.
-3. If no managed account is impaired, return `Handled:false`; CPA retains native round-robin/session affinity.
-4. In degraded state, remove every candidate belonging to an impaired account, including its sibling credential.
-5. Round-robin among healthy candidates per provider/model, preserving header-derived stickiness when possible (`X-Session-ID`, `Session-Id`, `Session_id`, `X-Client-Request-Id`).
-6. If no managed healthy candidate remains, return `Handled:false` so CPA produces its normal retry/error behavior rather than selecting a known-bad credential.
+3. If no managed account is impaired, return `Handled:true, DelegateBuiltin:"round-robin"`; CPA retains native round-robin/session affinity through the explicit SDK delegate.
+4. In degraded state, discard every candidate belonging to an impaired account, including its sibling credential.
+5. Round-robin among healthy candidates per provider/model, preserving header-derived stickiness when possible (`X-Session-ID`, `Session-Id`, `Session_id`, `X-Client-Request-Id`). Return the selected `AuthID` with `Handled:true`.
+6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a non-retryable scheduler error such as `zai_no_capacity`. In v7.2.67, returning `Handled:false` falls back to built-in selection and is forbidden on this path.
+7. If the request contains no recognized Z.ai candidate, return `Handled:false` so unrelated providers remain untouched.
 
-The scheduler performs no disk, network, or host callback while holding its lock.
+The scheduler performs no disk, network, or host callback while holding its lock. Contract tests assert the all-impaired plugin error propagates through `pluginhost.PickAuth` with `handled=true` and cannot fall back to a known-bad credential.
 
 ## Management API
 
@@ -351,7 +365,7 @@ The scheduler performs no disk, network, or host callback while holding its lock
 
 | Method/path | Purpose |
 |---|---|
-| `GET /v0/management/plugins/zai-coding-plan/status` | Redacted authoritative/fallback quota, fallback fallback reset times, off-peak state, fallback and, health, and fallbackWait source. |
+| `GET /v0/management/plugins/zai-coding-plan/status` | Redacted utilization/reset state, quota source and freshness, off-peak state, health, and warnings. |
 | `POST /v0/management/plugins/zai-coding-plan/refresh` | Poll quota now, compact fallback state, and recompute health. |
 | `POST /v0/management/plugins/zai-coding-plan/unblock` | Clear transient blocks, then recompute retained quota/usage. |
 | `POST /v0/management/plugins/zai-coding-plan/account-config` | Save/clear non-key plan metadata. |
@@ -372,6 +386,10 @@ Collector-facing status fields are exact:
       "five_hour_resets_at": "2026-09-08T08:42:00Z",
       "weekly_resets_at": "2026-09-14T03:21:00Z",
       "quota_source": "authoritative",
+      "quota_observed_at": "2026-09-08T05:00:00Z",
+      "quota_age_seconds": 12,
+      "quota_stale": false,
+      "quota_error": null,
       "offpeak": false,
       "health": "healthy"
     }
@@ -379,7 +397,7 @@ Collector-facing status fields are exact:
 }
 ```
 
-Treat utilizations as ratios unless the `cliproxy_usage_snapshot.py` contract fixture proves percentages. `quota_source` distinguishes `authoritative` from `estimated`; `offpeak` follows the documented UTC schedule. Additional fields may expose consumed/bucket credits, block reason, timestamps, and warnings, but never full keys, key hashes, request bodies, authorization headers, or management credentials.
+Treat utilizations as ratios unless the `cliproxy_usage_snapshot.py` contract fixture proves percentages. `quota_source` distinguishes `authoritative` from `estimated`; the freshness fields make fallback and stale data machine-visible; `quota_error` is a bounded redacted code/message, never an upstream body. `offpeak` follows the documented UTC schedule. Additional fields may expose consumed/bucket credits and block reason, but never full keys, key hashes, request bodies, authorization headers, or management credentials.
 
 CPA must reject unauthenticated management HTTP requests before dispatch. If a resource route provides UI, it serves only a static shell; data still comes from the authenticated management endpoint.
 
@@ -400,7 +418,7 @@ Requirements:
 - key settings by hashed account identity so renames survive but rotations reset;
 - one in-process mutex protects the active snapshot, state, dedup set, and cursors;
 - copy a persistence snapshot under lock, then write after releasing it; and
-- shutdown flush is idempotent.
+- shutdown is idempotent and ordered: stop accepting new work, cancel the quota-poller context, synchronously join every poller/refresh worker, then flush persistence and return. No goroutine may retain or call the host callback table after shutdown returns, because CPA deletes host callback state and immediately unloads the `.so`.
 
 Quarantine corrupt state with a redacted diagnostic. Start conservatively with an accounting warning rather than silently replacing it.
 
@@ -419,8 +437,9 @@ quota poller ── authoritative buckets/resets        │ CPA candidates
     ├── unavailable → local estimator               ▼
 CPA completed request ── usage.handle ── health ── recompute health
     │                                  │            │
-    ├── usage → fallback rolling ledger│            ├── all healthy → host handles
-    └── 401/403/429 ───────────────────┘            └── degraded → healthy candidate
+    ├── usage → fallback rolling ledger│            ├── all healthy → delegate builtin RR
+    └── 401/403/429 ───────────────────┘            ├── degraded → healthy candidate
+                                                    └── none healthy → scheduler error
     │
     ├── atomic redacted persistence
     └── authenticated status → collector lane `zai`
@@ -434,8 +453,9 @@ Z.ai keys, CPA management authentication, usage/account state, local ledger inte
 
 | Threat | Control |
 |---|---|
-| Keys leak through logs/status/errors | Keys are used only for in-memory pairing and bounded authenticated quota requests. Central redaction and tests scan serialized outputs/logs for fixture keys. |
-| Quota request leaks or is redirected | Require HTTPS, disable cross-origin credential forwarding, allowlist the production host by default, bound time/body size, and never log headers or response bodies. |
+| Scheduler precedence bypasses quota enforcement | Require `zai-coding-plan` to be the only enabled scheduler, validate the configured/registered capability set before admitting the lane, and retain `priority: 1000` only as defense in depth. |
+| Keys leak through logs/status/errors | Keys live only in the active in-memory account snapshot for exact pairing and authenticated quota requests; they are never persisted or returned. Central redaction and tests scan every serialized output/log/error path for fixture keys. |
+| Quota request leaks or is redirected | Fix production requests to HTTPS `api.z.ai`, reject redirects, disable ambient proxy use by default, never forward credentials cross-origin, cap headers/body/time, validate schema, and never log raw headers or bodies. |
 | Wrong pairing through suffix collision | Pair only by full-key equality. Suffix matching is override-only and ambiguity fails closed. |
 | Unauthenticated quota/account disclosure | Data only on CPA management-key routes. Integration-test unauthorized/authorized HTTP behavior. Resource shell has no data. |
 | Local disclosure | `0700` directory, `0600` files, unprivileged CPA user, no secrets in filenames. |
@@ -470,7 +490,8 @@ A `vMAJOR.MINOR.PATCH` tag produces a versioned `.so`, CPA store zip, SHA-256 ch
 Unit/property coverage:
 
 - quota response parsing for Pro/Lite/Max buckets, reset epochs, malformed/oversized input, endpoint failures, and off-peak boundaries;
-- poll jitter, timeout, redirect, stale-data, and authoritative-to-fallback transitions;
+- quota client redirect rejection, fixed-origin enforcement, disabled ambient proxies, header/body caps, secret redaction, and cancellation;
+- poll jitter, timeout, stale-data, authoritative-to-fallback-to-authoritative reconciliation, and freshness fields;
 - exact fallback formula vectors, large counts, zero usage, and rounding boundaries;
 - cache semantics and unknown models;
 - fallback rolling boundary and earliest threshold reset with multiple events;
@@ -478,8 +499,10 @@ Unit/property coverage:
 - exact pairing, duplicates, missing siblings, ambiguous suffixes, rotation;
 - reset headers/body variants and adversarial values;
 - cross-protocol 401/403/429 health;
-- healthy scheduler passthrough and degraded exclusion/round-robin/stickiness;
-- dedup across replay/restart;
+- scheduler precedence/exclusivity with lower-, higher-, and equal-priority competitors; healthy explicit built-in round-robin delegation, degraded exclusion/round-robin/stickiness, and all-impaired hard-error propagation;
+- invalid reconfiguration retains the previous valid registration with a surfaced validation error;
+- lossy usage delivery, persistence-failure integrity state, and heuristic dedup collision/replay cases;
+- shutdown cancels and joins every background worker before callback teardown/unload;
 - permissions, atomic replacement, corrupt files, symlinks; and
 - collector status golden JSON.
 
@@ -494,7 +517,7 @@ ABI/integration coverage:
 
 ## Operational and ToS note
 
-The Z.ai GLM Coding Plan is licensed for supported coding tools, and Claude Code is one of those tools. Our agent workloads are Claude Code sessions. The plugin therefore supports plan use for that supported coding client; it must not turn the subscription into an unrestricted public inference/resale service. Re-check current Z.ai terms before any release that materially changes clients or traffic patterns.
+The Z.ai GLM Coding Plan is licensed for supported coding tools, and Claude Code is one of those tools. Our intended agent workloads are Claude Code sessions. Deployment must enforce that boundary outside the plugin: expose the `zai` lane only to the authenticated Claude Code agent environment, do not publish it as a general OpenAI-compatible endpoint, and do not route arbitrary clients through the plan credentials. The plugin classifies credentials and capacity; it cannot itself prove which end-user tool originated generic CPA traffic. Re-check current Z.ai terms before any release that materially changes clients or traffic patterns.
 
 The repository and reference plugin are MIT-licensed. Preserve required notices when adapting reference code.
 
@@ -502,6 +525,6 @@ The repository and reference plugin are MIT-licensed. Preserve required notices 
 
 1. Record the immutable digest/version of the deployed `eceasy/cli-proxy-api` image and pass the native load test. The private fork could not be read directly in this run.
 2. Capture a redacted real quota response fixture and verify the five-hour/weekly unit mapping and utilization scale against the live endpoint.
-3. Capture redacted real `pluginapi.UsageRecord` fixtures to settle cache-token semantics and model aliases for fallback accounting.
+3. Capture redacted real `pluginapi.UsageRecord` fixtures to validate input/cache field overlap and model aliases for fallback accounting. Pricing is already bound to `CacheReadTokens` and `CacheCreationTokens`, never generic `CachedTokens`.
 4. Confirm whether `cliproxy_usage_snapshot.py` expects utilization ratios or percentages and lock it with a golden test.
 5. Capture real redacted Z.ai 429/reset variants.

@@ -1,33 +1,37 @@
 # Use the same secret through CLIProxyAPI's supported secret/config mechanism.
 # Never commit a populated copy of this file.
+auth-dir: /app/auths
+
 claude-api-key:
-  - api-key: "${ZAI_CODING_PLAN_KEY}"
-    base-url: "https://api.z.ai/api/anthropic"
-    prefix: "zai"
+  - api-key: ${ZAI_CODING_PLAN_KEY}
+    base-url: https://api.z.ai/api/anthropic
+    prefix: zai
 
 openai-compatibility:
-  - name: "zai-coding-plan"
-    base-url: "https://api.z.ai/api/coding/paas/v4"
+  - name: zai-coding-plan
+    base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
-      - api-key: "${ZAI_CODING_PLAN_KEY}"
+      - api-key: ${ZAI_CODING_PLAN_KEY}
 
 plugins:
-  installed:
+  enabled: true
+  dir: plugins
+  configs:
     zai-coding-plan:
       enabled: true
-      config:
-        cpa-config-path: /app/config.yaml
-        quota-endpoint: https://api.z.ai/api/monitor/usage/quota/limit
-        quota-refresh-interval: 2m
-        threshold-percent: 97
-        suspend-duration: 30m
-        fallback-cooldown: 10m
-        state-retention: 8d
-        default-plan: pro
-        accounts:
-          # The suffix is for a redacted display/override match only.
-          # Credential pairing always compares the full keys in memory.
-          - key-suffix: "abcd"
-            name: "zai-pro-1"
-            plan: pro
-            disabled: false
+      priority: 1000
+      cpa-config-path: /app/config.yaml
+      quota-refresh-interval: 2m
+      authoritative-max-age: 5m
+      threshold-percent: 97
+      suspend-duration: 30m
+      fallback-cooldown: 10m
+      state-retention: 8d
+      default-plan: pro
+      accounts:
+        # The suffix is only a redacted display/override selector. Credential
+        # pairing always compares the complete key in memory.
+        - key-suffix: replace-with-unique-suffix
+          name: zai-pro-1
+          plan: pro
+          disabled: false
