@@ -44,6 +44,28 @@ SECRET_VALUE = re.compile(
 )
 ALLOWED_HEALTH = {"healthy", "exhausted", "suspended", "disabled", "config_error"}
 ALLOWED_SOURCES = {"quota_api", "estimate"}
+STRING_FIELDS = {
+    "name",
+    "key_suffix",
+    "plan",
+    "five_hour_resets_at",
+    "weekly_resets_at",
+    "quota_source",
+    "quota_observed_at",
+    "quota_error",
+    "health",
+    "estimator_complete_since",
+    "dedup_mode",
+}
+BOOLEAN_FIELDS = {
+    "quota_stale",
+    "offpeak",
+    "delivery_warning",
+    "persistence_warning",
+    "unknown_model_warning",
+    "heuristic_dedup_warning",
+}
+NUMBER_FIELDS = {"five_hour_utilization", "weekly_utilization", "quota_age_seconds"}
 MAX_STRING_BYTES = 512
 MAX_ACCOUNTS = 64
 DEFAULT_ALLOWED_ORIGINS = ("http://127.0.0.1:8317", "http://[::1]:8317", "http://localhost:8317")
@@ -103,12 +125,22 @@ def validate_account(account: Any, secret_markers: tuple[str, ...] = ()) -> dict
         fail("quota_source is invalid")
     if account["health"] not in ALLOWED_HEALTH:
         fail("health is invalid")
-    require_ratio(account["five_hour_utilization"], "five_hour_utilization")
-    require_ratio(account["weekly_utilization"], "weekly_utilization")
-    projected = dict(account)
-    for key, value in projected.items():
-        if isinstance(value, str) or value is None:
-            projected[key] = bound_string(value, key, secret_markers)
+    projected: dict[str, Any] = {}
+    for key in STRING_FIELDS:
+        if key == "quota_error" and key not in account:
+            continue
+        projected[key] = bound_string(account[key], key, secret_markers)
+    for key in BOOLEAN_FIELDS:
+        if not isinstance(account[key], bool):
+            fail(f"{key} must be a boolean")
+        projected[key] = account[key]
+    for key in NUMBER_FIELDS:
+        value = account[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not float(value) >= 0:
+            fail(f"{key} must be a non-negative number")
+        projected[key] = value
+    projected["five_hour_utilization"] = require_ratio(account["five_hour_utilization"], "five_hour_utilization")
+    projected["weekly_utilization"] = require_ratio(account["weekly_utilization"], "weekly_utilization")
     return projected
 
 

@@ -41,6 +41,20 @@ class CollectorZaiTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     collector.project(value, "2026-09-10T15:00:00Z")
 
+    def test_rejects_non_string_and_nested_values_in_allowed_fields(self):
+        cases = (
+            ("quota_error", 123),
+            ("name", 123),
+            ("delivery_warning", {"message": "fixture-plan-marker"}),
+            ("quota_stale", "false"),
+            ("quota_age_seconds", {"value": 1}),
+        )
+        for field, value in cases:
+            status = self.fixture("status-fallback.json")
+            status["accounts"][0][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                collector.project(status, "2026-09-10T15:00:00Z", ("fixture-plan-marker",))
+
     def test_rejects_secret_like_fields_and_nonredacted_suffix(self):
         for field in ("api_key", "authorization", "credential", "key_hash", "identity"):
             value = self.fixture("status-authoritative.json")
