@@ -219,6 +219,16 @@ func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishAction(t *testing.T) 
 	}
 }
 
+func TestValidateReleaseWorkflowBoundaryRejectsWorkflowDefaults(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "permissions:\n  contents: read", "defaults:\n  run:\n    shell: bash -c 'printf malicious-side-effect; bash {0}'\npermissions:\n  contents: read", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want workflow defaults rejection", err)
+	}
+}
+
 func TestValidateReleaseWorkflowBoundaryRejectsPublishDefaults(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -226,6 +236,26 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublishDefaults(t *testing.T) {
 	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish defaults rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildShell(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "    outputs:\n      version:", "    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    outputs:\n      version:", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want build defaults rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildStepShell(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow, "      - name: Package\n        working-directory:", "      - name: Package\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        working-directory:", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want build step shell rejection", err)
 	}
 }
 
@@ -268,8 +298,11 @@ func TestValidateReleaseWorkflowBoundaryRejectsRecoveryWeakening(t *testing.T) {
 		{name: "direct branch push", old: "tags: [\"v*\"]", new: "tags: [\"v*\"]\n    branches: [release-recovery/v0.1.0]"},
 		{name: "broad recovery branch", old: "branches: [release-recovery/v0.1.0]", new: "branches: [release-recovery/*]"},
 		{name: "failed upstream accepted", old: "github.event.workflow_run.conclusion == 'success'", new: "github.event.workflow_run.conclusion != ''"},
-		{name: "mutable recovery checkout", old: "'refs/tags/v0.1.0'", new: "github.event.workflow_run.head_sha"},
+		{name: "mutable control checkout", old: "ref: ${{ github.sha }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
+		{name: "control validation removed", old: "working-directory: release-controls\n        run: printf controls", new: "working-directory: release-source\n        run: printf controls"},
+		{name: "mutable recovery checkout", old: "ref: ${{ steps.target.outputs.tag }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
 		{name: "branch-derived publish tag", old: "RAW_TAG: ${{ needs.build.outputs.tag }}", new: "RAW_TAG: ${{ github.ref_name }}"},
+		{name: "missing publish tag object", old: "EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag_object }}", new: "EXPECTED_TAG_OBJECT: deadbeef"},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -322,14 +355,74 @@ jobs:
        github.event.workflow_run.head_sha == github.workflow_sha)
     runs-on: ubuntu-24.04
     outputs:
+      version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.target.outputs.tag }}
+      tag_object: ${{ steps.target.outputs.tag_object }}
     steps:
-      - name: Check out repository
+      - name: Check out trusted release controls
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event_name == 'workflow_run' && 'refs/tags/v0.1.0' || github.ref }}
+          ref: ${{ github.sha }}
+          path: release-controls
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: release-controls/go.mod
+          cache-dependency-path: release-controls/go.sum
+          cache: true
+      - name: Validate trusted release controls
+        working-directory: release-controls
+        run: printf controls
+      - name: Select release tag
+        id: target
+        working-directory: release-controls
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: printf target
+      - name: Check out immutable release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ steps.target.outputs.tag }}
+          path: release-source
+      - name: Validate tag and provenance
+        id: release
+        working-directory: release-source
+        run: printf validate
+      - name: Verify
+        working-directory: release-source
+        run: printf verify
+      - name: Lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a
+        with:
+          version: v2.13.2
+          working-directory: release-source
+      - name: Package
+        working-directory: release-source
+        run: printf package
+      - name: Verify plugin-store artifact
+        working-directory: release-source
+        run: printf artifact
+      - name: Extract approved host image
+        id: host
+        working-directory: release-source
+        run: printf host
+      - name: Test approved host image
+        working-directory: release-source
+        run: printf integration
+      - name: Stage release artifacts
+        working-directory: release-source
+        run: printf stage
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-artifacts
+          path: release-source/release-artifacts/
+          if-no-files-found: error
+          retention-days: 1
   publish:
     needs: build
     runs-on: ubuntu-24.04
@@ -347,7 +440,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
           RAW_TAG: ${{ needs.build.outputs.tag }}
+          EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag_object }}
         run: |
+          set -euo pipefail
+          actual_tag_object=$(gh api "repos/${GH_REPO}/git/ref/tags/${RAW_TAG}" --jq .object.sha)
+          test "$actual_tag_object" = "$EXPECTED_TAG_OBJECT"
+          test "$RAW_TAG" = v0.1.0
+          test "$EXPECTED_TAG_OBJECT" = 93441174a393b2d7487df954b4f10103742285fb
           gh release create "$RAW_TAG" \
             "release-artifacts/zai-coding-plan-v${VERSION}.so" \
             "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
