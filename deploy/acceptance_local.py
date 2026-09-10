@@ -21,7 +21,7 @@ def run(*command: str) -> None:
 def main() -> int:
     scheduler_pattern = "TestUsageFailureImpairsBothPairedCredentials|TestAuthSuspensionPrecedesExhaustionAndBothRecover|TestSchedulerHealthyDelegatesBuiltinRoundRobin|TestSchedulerDegradedExcludesSiblingsAndRoundRobinsHealthy|TestUsageCrossingQuotaThresholdImmediatelyBlocksScheduler"
     run("go", "test", "./src", "-run", scheduler_pattern, "-count=1")
-    run("python3", "-m", "unittest", "deploy/test_collector_zai.py")
+    run("python3", "-m", "unittest", "discover", "-s", "deploy", "-p", "test_*.py")
 
     sys.path.insert(0, str(ROOT / "deploy"))
     import importlib.util
