@@ -26,7 +26,7 @@ plugins:
       threshold-percent: 97
       suspend-duration: 30m
       fallback-cooldown: 10m
-      state-retention: 8d
+      state-retention: 192h
       default-plan: pro
       accounts:
         # The suffix is only a redacted display/override selector. Credential
