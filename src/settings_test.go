@@ -186,6 +186,18 @@ func TestPersistedStateRejectsFutureAuthoritativeAndEventTimes(t *testing.T) {
 	}
 }
 
+func TestPersistedStateRejectsAuthoritativeResetAtOrBeforeObservation(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	identity := accountIdentity(fixtureKey)
+	for _, resetAt := range []time.Time{now, now.Add(-time.Nanosecond)} {
+		window := quotaWindow{ConsumedMicrocredits: creditScale, BucketMicrocredits: 2 * creditScale, ResetsAt: resetAt}
+		state := accountQuotaState{Authoritative: &quotaSnapshot{ObservedAt: now, FiveHour: window, Weekly: window}}
+		if err := validatePersistedStateAt(persistedState{Version: 1, Accounts: map[string]accountQuotaState{identity: state}}, now); err == nil {
+			t.Fatalf("authoritative reset %v relative to observation was accepted", resetAt)
+		}
+	}
+}
+
 func TestPersistedStateValidation(t *testing.T) {
 	identity := accountIdentity(fixtureKey)
 	tests := []struct {
@@ -249,7 +261,8 @@ func TestStoredSettingsValidation(t *testing.T) {
 }
 
 func TestStoredSettingsPreserveConfigDisabledWhenUnset(t *testing.T) {
-	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Plan: "pro", Disabled: true}}})
+	keySuffix := fixtureKey[len(fixtureKey)-8:]
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Plan: "pro", Disabled: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +278,8 @@ func TestStoredSettingsPreserveConfigDisabledWhenUnset(t *testing.T) {
 }
 
 func TestStoredSettingsCanExplicitlyEnableAccount(t *testing.T) {
-	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Plan: "pro", Disabled: true}}})
+	keySuffix := fixtureKey[len(fixtureKey)-8:]
+	accounts, err := discoverAccounts(exactPairFixture(fixtureKey), pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Plan: "pro", Disabled: true}}})
 	if err != nil {
 		t.Fatal(err)
 	}

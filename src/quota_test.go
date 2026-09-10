@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const quotaFixtureKey = "zai-plan-secret-never-serialize-4f9c31a7"
+const quotaFixtureKey = "test-only-quota-key"
 
 var quotaObservedAt = time.Date(2026, time.September, 8, 5, 0, 0, 0, time.UTC)
 
@@ -57,6 +57,8 @@ func TestParseQuotaResponseRejectsIncompleteDuplicateAndInvalidNumbers(t *testin
 		{name: "negative usage", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"usage":12000`, `"usage":-1`, 1), validWeek})},
 		{name: "current exceeds usage", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"currentValue":1`, `"currentValue":12001`, 1), validWeek})},
 		{name: "invalid reset", raw: quotaFixture("pro", []string{validFive, strings.Replace(validWeek, stringNumber(quotaObservedAt.Add(24*time.Hour).UnixMilli()), "1", 1)})},
+		{name: "reset at observation", raw: quotaFixture("pro", []string{strings.Replace(validFive, stringNumber(quotaObservedAt.Add(time.Hour).UnixMilli()), stringNumber(quotaObservedAt.UnixMilli()), 1), validWeek})},
+		{name: "reset before observation", raw: quotaFixture("pro", []string{validFive, strings.Replace(validWeek, stringNumber(quotaObservedAt.Add(24*time.Hour).UnixMilli()), stringNumber(quotaObservedAt.Add(-time.Millisecond).UnixMilli()), 1)})},
 		{name: "unknown plan", raw: quotaFixture("enterprise", []string{validFive, validWeek})},
 		{name: "malformed", raw: `{`},
 	}

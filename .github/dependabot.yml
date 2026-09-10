@@ -4,6 +4,17 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The release contract tracks the deployed v7.2.67 runtime. Keep major and
+      # minor changes out of automated PRs, and suppress the already-rejected
+      # v7.2.151 patch while still allowing future patch updates for review.
+      - dependency-name: github.com/router-for-me/CLIProxyAPI/v7
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
+      - dependency-name: github.com/router-for-me/CLIProxyAPI/v7
+        versions:
+          - 7.2.151
   - package-ecosystem: github-actions
     directory: /
     schedule:

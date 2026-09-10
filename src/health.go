@@ -96,12 +96,16 @@ func (state accountHealthState) assess(item account, now time.Time) accountHealt
 	if state.ExhaustedUntil.After(now) {
 		return accountHealth{Status: healthExhausted, Reason: state.ExhaustedReason, ResetAt: state.ExhaustedUntil}
 	}
-	if state.CapacityExhausted && (state.CapacityResetAt.IsZero() || state.CapacityResetAt.After(now)) {
+	if state.CapacityExhausted {
 		reason := state.CapacitySource
 		if reason == "" {
 			reason = "quota threshold reached"
 		}
-		return accountHealth{Status: healthExhausted, Reason: reason, ResetAt: state.CapacityResetAt}
+		resetAt := state.CapacityResetAt
+		if !resetAt.After(now) {
+			resetAt = time.Time{}
+		}
+		return accountHealth{Status: healthExhausted, Reason: reason, ResetAt: resetAt}
 	}
 	return accountHealth{Status: healthHealthy}
 }

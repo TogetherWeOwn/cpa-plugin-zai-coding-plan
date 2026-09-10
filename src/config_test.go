@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const fixtureKey = "fixture-zai-plan-key-4f9c31a7"
+const fixtureKey = "test-only-zai-key"
 
 func TestParsePluginConfigDefaults(t *testing.T) {
 	cfg, err := parsePluginConfig([]byte("enabled: true\npriority: 10\ndefault-plan: pro\n"))
@@ -97,6 +97,27 @@ func TestLoadCPAConfigDecodeErrorIsRedacted(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), fixtureKey) || strings.Contains(err.Error(), fixtureKey[:7]) {
 		t.Fatalf("decode error leaked provider key material: %v", err)
+	}
+}
+
+func TestLoadCPAConfigPreservesAuthenticationHeadersForDiscoveryRejection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := "claude-api-key:\n  - api-key: " + fixtureKey + "\n    base-url: https://api.z.ai/api/anthropic\n    headers:\n      ' Authorization ': claude-header-secret\nopenai-compatibility:\n  - name: zai-coding-plan\n    base-url: https://api.z.ai/api/coding/paas/v4\n    headers:\n      ' X-Api-Key ': compat-header-secret\n    api-key-entries:\n      - api-key: " + fixtureKey + "\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCPAConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = discoverAccounts(cfg, pluginConfig{DefaultPlan: "pro"})
+	if err == nil || !strings.Contains(err.Error(), "authentication-affecting custom header") {
+		t.Fatalf("error = %v, want authentication header rejection", err)
+	}
+	for _, secret := range []string{"claude-header-secret", "compat-header-secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error leaked header value: %v", err)
+		}
 	}
 }
 

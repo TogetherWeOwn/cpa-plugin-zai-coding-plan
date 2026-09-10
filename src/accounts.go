@@ -15,6 +15,13 @@ const (
 	zaiCompatName       = "zai-coding-plan"
 )
 
+var authenticationHeaderNames = map[string]struct{}{
+	"api-key":       {},
+	"authorization": {},
+	"x-api-key":     {},
+	"x-zai-api-key": {},
+}
+
 type account struct {
 	Identity                string `json:"-"`
 	Name                    string `json:"name"`
@@ -89,6 +96,9 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		if key == "" {
 			return nil, fmt.Errorf("z.ai Anthropic entry has no API key")
 		}
+		if header, found := authenticationHeader(entry.Headers); found {
+			return nil, fmt.Errorf("z.ai Anthropic entry contains authentication-affecting custom header %s", header)
+		}
 		pair := pairs[key]
 		if pair == nil {
 			pair = &pairCandidate{key: key}
@@ -107,6 +117,9 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		}
 		if _, recognized := recognizedBaseURL(compat.BaseURL, zaiOpenAIBaseURL); !recognized {
 			return nil, fmt.Errorf("zai-coding-plan provider has invalid base URL")
+		}
+		if header, found := authenticationHeader(compat.Headers); found {
+			return nil, fmt.Errorf("zai-coding-plan provider contains authentication-affecting custom header %s", header)
 		}
 		if len(compat.APIKeyEntries) == 0 {
 			return nil, fmt.Errorf("zai-coding-plan provider has no API key entries")
@@ -206,18 +219,28 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 	return ordered, nil
 }
 
+func authenticationHeader(headers map[string]string) (string, bool) {
+	for name := range headers {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if _, forbidden := authenticationHeaderNames[normalized]; forbidden {
+			return normalized, true
+		}
+	}
+	return "", false
+}
+
 func validatePairs(pairs map[string]*pairCandidate) error {
 	for _, pair := range pairs {
-		suffix := displaySuffix(pair.key)
+		reference := accountReference(pair.key)
 		switch {
 		case pair.claudeCount > 1:
-			return fmt.Errorf("duplicate Z.ai Anthropic entry for key suffix %s", suffix)
+			return fmt.Errorf("duplicate Z.ai Anthropic entry for account %s", reference)
 		case pair.openAIEntryCount > 1:
-			return fmt.Errorf("duplicate zai-coding-plan entry for key suffix %s", suffix)
+			return fmt.Errorf("duplicate zai-coding-plan entry for account %s", reference)
 		case pair.claudeCount == 0:
-			return fmt.Errorf("missing Z.ai Anthropic sibling for key suffix %s", suffix)
+			return fmt.Errorf("missing Z.ai Anthropic sibling for account %s", reference)
 		case pair.openAIEntryCount == 0:
-			return fmt.Errorf("missing zai-coding-plan sibling for key suffix %s", suffix)
+			return fmt.Errorf("missing zai-coding-plan sibling for account %s", reference)
 		}
 	}
 	return nil
@@ -335,6 +358,11 @@ func accountIdentity(key string) string {
 	mac := hmac.New(sha256.New, []byte(pluginID+":account-identity:v1"))
 	_, _ = mac.Write([]byte(strings.TrimSpace(key)))
 	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func accountReference(key string) string {
+	identity := accountIdentity(key)
+	return identity[:12]
 }
 
 func displaySuffix(key string) string {

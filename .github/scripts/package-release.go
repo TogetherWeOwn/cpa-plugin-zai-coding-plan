@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 func main() {
@@ -28,9 +29,25 @@ func main() {
 	if errPackage != nil {
 		fatalf("%v", errPackage)
 	}
-	checksum := sha256.Sum256(archiveData)
-	line := fmt.Sprintf("%s  %s\n", hex.EncodeToString(checksum[:]), filepath.Base(*archivePath))
-	if errWrite := os.WriteFile(*checksumPath, []byte(line), 0o644); errWrite != nil {
+	libraryData, errRead := os.ReadFile(*libraryPath)
+	if errRead != nil {
+		fatalf("read library: %v", errRead)
+	}
+	artifacts := map[string][]byte{
+		filepath.Base(*archivePath): archiveData,
+		filepath.Base(*libraryPath): libraryData,
+	}
+	names := make([]string, 0, len(artifacts))
+	for name := range artifacts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var checksums string
+	for _, name := range names {
+		checksum := sha256.Sum256(artifacts[name])
+		checksums += fmt.Sprintf("%s  %s\n", hex.EncodeToString(checksum[:]), name)
+	}
+	if errWrite := os.WriteFile(*checksumPath, []byte(checksums), 0o644); errWrite != nil {
 		fatalf("write checksum: %v", errWrite)
 	}
 }

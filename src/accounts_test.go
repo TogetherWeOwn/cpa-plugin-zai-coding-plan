@@ -57,6 +57,41 @@ func TestDiscoverAccountsMultipleKeys(t *testing.T) {
 	}
 }
 
+func TestDiscoverAccountsRejectsAuthenticationCustomHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		mutate func(*cpaConfigProjection, string)
+	}{
+		{name: "claude authorization", header: " Authorization ", mutate: func(c *cpaConfigProjection, value string) {
+			c.ClaudeKeys[0].Headers = map[string]string{" Authorization ": value}
+		}},
+		{name: "claude api key", header: " X-API-KEY ", mutate: func(c *cpaConfigProjection, value string) {
+			c.ClaudeKeys[0].Headers = map[string]string{" X-API-KEY ": value}
+		}},
+		{name: "compat authorization", header: " authorization ", mutate: func(c *cpaConfigProjection, value string) {
+			c.OpenAICompatibility[0].Headers = map[string]string{" authorization ": value}
+		}},
+		{name: "compat pinned host equivalent", header: " X-ZAI-API-KEY ", mutate: func(c *cpaConfigProjection, value string) {
+			c.OpenAICompatibility[0].Headers = map[string]string{" X-ZAI-API-KEY ": value}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const headerValue = "header-secret-must-not-leak"
+			fixture := exactPairFixture(fixtureKey)
+			tt.mutate(&fixture, headerValue)
+			_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+			if err == nil || !strings.Contains(err.Error(), "authentication-affecting custom header") {
+				t.Fatalf("error = %v, want authentication header rejection", err)
+			}
+			if strings.Contains(err.Error(), headerValue) {
+				t.Fatalf("error leaked header value for %q: %v", tt.header, err)
+			}
+		})
+	}
+}
+
 func TestDiscoverAccountsPairingErrors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -78,6 +113,22 @@ func TestDiscoverAccountsPairingErrors(t *testing.T) {
 				t.Fatalf("error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestPairingErrorDoesNotExposeKeySuffix(t *testing.T) {
+	const key = "prefix-secret-finalbytes"
+	fixture := exactPairFixture(key)
+	fixture.OpenAICompatibility = nil
+	_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+	if err == nil {
+		t.Fatal("expected pairing error")
+	}
+	if strings.Contains(err.Error(), "finalbytes") || strings.Contains(err.Error(), key) {
+		t.Fatalf("pairing error exposed key bytes: %v", err)
+	}
+	if !strings.Contains(err.Error(), accountReference(key)) {
+		t.Fatalf("pairing error = %v, want non-key account reference", err)
 	}
 }
 
@@ -127,11 +178,12 @@ func TestAccountOverridesAndAmbiguity(t *testing.T) {
 
 func TestRenameAndKeyRotationIdentity(t *testing.T) {
 	fixture := exactPairFixture(fixtureKey)
-	base, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Name: "old", Plan: "pro"}}})
+	keySuffix := fixtureKey[len(fixtureKey)-8:]
+	base, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Name: "old", Plan: "pro"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	renamed, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: "4f9c31a7", Name: "new", Plan: "pro"}}})
+	renamed, err := discoverAccounts(fixture, pluginConfig{Accounts: []accountOverride{{KeySuffix: keySuffix, Name: "new", Plan: "pro"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,8 +318,8 @@ func TestStableAuthIDsMatchUpstreamFixtures(t *testing.T) {
 		parts []string
 		want  string
 	}{
-		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:ae1542c0f164"},
-		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:2ad86d46dbc6"},
+		{kind: "claude:apikey", parts: []string{fixtureKey, zaiAnthropicBaseURL}, want: "claude:apikey:e414498ddc81"},
+		{kind: "openai-compatibility:zai-coding-plan", parts: []string{fixtureKey, zaiOpenAIBaseURL, ""}, want: "openai-compatibility:zai-coding-plan:f09c6735a12a"},
 	}
 	for _, tt := range tests {
 		if got := gen.next(tt.kind, tt.parts...); got != tt.want {
