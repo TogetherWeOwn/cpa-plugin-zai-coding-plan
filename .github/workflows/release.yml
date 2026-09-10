@@ -121,22 +121,18 @@ jobs:
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
           go run -buildvcs=false ./.github/scripts/release-validation \
             -mode release -version "$VERSION" -tag "$RAW_TAG"
-      - name: Extract approved host image
-        id: host
+      - name: Resolve immutable host image matrix
         working-directory: release-source
         run: |
           set -euo pipefail
-          host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
-          printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"
-      - name: Test approved host image
+          .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
+      - name: Test host compatibility matrix
         working-directory: release-source
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          HOST_BINARY: ${{ steps.host.outputs.binary }}
         run: |
           set -euo pipefail
-          go run -buildvcs=false ./.github/scripts/host-integration \
-            -host-binary "$HOST_BINARY" -plugin "dist/zai-coding-plan-v${VERSION}.so"
+          make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
       - name: Stage release artifacts
         working-directory: release-source
         env:

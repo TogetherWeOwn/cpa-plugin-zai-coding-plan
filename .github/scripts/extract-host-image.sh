@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-pin="${1:-.github/release-host-image.json}"
+pin="${1:?image pin JSON is required}"
 out="${2:?output directory is required}"
 repository=$(jq -er .repository "$pin")
 digest=$(jq -er .manifest_digest "$pin")

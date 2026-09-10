@@ -1,7 +1,8 @@
-// host-integration verifies the built plugin through the pinned CLIProxyAPI image binary.
+// host-integration verifies the built plugin through a real CLIProxyAPI image binary.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,8 +21,12 @@ import (
 )
 
 const (
-	pluginID   = "zai-coding-plan"
-	statusPath = "/v0/management/plugins/zai-coding-plan/status"
+	pluginID       = "zai-coding-plan"
+	statusPath     = "/v0/management/plugins/zai-coding-plan/status"
+	pluginListPath = "/v0/management/plugins"
+	smokePlanKey   = "release-integration-plan-key-000001"
+	managementKey  = "release-integration-management-key"
+	clientKey      = "release-integration-client-key"
 )
 
 func main() {
@@ -34,8 +39,9 @@ func main() {
 func run(args []string) error {
 	flags := flag.NewFlagSet("host-integration", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	hostBinary := flags.String("host-binary", "", "CLIProxyAPI binary extracted from the approved image")
+	hostBinary := flags.String("host-binary", "", "CLIProxyAPI binary extracted from the tested image")
 	plugin := flags.String("plugin", "", "built plugin shared library")
+	image := flags.String("image", "host image", "human-readable image name")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -48,7 +54,7 @@ func run(args []string) error {
 	if err := verifyCapabilities(*plugin); err != nil {
 		return err
 	}
-	return verifyHostHTTP(*hostBinary, *plugin)
+	return verifyHostHTTP(*hostBinary, *plugin, *image)
 }
 
 func verifyCapabilities(plugin string) error {
@@ -63,14 +69,16 @@ func verifyCapabilities(plugin string) error {
 	}
 	defer os.RemoveAll(root)
 	cpaConfigPath := filepath.Join(root, "config.yaml")
-	const planKey = "release-capability-plan-key"
 	cpaConfig := fmt.Sprintf(`auth-dir: %q
 claude-api-key:
   - api-key: %q
     base-url: https://api.z.ai/api/anthropic
     prefix: zai
+    headers:
+      X-CPA-Smoke-Lane: anthropic
 openai-compatibility:
   - name: zai-coding-plan
+    prefix: zai-openai
     base-url: https://api.z.ai/api/coding/paas/v4
     api-key-entries:
       - api-key: %q
@@ -81,11 +89,11 @@ plugins:
     zai-coding-plan:
       enabled: true
       priority: 1000
-`, filepath.Join(root, "auth"), planKey, planKey)
+`, filepath.Join(root, "auth"), smokePlanKey, smokePlanKey)
 	if err := os.WriteFile(cpaConfigPath, []byte(cpaConfig), 0o600); err != nil {
 		return err
 	}
-	pluginConfig := fmt.Sprintf("cpa-config-path: %s\ndefault-plan: pro\naccounts:\n  - key-suffix: plan-key\n    name: release-capability\n    plan: pro\n", cpaConfigPath)
+	pluginConfig := fmt.Sprintf("cpa-config-path: %s\ndefault-plan: pro\naccounts:\n  - key-suffix: 000001\n    name: release-capability\n    plan: pro\n", cpaConfigPath)
 	request, err := json.Marshal(map[string]any{"config_yaml": []byte(pluginConfig)})
 	if err != nil {
 		return err
@@ -121,12 +129,18 @@ plugins:
 	return nil
 }
 
-func verifyHostHTTP(hostBinary, plugin string) error {
+func verifyHostHTTP(hostBinary, plugin, image string) error {
 	root, err := os.MkdirTemp("", "zai-host-integration-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(root)
+
+	stub, caPath, err := startUpstreamStub(root)
+	if err != nil {
+		return err
+	}
+	defer stub.server.Shutdown(context.Background())
 
 	pluginDir := filepath.Join(root, "plugins", "linux", "amd64")
 	authDir := filepath.Join(root, "auth")
@@ -136,13 +150,11 @@ func verifyHostHTTP(hostBinary, plugin string) error {
 	if err := os.MkdirAll(authDir, 0o700); err != nil {
 		return err
 	}
-	pluginDst := filepath.Join(pluginDir, pluginID+"-v0.1.0.so")
+	pluginDst := filepath.Join(pluginDir, pluginID+"-v0.2.0.so")
 	if err := copyFile(pluginDst, plugin, 0o755); err != nil {
 		return err
 	}
 
-	const planKey = "release-integration-plan-key"
-	const managementKey = "release-integration-management-key"
 	port, err := availablePort()
 	if err != nil {
 		return err
@@ -155,16 +167,28 @@ remote-management:
   secret-key: %q
   disable-control-panel: true
 auth-dir: %q
-api-keys: ["release-integration-client-key"]
+api-keys: [%q]
+force-model-prefix: true
 claude-api-key:
   - api-key: %q
     base-url: https://api.z.ai/api/anthropic
     prefix: zai
+    headers:
+      X-CPA-Smoke-Lane: anthropic
+    models:
+      - name: smoke-upstream-anthropic
+        alias: smoke-model
 openai-compatibility:
   - name: zai-coding-plan
+    prefix: zai-openai
     base-url: https://api.z.ai/api/coding/paas/v4
+    headers:
+      X-CPA-Smoke-Lane: openai
     api-key-entries:
       - api-key: %q
+    models:
+      - name: smoke-upstream-openai
+        alias: smoke-model
 plugins:
   enabled: true
   dir: %q
@@ -173,12 +197,14 @@ plugins:
       enabled: true
       priority: 1000
       cpa-config-path: %q
+      quota-refresh-interval: 1m
+      authoritative-max-age: 3m
       default-plan: pro
       accounts:
-        - key-suffix: plan-key
+        - key-suffix: 000001
           name: release-integration
           plan: pro
-`, port, managementKey, authDir, planKey, planKey, filepath.Join(root, "plugins"), configPath)
+`, port, managementKey, authDir, clientKey, smokePlanKey, smokePlanKey, filepath.Join(root, "plugins"), configPath)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		return err
 	}
@@ -192,29 +218,91 @@ plugins:
 	command.Dir = root
 	command.Stdout = logFile
 	command.Stderr = logFile
+	command.Env = cleanProxyEnvironment(append(os.Environ(), "SSL_CERT_FILE="+caPath))
 	if err := command.Start(); err != nil {
-		return fmt.Errorf("start approved host binary: %w", err)
+		return fmt.Errorf("start tested host binary: %w", err)
 	}
 	defer stopProcess(command)
 
-	client := &http.Client{Timeout: 3 * time.Second}
-	statusURL := fmt.Sprintf("http://127.0.0.1:%d%s", port, statusPath)
-	if err := waitForStatus(client, statusURL, managementKey); err != nil {
+	client := &http.Client{Timeout: 5 * time.Second}
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+	if err := waitForRegistered(client, baseURL); err != nil {
 		return withHostLog(root, err)
 	}
-	unauthorized, err := requestStatus(client, statusURL, "")
-	if err != nil {
+	if err := verifyStatusAuthentication(client, baseURL); err != nil {
 		return withHostLog(root, err)
+	}
+	if err := inferenceRoundTrip(client, baseURL, "/v1/messages", "zai/smoke-model", "anthropic smoke ok", true); err != nil {
+		return withHostLog(root, err)
+	}
+	if err := inferenceRoundTrip(client, baseURL, "/v1/chat/completions", "zai-openai/smoke-model", "openai smoke ok", false); err != nil {
+		return withHostLog(root, err)
+	}
+	if err := stub.assertRequests(); err != nil {
+		return withHostLog(root, err)
+	}
+	if err := rejectSchedulerErrors(root); err != nil {
+		return err
+	}
+	fmt.Printf("%s: registered with scheduler, usage_plugin, management_api; real scheduler picks served zai/* and zai-openai/* with HTTP 200\n", image)
+	return nil
+}
+
+func waitForRegistered(client *http.Client, baseURL string) error {
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		registered, err := pluginRegistered(client, baseURL)
+		if err == nil && registered {
+			return nil
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return errors.New("tested host image did not register and enable the plugin within 30 seconds")
+}
+
+func pluginRegistered(client *http.Client, baseURL string) (bool, error) {
+	response, err := requestJSON(client, http.MethodGet, baseURL+pluginListPath, managementKey, nil)
+	if err != nil {
+		return false, err
+	}
+	if response.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("plugin list status = %d", response.StatusCode)
+	}
+	var body struct {
+		PluginsEnabled bool `json:"plugins_enabled"`
+		Plugins        []struct {
+			ID               string `json:"id"`
+			Configured       bool   `json:"configured"`
+			Registered       bool   `json:"registered"`
+			Enabled          bool   `json:"enabled"`
+			EffectiveEnabled bool   `json:"effective_enabled"`
+		} `json:"plugins"`
+	}
+	if err := json.Unmarshal(response.Body, &body); err != nil {
+		return false, err
+	}
+	for _, item := range body.Plugins {
+		if item.ID == pluginID {
+			return body.PluginsEnabled && item.Configured && item.Registered && item.Enabled && item.EffectiveEnabled, nil
+		}
+	}
+	return false, nil
+}
+
+func verifyStatusAuthentication(client *http.Client, baseURL string) error {
+	unauthorized, err := requestJSON(client, http.MethodGet, baseURL+statusPath, "", nil)
+	if err != nil {
+		return err
 	}
 	if unauthorized.StatusCode != http.StatusUnauthorized {
-		return withHostLog(root, fmt.Errorf("unauthenticated status code = %d, want 401", unauthorized.StatusCode))
+		return fmt.Errorf("unauthenticated status code = %d, want 401", unauthorized.StatusCode)
 	}
-	authorized, err := requestStatus(client, statusURL, managementKey)
+	authorized, err := requestJSON(client, http.MethodGet, baseURL+statusPath, managementKey, nil)
 	if err != nil {
-		return withHostLog(root, err)
+		return err
 	}
 	if authorized.StatusCode != http.StatusOK {
-		return withHostLog(root, fmt.Errorf("authenticated status code = %d, want 200", authorized.StatusCode))
+		return fmt.Errorf("authenticated status code = %d, want 200", authorized.StatusCode)
 	}
 	var body struct {
 		Plugin   string `json:"plugin"`
@@ -229,7 +317,47 @@ plugins:
 	if body.Plugin != pluginID || body.Status != "registered" || len(body.Accounts) != 1 || body.Accounts[0].KeySuffix != "redacted" {
 		return fmt.Errorf("authenticated status is not registered and redacted: plugin=%q status=%q accounts=%d suffix=%q", body.Plugin, body.Status, len(body.Accounts), firstSuffix(body.Accounts))
 	}
-	fmt.Println("approved host image: plugin registered; scheduler, usage_plugin, management_api advertised; status 401/200; account suffix redacted")
+	return nil
+}
+
+func inferenceRoundTrip(client *http.Client, baseURL, path, model, marker string, anthropic bool) error {
+	requestBody := map[string]any{
+		"model":    model,
+		"stream":   false,
+		"messages": []map[string]any{{"role": "user", "content": "compatibility smoke"}},
+	}
+	if anthropic {
+		requestBody["max_tokens"] = 16
+	} else {
+		requestBody["max_tokens"] = 16
+	}
+	raw, err := json.Marshal(requestBody)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest(http.MethodPost, baseURL+path, strings.NewReader(string(raw)))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	if anthropic {
+		request.Header.Set("X-Api-Key", clientKey)
+		request.Header.Set("Anthropic-Version", "2023-06-01")
+	} else {
+		request.Header.Set("Authorization", "Bearer "+clientKey)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return err
+	}
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(body), marker) {
+		return fmt.Errorf("%s inference status = %d, marker %q absent; body %q", model, response.StatusCode, marker, body)
+	}
 	return nil
 }
 
@@ -238,29 +366,8 @@ type statusResponse struct {
 	Body       []byte
 }
 
-func availablePort() (int, error) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 0, fmt.Errorf("reserve host integration port: %w", err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port, nil
-}
-
-func waitForStatus(client *http.Client, url, key string) error {
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		response, err := requestStatus(client, url, key)
-		if err == nil && response.StatusCode == http.StatusOK {
-			return nil
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	return errors.New("approved host image did not expose the authenticated plugin status within 30 seconds")
-}
-
-func requestStatus(client *http.Client, url, key string) (statusResponse, error) {
-	request, err := http.NewRequest(http.MethodGet, url, nil)
+func requestJSON(client *http.Client, method, url, key string, body io.Reader) (statusResponse, error) {
+	request, err := http.NewRequest(method, url, body)
 	if err != nil {
 		return statusResponse{}, err
 	}
@@ -272,11 +379,20 @@ func requestStatus(client *http.Client, url, key string) (statusResponse, error)
 		return statusResponse{}, err
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	raw, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if err != nil {
 		return statusResponse{}, err
 	}
-	return statusResponse{StatusCode: response.StatusCode, Body: body}, nil
+	return statusResponse{StatusCode: response.StatusCode, Body: raw}, nil
+}
+
+func availablePort() (int, error) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, fmt.Errorf("reserve host integration port: %w", err)
+	}
+	defer listener.Close()
+	return listener.Addr().(*net.TCPAddr).Port, nil
 }
 
 func firstSuffix(accounts []struct {
@@ -302,6 +418,34 @@ func stopProcess(command *exec.Cmd) {
 	}
 	_ = command.Process.Kill()
 	_ = command.Wait()
+}
+
+func rejectSchedulerErrors(root string) error {
+	raw, err := os.ReadFile(filepath.Join(root, "host.log"))
+	if err != nil {
+		return err
+	}
+	log := string(raw)
+	for _, marker := range []string{"zai_unmanaged_candidate", "scheduler rejected auth pick"} {
+		if strings.Contains(log, marker) {
+			return fmt.Errorf("host log contains scheduler failure %q\nhost log:\n%s", marker, log)
+		}
+	}
+	return nil
+}
+
+func cleanProxyEnvironment(environment []string) []string {
+	out := environment[:0]
+	for _, item := range environment {
+		key := strings.ToUpper(strings.SplitN(item, "=", 2)[0])
+		switch key {
+		case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+			continue
+		default:
+			out = append(out, item)
+		}
+	}
+	return append(out, "NO_PROXY=*", "no_proxy=*")
 }
 
 func withHostLog(root string, cause error) error {

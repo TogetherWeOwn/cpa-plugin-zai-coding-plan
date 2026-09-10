@@ -28,7 +28,7 @@ import (
 )
 ```
 
-The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork. Its repository was not publicly readable during this research, so a version label alone is not proof of compatibility. Release requires a load test against the exact approved image digest; the immutable linux/amd64 manifest digest is recorded in `.github/release-host-image.json` rather than replaced by a mutable tag.
+The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork, so a version label alone is not proof of compatibility. Release requires the compatibility smoke against the exact operator-reported linux/amd64 manifest in `deploy/deployed-host-image.json` and the latest Docker Hub tag resolved to an immutable manifest at CI time; `.github/host-images.json` retains the historical v7.2.67 baseline.
 
 ### C ABI
 

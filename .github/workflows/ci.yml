@@ -65,11 +65,7 @@ jobs:
           test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
           make validate-release VERSION=0.1.0 TAG=v0.1.0
-      - name: Extract approved host image
-        id: host
-        run: |
-          set -euo pipefail
-          host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
-          printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"
-      - name: Test approved host image
-        run: make test-host-image VERSION=0.1.0 HOST_BINARY='${{ steps.host.outputs.binary }}'
+      - name: Resolve immutable host image matrix
+        run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
+      - name: Test host compatibility matrix
+        run: make test-host-matrix VERSION=0.1.0 OUT=dist/zai-coding-plan-v0.1.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
