@@ -57,6 +57,41 @@ func TestDiscoverAccountsMultipleKeys(t *testing.T) {
 	}
 }
 
+func TestDiscoverAccountsRejectsAuthenticationCustomHeaders(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+		mutate func(*cpaConfigProjection, string)
+	}{
+		{name: "claude authorization", header: " Authorization ", mutate: func(c *cpaConfigProjection, value string) {
+			c.ClaudeKeys[0].Headers = map[string]string{" Authorization ": value}
+		}},
+		{name: "claude api key", header: " X-API-KEY ", mutate: func(c *cpaConfigProjection, value string) {
+			c.ClaudeKeys[0].Headers = map[string]string{" X-API-KEY ": value}
+		}},
+		{name: "compat authorization", header: " authorization ", mutate: func(c *cpaConfigProjection, value string) {
+			c.OpenAICompatibility[0].Headers = map[string]string{" authorization ": value}
+		}},
+		{name: "compat pinned host equivalent", header: " X-ZAI-API-KEY ", mutate: func(c *cpaConfigProjection, value string) {
+			c.OpenAICompatibility[0].Headers = map[string]string{" X-ZAI-API-KEY ": value}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const headerValue = "header-secret-must-not-leak"
+			fixture := exactPairFixture(fixtureKey)
+			tt.mutate(&fixture, headerValue)
+			_, err := discoverAccounts(fixture, pluginConfig{DefaultPlan: "pro"})
+			if err == nil || !strings.Contains(err.Error(), "authentication-affecting custom header") {
+				t.Fatalf("error = %v, want authentication header rejection", err)
+			}
+			if strings.Contains(err.Error(), headerValue) {
+				t.Fatalf("error leaked header value for %q: %v", tt.header, err)
+			}
+		})
+	}
+}
+
 func TestDiscoverAccountsPairingErrors(t *testing.T) {
 	tests := []struct {
 		name   string

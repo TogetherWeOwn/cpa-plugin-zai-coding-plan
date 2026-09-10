@@ -15,6 +15,13 @@ const (
 	zaiCompatName       = "zai-coding-plan"
 )
 
+var authenticationHeaderNames = map[string]struct{}{
+	"api-key":       {},
+	"authorization": {},
+	"x-api-key":     {},
+	"x-zai-api-key": {},
+}
+
 type account struct {
 	Identity                string `json:"-"`
 	Name                    string `json:"name"`
@@ -89,6 +96,9 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		if key == "" {
 			return nil, fmt.Errorf("z.ai Anthropic entry has no API key")
 		}
+		if header, found := authenticationHeader(entry.Headers); found {
+			return nil, fmt.Errorf("z.ai Anthropic entry contains authentication-affecting custom header %s", header)
+		}
 		pair := pairs[key]
 		if pair == nil {
 			pair = &pairCandidate{key: key}
@@ -107,6 +117,9 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		}
 		if _, recognized := recognizedBaseURL(compat.BaseURL, zaiOpenAIBaseURL); !recognized {
 			return nil, fmt.Errorf("zai-coding-plan provider has invalid base URL")
+		}
+		if header, found := authenticationHeader(compat.Headers); found {
+			return nil, fmt.Errorf("zai-coding-plan provider contains authentication-affecting custom header %s", header)
 		}
 		if len(compat.APIKeyEntries) == 0 {
 			return nil, fmt.Errorf("zai-coding-plan provider has no API key entries")
@@ -204,6 +217,16 @@ func discoverAccounts(cpa cpaConfigProjection, cfg pluginConfig) ([]account, err
 		return nil, err
 	}
 	return ordered, nil
+}
+
+func authenticationHeader(headers map[string]string) (string, bool) {
+	for name := range headers {
+		normalized := strings.ToLower(strings.TrimSpace(name))
+		if _, forbidden := authenticationHeaderNames[normalized]; forbidden {
+			return normalized, true
+		}
+	}
+	return "", false
 }
 
 func validatePairs(pairs map[string]*pairCandidate) error {
