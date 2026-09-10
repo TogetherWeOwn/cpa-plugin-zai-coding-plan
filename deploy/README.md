@@ -129,8 +129,8 @@ if not isinstance(path_value, str) or "/linux/amd64/" not in path_value or "0.1.
 PY
 
 usage_dir=/srv/cliproxy-usage
-# This helper lstat(2)s before any mutation, rejects an existing symlink without
-# following it, then validates and secures the held directory fd.
+# This helper accepts only the fixed usage path, opens every ancestor with
+# O_NOFOLLOW, then verifies the pathname still names the secured directory fd.
 python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"
 test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
 CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
@@ -150,6 +150,7 @@ The plugin-store response must report `id=zai-coding-plan`, `version=0.1.0`, `in
 ```sh
 set -euo pipefail
 umask 077
+repo=/home/ubuntu/cpa-plugin-zai-coding-plan
 config=/home/ubuntu/cliproxy/config.yaml
 backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
@@ -205,7 +206,7 @@ finally:
     os.close(directory_fd)
 PY
 systemctl reload cliproxy.service || systemctl restart cliproxy.service
-rm -f /srv/cliproxy-usage/zai.json
+python3 "$repo/deploy/remove-usage-output.py"
 ```
 
 The rollback is complete only after the restored configuration has been loaded by the running service. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.

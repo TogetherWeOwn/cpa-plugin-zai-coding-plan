@@ -9,6 +9,13 @@ set -euo pipefail
 : "${CLIPROXY_SERVICE_UNIT:=cliproxy.service}"
 : "${CLIPROXY_JOURNAL_TIMEOUT:=5}"
 
+python3 - "$CLIPROXY_JOURNAL_TIMEOUT" <<'PY'
+import re, sys
+value=sys.argv[1]
+if len(value) > 16 or not re.fullmatch(r"(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)[smh]?", value):
+    raise SystemExit("CLIPROXY_JOURNAL_TIMEOUT must be a positive duration using s, m, or h")
+PY
+
 umask 077
 work_dir=$(mktemp -d)
 trap 'rm -rf "$work_dir"' EXIT
@@ -57,11 +64,11 @@ path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').r
 path.chmod(0o600)
 PY
 
-unauthenticated=$(curl --fail-early --max-redirs 0 --silent --show-error --max-time 5 --max-filesize 1048576 --output /dev/null --write-out '%{http_code}' "$status_url")
+unauthenticated=$(curl -q --fail-early --max-redirs 0 --silent --show-error --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' --output /dev/null --write-out '%{http_code}' "$status_url")
 test "$unauthenticated" = 401
 
-curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  --max-time 5 --max-filesize 1048576 \
+curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+  --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' \
   --config "$curl_config" \
   "$status_url" >"$status_file"
 
@@ -70,40 +77,64 @@ import json, math, pathlib, re, sys
 expected_top={"plugin","status","version","generated_at","accounts"}
 required={"name","key_suffix","plan","five_hour_utilization","weekly_utilization","five_hour_resets_at","weekly_resets_at","quota_source","quota_observed_at","quota_age_seconds","quota_stale","offpeak","health","estimator_complete_since","delivery_warning","persistence_warning","unknown_model_warning","heuristic_dedup_warning","dedup_mode"}
 rfc3339=re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+def fail(message):
+    raise SystemExit(message)
+def require(condition, message):
+    if not condition:
+        fail(message)
 def read_secret(path):
     raw=pathlib.Path(path).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
-        raise SystemExit("secret input file must contain exactly one non-empty line")
-    return lines[0]
+        fail("secret input file must contain exactly one non-empty line")
+    try:
+        return lines[0].decode("utf-8")
+    except UnicodeDecodeError:
+        fail("secret input file must contain valid UTF-8")
+def scan_decoded(value, markers):
+    if isinstance(value, str):
+        if any(marker and marker in value for marker in markers):
+            fail("authenticated status response failed decoded confidential-value scan")
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            scan_decoded(key, markers)
+            scan_decoded(child, markers)
+    elif isinstance(value, list):
+        for child in value:
+            scan_decoded(child, markers)
 raw=pathlib.Path(sys.argv[1]).read_bytes()
 if len(raw) > 1_048_576:
-    raise SystemExit("authenticated status response exceeds bounded scan size")
+    fail("authenticated status response exceeds bounded scan size")
 management=read_secret(sys.argv[2])
 plan=read_secret(sys.argv[3])
 markers=[management, plan]
 if len(plan) > 6:
     markers.append(plan[-6:])
-if any(marker in raw for marker in markers):
-    raise SystemExit("authenticated status response failed confidential-value scan")
+if any(marker.encode() in raw for marker in markers):
+    fail("authenticated status response failed confidential-value scan")
 def reject_constant(_):
     raise ValueError("non-RFC JSON value")
-status=json.loads(raw, parse_constant=reject_constant)
-assert set(status) == expected_top
-assert status["plugin"]=="zai-coding-plan" and status["status"]=="registered"
-assert isinstance(status["version"], str) and status["version"]
-assert isinstance(status["generated_at"], str) and rfc3339.fullmatch(status["generated_at"])
-assert status["accounts"]
+try:
+    status=json.loads(raw, parse_constant=reject_constant)
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    fail("authenticated status response is not strict JSON")
+scan_decoded(status, markers)
+require(isinstance(status, dict) and set(status) == expected_top, "authenticated status response has unexpected top-level fields")
+require(status["plugin"]=="zai-coding-plan" and status["status"]=="registered", "authenticated status response has unexpected plugin state")
+require(isinstance(status["version"], str) and bool(status["version"]), "authenticated status response has invalid version")
+require(isinstance(status["generated_at"], str) and bool(rfc3339.fullmatch(status["generated_at"])), "authenticated status response has invalid generated_at")
+require(isinstance(status["accounts"], list) and bool(status["accounts"]), "authenticated status response has no accounts")
 for account in status["accounts"]:
-    assert required <= set(account) and set(account) <= required | {"quota_error"}
-    assert isinstance(account["name"], str) and account["name"]
-    assert account["key_suffix"] == "redacted"
-    assert account["quota_source"] in {"quota_api","estimate"}
-    assert isinstance(account["quota_age_seconds"], int) and not isinstance(account["quota_age_seconds"], bool) and account["quota_age_seconds"] >= 0
-    assert all(account[field] is None or isinstance(account[field], str) and rfc3339.fullmatch(account[field]) for field in ("five_hour_resets_at","weekly_resets_at","estimator_complete_since"))
-    assert isinstance(account["quota_observed_at"], str) and rfc3339.fullmatch(account["quota_observed_at"])
-    assert all(isinstance(account[field], (int,float)) and not isinstance(account[field], bool) and math.isfinite(account[field]) and 0 <= account[field] <= 1 for field in ("five_hour_utilization","weekly_utilization"))
-    assert not any(re.search(r"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)", key, re.I) for key in account)
+    require(isinstance(account, dict), "authenticated status account must be an object")
+    require(required <= set(account) and set(account) <= required | {"quota_error"}, "authenticated status account has unexpected fields")
+    require(isinstance(account["name"], str) and bool(account["name"]), "authenticated status account has invalid name")
+    require(account["key_suffix"] == "redacted", "authenticated status account key suffix is not redacted")
+    require(account["quota_source"] in {"quota_api","estimate"}, "authenticated status account has invalid quota source")
+    require(isinstance(account["quota_age_seconds"], int) and not isinstance(account["quota_age_seconds"], bool) and account["quota_age_seconds"] >= 0, "authenticated status account has invalid quota age")
+    require(all(account[field] is None or isinstance(account[field], str) and rfc3339.fullmatch(account[field]) for field in ("five_hour_resets_at","weekly_resets_at","estimator_complete_since")), "authenticated status account has invalid optional timestamp")
+    require(isinstance(account["quota_observed_at"], str) and bool(rfc3339.fullmatch(account["quota_observed_at"])), "authenticated status account has invalid observed timestamp")
+    require(all(isinstance(account[field], (int,float)) and not isinstance(account[field], bool) and math.isfinite(account[field]) and 0 <= account[field] <= 1 for field in ("five_hour_utilization","weekly_utilization")), "authenticated status account has invalid utilization")
+    require(not any(re.search(r"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)", key, re.I) for key in account), "authenticated status account contains a secret-like field")
 PY
 
 "${COLLECTOR_ZAI:-$(dirname "$0")/collector-zai.py}" \
@@ -112,11 +143,11 @@ PY
   --secret-marker-file "$ZAI_CODING_PLAN_KEY_FILE" \
   --url "$status_url"
 
-curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --max-time 5 --max-filesize 1048576 \
   "$CLIPROXY_DASHBOARD_URL" >"$dashboard_file"
 
-timeout --foreground --signal=TERM --kill-after=1 "$CLIPROXY_JOURNAL_TIMEOUT" \
+timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_JOURNAL_TIMEOUT" \
   journalctl --unit "$CLIPROXY_SERVICE_UNIT" --since '-15 minutes' --no-pager --output=cat --lines=2000 \
   | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
   >"$log_file"
@@ -124,31 +155,55 @@ timeout --foreground --signal=TERM --kill-after=1 "$CLIPROXY_JOURNAL_TIMEOUT" \
 python3 - "$CLIPROXY_USAGE_DIR/zai.json" "$dashboard_file" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
 import json, pathlib, re, sys
 projected, dashboard, service_log = map(pathlib.Path, sys.argv[1:4])
+def fail(message):
+    raise SystemExit(message)
+def require(condition, message):
+    if not condition:
+        fail(message)
 def read_secret(path):
     raw=pathlib.Path(path).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
-        raise SystemExit("secret input file must contain exactly one non-empty line")
-    return lines[0]
+        fail("secret input file must contain exactly one non-empty line")
+    try:
+        return lines[0].decode("utf-8")
+    except UnicodeDecodeError:
+        fail("secret input file must contain valid UTF-8")
+def load_json(path):
+    try:
+        return json.loads(path.read_bytes(), parse_constant=lambda _: fail(f"{path.name} contains a non-RFC JSON value"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        fail(f"{path.name} is not strict JSON")
+def scan_decoded(value, markers, label):
+    if isinstance(value, str):
+        if any(marker and marker in value for marker in markers):
+            fail(f"{label} failed decoded confidential-value scan")
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            scan_decoded(key, markers, label)
+            scan_decoded(child, markers, label)
+    elif isinstance(value, list):
+        for child in value:
+            scan_decoded(child, markers, label)
 management=read_secret(sys.argv[4])
 plan=read_secret(sys.argv[5])
-markers=[]
 markers=[management, plan]
 if len(plan) > 6:
     markers.append(plan[-6:])
 for path in (projected, dashboard, service_log):
     raw = path.read_bytes()
     if len(raw) > 1_048_576:
-        raise SystemExit(f"{path.name} exceeds bounded scan size")
-    if any(marker in raw for marker in markers):
-        raise SystemExit(f"{path.name} failed confidential-value scan")
-def reject_constant(_):
-    raise ValueError("non-RFC JSON value")
-payload=json.loads(projected.read_text(), parse_constant=reject_constant)
-assert payload["schemaVersion"]==1 and payload["lane"]=="zai" and payload["records"]
+        fail(f"{path.name} exceeds bounded scan size")
+    if any(marker.encode() in raw for marker in markers):
+        fail(f"{path.name} failed confidential-value scan")
+payload=load_json(projected)
+dashboard_payload=load_json(dashboard)
+scan_decoded(payload, markers, projected.name)
+scan_decoded(dashboard_payload, markers, dashboard.name)
+require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="zai" and isinstance(payload.get("records"), list) and bool(payload["records"]), "projected collector payload has an invalid schema")
 serialized=json.dumps(payload, allow_nan=False)
-assert not re.search(r'"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)"\s*:', serialized, re.I)
-assert all(record["key_suffix"]=="redacted" for record in payload["records"])
+require(not re.search(r'"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)"\s*:', serialized, re.I), "projected collector payload contains a secret-like field")
+require(all(isinstance(record, dict) and record.get("key_suffix")=="redacted" for record in payload["records"]), "projected collector payload contains an unredacted key suffix")
 PY
 
 printf 'dogfood-live: authenticated status, collector lane, dashboard, service-log, and bounded secret-marker scans PASS\n'

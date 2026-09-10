@@ -37,6 +37,7 @@ class RunbookSecurityTest(unittest.TestCase):
 
     def test_rollback_restores_atomically_and_reloads_running_service(self):
         rollback = README.read_text().split("## Rollback", 1)[1]
+        self.assertIn("repo=/home/ubuntu/cpa-plugin-zai-coding-plan", rollback)
         self.assertIn("config=/home/ubuntu/cliproxy/config.yaml", rollback)
         self.assertIn("backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-", rollback)
         self.assertLess(rollback.index("backup="), rollback.index('install -m 0600 "$backup" "$restored"'))
@@ -44,6 +45,16 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn('mv -T "$restored" "$config"', rollback)
         self.assertIn("os.fsync(directory_fd)", rollback)
         self.assertIn("systemctl reload cliproxy.service || systemctl restart cliproxy.service", rollback)
+
+    def test_rollback_removes_usage_output_with_no_follow_helper(self):
+        rollback = README.read_text().split("## Rollback", 1)[1]
+        helper = (ROOT / "deploy" / "remove-usage-output.py").read_text()
+        self.assertIn('python3 "$repo/deploy/remove-usage-output.py"', rollback)
+        self.assertNotIn("rm -f /srv/cliproxy-usage/zai.json", rollback)
+        self.assertIn("O_NOFOLLOW", helper)
+        self.assertIn("dir_fd=directory_fd", helper)
+        self.assertIn("follow_symlinks=False", helper)
+        self.assertIn("os.unlink(path.name, dir_fd=directory_fd)", helper)
 
     def test_plugin_install_curl_is_bounded_and_suppresses_error_bodies(self):
         install = README.read_text().split("# After config reload exposes the custom source", 1)[1].split("usage_dir=", 1)[0]
