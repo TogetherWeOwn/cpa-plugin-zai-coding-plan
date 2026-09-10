@@ -3,6 +3,7 @@ import pathlib
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -14,7 +15,15 @@ class VerifyLiveTest(unittest.TestCase):
         path.write_text(textwrap.dedent(body).lstrip())
         path.chmod(0o700)
 
-    def run_verify(self, dashboard="dashboard ok", service_log="service ok", projected="projected ok", management_url=None):
+    def run_verify(
+        self,
+        dashboard="dashboard ok",
+        service_log="service ok",
+        projected="projected ok",
+        management_url=None,
+        status_plan="pro",
+        journal_stalls=False,
+    ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             bin_dir = root / "bin"
@@ -44,7 +53,7 @@ class VerifyLiveTest(unittest.TestCase):
                         "version":"0.0.0-dev",
                         "generated_at":"2026-09-10T15:00:00Z",
                         "accounts":[{{
-                            "name":"zai-pro-1","key_suffix":"redacted","plan":"pro",
+                            "name":"zai-pro-1","key_suffix":"redacted","plan":{status_plan!r},
                             "five_hour_utilization":0.1,"weekly_utilization":0.2,
                             "five_hour_resets_at":None,"weekly_resets_at":None,
                             "quota_source":"estimate","quota_observed_at":"2026-09-10T15:00:00Z",
@@ -56,13 +65,19 @@ class VerifyLiveTest(unittest.TestCase):
                     }}))
                 """,
             )
-            self.write_executable(
-                bin_dir / "journalctl",
-                f"""
+            journal_body = (
+                """
+                #!/usr/bin/env python3
+                import time
+                time.sleep(60)
+                """
+                if journal_stalls
+                else f"""
                 #!/usr/bin/env python3
                 print({service_log!r})
-                """,
+                """
             )
+            self.write_executable(bin_dir / "journalctl", journal_body)
             self.write_executable(
                 bin_dir / "collector-zai",
                 f"""
@@ -86,6 +101,7 @@ class VerifyLiveTest(unittest.TestCase):
                     "CLIPROXY_USAGE_DIR": str(usage_dir),
                     "CLIPROXY_DASHBOARD_URL": "http://127.0.0.1/dashboard",
                     "COLLECTOR_ZAI": str(bin_dir / "collector-zai"),
+                    "CLIPROXY_JOURNAL_TIMEOUT": "1",
                 }
             )
             if management_url is not None:
@@ -116,6 +132,24 @@ class VerifyLiveTest(unittest.TestCase):
     def test_oversized_service_log_is_rejected_before_full_capture(self):
         completed, _ = self.run_verify(service_log="x" * 1_048_577)
         self.assertNotEqual(completed.returncode, 0)
+
+    def test_stalling_journalctl_is_terminated_by_explicit_timeout(self):
+        started = time.monotonic()
+        completed, _ = self.run_verify(journal_stalls=True)
+        elapsed = time.monotonic() - started
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertLess(elapsed, 10)
+        self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
+        self.assertNotIn("fixture-plan-marker", completed.stdout + completed.stderr)
+
+    def test_raw_authenticated_status_rejects_markers_before_projection(self):
+        for marker in ("fixture-management-marker", "fixture-plan-marker", "marker"):
+            with self.subTest(marker=marker):
+                completed, _ = self.run_verify(status_plan=marker)
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
+                self.assertNotIn("fixture-plan-marker", completed.stdout + completed.stderr)
+                self.assertIn("authenticated status response failed confidential-value scan", completed.stderr)
 
     def test_bounded_scans_reject_full_or_suffix_markers_without_printing_them(self):
         for source, value in (

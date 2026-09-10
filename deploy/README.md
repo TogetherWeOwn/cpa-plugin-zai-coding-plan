@@ -129,8 +129,9 @@ if not isinstance(path_value, str) or "/linux/amd64/" not in path_value or "0.1.
 PY
 
 usage_dir=/srv/cliproxy-usage
-install -d -o root -g root -m 0700 "$usage_dir"
-test ! -L "$usage_dir"
+# This helper lstat(2)s before any mutation, rejects an existing symlink without
+# following it, then validates and secures the held directory fd.
+python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"
 test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
 CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
 ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
@@ -153,7 +154,9 @@ config=/home/ubuntu/cliproxy/config.yaml
 backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 curl_config=$(mktemp)
-trap 'rm -f "$curl_config"' EXIT
+delete_response=$(mktemp)
+delete_error=$(mktemp)
+trap 'rm -f "$curl_config" "$delete_response" "$delete_error"' EXIT
 python3 - "$management_key_file" "$curl_config" <<'PY'
 import pathlib, sys
 key=pathlib.Path(sys.argv[1]).read_text().strip()
@@ -163,11 +166,23 @@ path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
 PY
-curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  --max-time 5 --max-filesize 1048576 \
+if curl --fail --fail-early --max-redirs 0 --silent --show-error \
+  --connect-timeout 2 --max-time 5 --max-filesize 1048576 \
   --config "$curl_config" \
+  --output "$delete_response" --stderr "$delete_error" \
   -X DELETE \
   'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan'
+then
+  :
+else
+  rc=$?
+  printf 'plugin removal request failed (curl exit %s; response body suppressed)\n' "$rc" >&2
+  if grep -Eq '^curl: \([0-9]+\) (Connection|Could not|Failed|Operation timed out|Maximum file size exceeded|Received HTTP code|The requested URL returned error)[[:print:]]{0,240}$' "$delete_error"; then
+    tr -d '\r\n' <"$delete_error" >&2
+    printf '\n' >&2
+  fi
+  exit "$rc"
+fi
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"
 test "$(stat -c %U:%G "$config_dir")" = root:root

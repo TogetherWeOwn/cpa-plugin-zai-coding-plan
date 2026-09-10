@@ -7,6 +7,7 @@ set -euo pipefail
 : "${ZAI_CODING_PLAN_KEY_FILE:?set ZAI_CODING_PLAN_KEY_FILE to a root-readable 0600 file}"
 : "${CLIPROXY_DASHBOARD_URL:=http://127.0.0.1:3000/api/telemetry/model-usage/zai}"
 : "${CLIPROXY_SERVICE_UNIT:=cliproxy.service}"
+: "${CLIPROXY_JOURNAL_TIMEOUT:=5}"
 
 umask 077
 work_dir=$(mktemp -d)
@@ -64,14 +65,30 @@ curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --config "$curl_config" \
   "$status_url" >"$status_file"
 
-python3 - "$status_file" <<'PY'
-import json, math, re, sys
+python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
+import json, math, pathlib, re, sys
 expected_top={"plugin","status","version","generated_at","accounts"}
 required={"name","key_suffix","plan","five_hour_utilization","weekly_utilization","five_hour_resets_at","weekly_resets_at","quota_source","quota_observed_at","quota_age_seconds","quota_stale","offpeak","health","estimator_complete_since","delivery_warning","persistence_warning","unknown_model_warning","heuristic_dedup_warning","dedup_mode"}
 rfc3339=re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+def read_secret(path):
+    raw=pathlib.Path(path).read_bytes()
+    lines=raw.splitlines()
+    if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
+        raise SystemExit("secret input file must contain exactly one non-empty line")
+    return lines[0]
+raw=pathlib.Path(sys.argv[1]).read_bytes()
+if len(raw) > 1_048_576:
+    raise SystemExit("authenticated status response exceeds bounded scan size")
+management=read_secret(sys.argv[2])
+plan=read_secret(sys.argv[3])
+markers=[management, plan]
+if len(plan) > 6:
+    markers.append(plan[-6:])
+if any(marker in raw for marker in markers):
+    raise SystemExit("authenticated status response failed confidential-value scan")
 def reject_constant(_):
     raise ValueError("non-RFC JSON value")
-status=json.load(open(sys.argv[1]), parse_constant=reject_constant)
+status=json.loads(raw, parse_constant=reject_constant)
 assert set(status) == expected_top
 assert status["plugin"]=="zai-coding-plan" and status["status"]=="registered"
 assert isinstance(status["version"], str) and status["version"]
@@ -99,7 +116,8 @@ curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --max-time 5 --max-filesize 1048576 \
   "$CLIPROXY_DASHBOARD_URL" >"$dashboard_file"
 
-journalctl --unit "$CLIPROXY_SERVICE_UNIT" --since '-15 minutes' --no-pager --output=cat --lines=2000 \
+timeout --foreground --signal=TERM --kill-after=1 "$CLIPROXY_JOURNAL_TIMEOUT" \
+  journalctl --unit "$CLIPROXY_SERVICE_UNIT" --since '-15 minutes' --no-pager --output=cat --lines=2000 \
   | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
   >"$log_file"
 
@@ -110,7 +128,7 @@ def read_secret(path):
     raw=pathlib.Path(path).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
-        raise SystemExit("secret marker file must contain exactly one non-empty line")
+        raise SystemExit("secret input file must contain exactly one non-empty line")
     return lines[0]
 management=read_secret(sys.argv[4])
 plan=read_secret(sys.argv[5])
@@ -123,7 +141,7 @@ for path in (projected, dashboard, service_log):
     if len(raw) > 1_048_576:
         raise SystemExit(f"{path.name} exceeds bounded scan size")
     if any(marker in raw for marker in markers):
-        raise SystemExit(f"{path.name} contains a secret marker")
+        raise SystemExit(f"{path.name} failed confidential-value scan")
 def reject_constant(_):
     raise ValueError("non-RFC JSON value")
 payload=json.loads(projected.read_text(), parse_constant=reject_constant)

@@ -62,6 +62,34 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn("response body suppressed", install)
         self.assertIn("plugin install response did not confirm the expected release", install)
 
+    def test_usage_directory_is_validated_before_any_mutating_action(self):
+        install = README.read_text().split("usage_dir=/srv/cliproxy-usage", 1)[1].split(
+            "CLIPROXY_MANAGEMENT_KEY_FILE=", 1
+        )[0]
+        self.assertIn('python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"', install)
+        self.assertNotIn("install -d", install)
+        self.assertNotIn("chmod", install)
+        self.assertNotIn("chown", install)
+
+    def test_rollback_delete_is_bounded_and_suppresses_response_body(self):
+        rollback = README.read_text().split("## Rollback", 1)[1]
+        delete = rollback.split("config_dir=", 1)[0]
+        for option in (
+            "--fail",
+            "--fail-early",
+            "--max-redirs 0",
+            "--connect-timeout 2",
+            "--max-time 5",
+            "--max-filesize 1048576",
+            '--output "$delete_response"',
+            '--stderr "$delete_error"',
+        ):
+            self.assertIn(option, delete)
+        self.assertNotIn("--fail-with-body", delete)
+        self.assertIn("response body suppressed", delete)
+        self.assertIn("umask 077", rollback)
+        self.assertRegex(delete, r"grep -Eq '[^']+' \"\$delete_error\"")
+
     def test_runbook_passes_both_secret_marker_files_to_live_verification(self):
         text = README.read_text()
         self.assertIn("CLIPROXY_MANAGEMENT_KEY_FILE=", text)
