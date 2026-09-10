@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -127,6 +129,9 @@ func validateSource(root string) error {
 		return err
 	}
 	if err := validateWorkflowActionPins(root); err != nil {
+		return err
+	}
+	if err := validateReleaseWorkflowBoundary(root); err != nil {
 		return err
 	}
 	files, err := trackedFiles(root)
@@ -316,6 +321,76 @@ func validateWorkflowActionPins(root string) error {
 				return fmt.Errorf("workflow %s:%d action is not pinned to a full commit SHA", filepath.Base(path), index+1)
 			}
 		}
+	}
+	return nil
+}
+
+func validateReleaseWorkflowBoundary(root string) error {
+	path := filepath.Join(root, ".github", "workflows", "release.yml")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read release workflow: %w", err)
+	}
+	var workflow struct {
+		Permissions map[string]string `yaml:"permissions"`
+		Jobs        map[string]struct {
+			Needs       string            `yaml:"needs"`
+			Permissions map[string]string `yaml:"permissions"`
+			Steps       []struct {
+				Uses string `yaml:"uses"`
+				Run  string `yaml:"run"`
+				With struct {
+					Name string `yaml:"name"`
+				} `yaml:"with"`
+				Env map[string]string `yaml:"env"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		return fmt.Errorf("parse release workflow: %w", err)
+	}
+	if workflow.Permissions["contents"] != "read" {
+		return errors.New("release workflow must default contents permission to read")
+	}
+	build, exists := workflow.Jobs["build"]
+	if !exists {
+		return errors.New("release workflow is missing build job")
+	}
+	if build.Permissions["contents"] == "write" {
+		return errors.New("release build job must not have contents write permission")
+	}
+	publish, exists := workflow.Jobs["publish"]
+	if !exists {
+		return errors.New("release workflow is missing publish job")
+	}
+	if publish.Needs != "build" || publish.Permissions["contents"] != "write" {
+		return errors.New("release publish job must depend on build and hold contents write permission")
+	}
+	for name, job := range workflow.Jobs {
+		if name != "publish" && job.Permissions["contents"] == "write" {
+			return fmt.Errorf("release job %q must not have contents write permission", name)
+		}
+	}
+	var downloaded, published bool
+	for _, step := range publish.Steps {
+		if strings.HasPrefix(step.Uses, "actions/checkout@") || strings.HasPrefix(step.Uses, "./") {
+			return errors.New("release publish job must not check out or execute repository code")
+		}
+		if strings.HasPrefix(step.Uses, "actions/download-artifact@") && step.With.Name == "release-artifacts" {
+			downloaded = true
+		}
+		if step.Run != "" {
+			if !strings.Contains(step.Run, "gh release create") || !strings.Contains(step.Run, "release-artifacts/checksums.txt") {
+				return errors.New("release publish job may only publish the staged release artifacts")
+			}
+			if step.Env["GH_REPO"] == "" {
+				return errors.New("release publish job must set GH_REPO without a checkout")
+			}
+			published = true
+		}
+	}
+	if !downloaded || !published {
+		return errors.New("release publish job must download and publish the named artifact")
 	}
 	return nil
 }

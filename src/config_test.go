@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-const fixtureKey = "fixture-zai-plan-key-4f9c31a7"
+const fixtureKey = "test-only-zai-key"
 
 func TestParsePluginConfigDefaults(t *testing.T) {
 	cfg, err := parsePluginConfig([]byte("enabled: true\npriority: 10\ndefault-plan: pro\n"))

@@ -3,16 +3,18 @@ set -euo pipefail
 
 scanner="${1:?gitleaks binary is required}"
 root=$(mktemp -d)
+repo_root=$(cd "$(dirname "$0")/../.." && pwd)
+config="$repo_root/.gitleaks.toml"
 trap 'rm -rf "$root"' EXIT
 
 mkdir -p "$root/clean"
 printf 'runtime supplies credentials\n' > "$root/clean/config.txt"
 "$scanner" dir --redact=100 --no-banner "$root/clean" >/dev/null
 
-mkdir -p "$root/tree"
-printf 'api_%s = "%s%s"\n' 'key' 'aB3dE5fG7hJ9kL2m' 'N4pQ6rS8tU1vW3xY' > "$root/tree/leak.txt"
-if "$scanner" dir --redact=100 --no-banner "$root/tree" >/dev/null 2>&1; then
-  printf 'gitleaks failed to detect a generic current-tree credential fixture\n' >&2
+mkdir -p "$root/tree/src"
+printf 'api_%s = "%s%s"\n' 'key' 'aB3dE5fG7hJ9kL2m' 'N4pQ6rS8tU1vW3xY' > "$root/tree/src/config_test.go"
+if (cd "$root/tree" && "$scanner" dir --redact=100 --no-banner --config "$config" . >/dev/null 2>&1); then
+  printf 'gitleaks failed to detect an unrelated credential in src/config_test.go\n' >&2
   exit 1
 fi
 

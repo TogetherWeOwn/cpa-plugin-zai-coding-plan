@@ -1,10 +1,2 @@
 [extend]
 useDefault = true
-
-[[allowlists]]
-description = "Deterministic non-secret credential test fixtures"
-paths = ['''^src/(?:config|quota)_test\.go$''']
-regexes = [
-  '''fixture-zai-plan-key-4f9c31a7''',
-  '''zai-plan-secret-never-serialize-4f9c31a7''',
-]

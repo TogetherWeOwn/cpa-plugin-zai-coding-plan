@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-const quotaFixtureKey = "zai-plan-secret-never-serialize-4f9c31a7"
+const quotaFixtureKey = "test-only-quota-key"
 
 var quotaObservedAt = time.Date(2026, time.September, 8, 5, 0, 0, 0, time.UTC)
 

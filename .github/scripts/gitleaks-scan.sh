@@ -17,6 +17,7 @@ if [[ ! -x "$binary" ]]; then
   chmod 0755 "$binary"
 fi
 
-"$binary" git --redact=100 --no-banner --log-opts=--all .
-"$binary" dir --redact=100 --no-banner .
+baseline="$(dirname "$0")/gitleaks-baseline.json"
+"$binary" git --redact=100 --no-banner --log-opts=--all --baseline-path "$baseline" .
+"$binary" dir --redact=100 --no-banner --baseline-path "$baseline" .
 "$(dirname "$0")/gitleaks-regression.sh" "$binary"
