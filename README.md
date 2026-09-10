@@ -145,6 +145,8 @@ curl --fail-with-body \
 | `POST` | `/v0/management/plugins/zai-coding-plan/unblock` | Clear transient blocks without erasing retained quota or usage. Optional JSON: `{"account":"name-or-suffix"}`. |
 | `POST` | `/v0/management/plugins/zai-coding-plan/account-config` | Save or clear validated non-secret account and polling settings. |
 
+The plugin also registers a **Z.ai Quota** resource entry at `/v0/resource/plugins/zai-coding-plan/status`, so current Management Center builds place Z.ai in the left navigation. CLIProxyAPI resource routes are intentionally unauthenticated; the resource page therefore contains no quota payload and no management credential. Detailed quota remains on the authenticated status endpoint above until the Management Center accepts native plugin-backed Quota-page cards.
+
 Status accounts include `five_hour_utilization`, `weekly_utilization`, `five_hour_resets_at`, `weekly_resets_at`, `quota_source`, `quota_observed_at`, `quota_age_seconds`, `quota_stale`, `offpeak`, `health`, and bounded integrity-warning fields. They never expose keys or key hashes.
 
 `account-config` requires an `account` name or suffix. It accepts non-secret fields such as `name`, `plan`, `disabled`, `five_hour_credits`, `weekly_credits`, `threshold_percent`, `polling_interval`, `authoritative_max_age`, and `timeout`; `{"account":"...","clear":true}` restores the base configuration for that account.

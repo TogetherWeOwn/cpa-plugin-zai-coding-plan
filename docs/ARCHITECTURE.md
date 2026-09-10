@@ -372,7 +372,7 @@ Collector-facing status is locked by `src/testdata/status_authoritative.golden.j
 
 The host collector writes its separate sanitized lane file only beneath a pre-created root-owned real directory. It rejects symlinked or substituted output parents, holds an `O_DIRECTORY|O_NOFOLLOW` descriptor across mode enforcement, same-directory temporary creation, atomic replacement, and directory fsync, and writes the final file as mode `0600`. This root-owned collector output is distinct from the unprivileged CPA state directory below.
 
-CPA must reject unauthenticated management HTTP requests before dispatch. If a resource route provides UI, it serves only a static shell; data still comes from the authenticated management endpoint.
+CPA must reject unauthenticated management HTTP requests before dispatch. The plugin registers `/v0/resource/plugins/zai-coding-plan/status` as a Management Center menu entry, but CPA deliberately dispatches resource routes without management authentication. The resource therefore serves only a static explanatory shell with a restrictive content-security policy; quota data remains exclusively on the authenticated management endpoint.
 
 ## Persistence and concurrency
 
