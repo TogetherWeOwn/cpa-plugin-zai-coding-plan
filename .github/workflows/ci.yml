@@ -68,4 +68,6 @@ jobs:
       - name: Resolve immutable host image matrix
         run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Test host compatibility matrix
-        run: make test-host-matrix VERSION=0.1.0 OUT=dist/zai-coding-plan-v0.1.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
+        env:
+          HOST_MATRIX_NAMESPACE: root
+        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.1.0 OUT=dist/zai-coding-plan-v0.1.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"

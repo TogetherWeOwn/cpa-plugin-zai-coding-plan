@@ -7,12 +7,28 @@ work="${3:?matrix work directory is required}"
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." >/dev/null && pwd)
 mkdir -p "$work"
 
-namespace=()
-if [[ ${HOST_MATRIX_NAMESPACE:-auto} != never ]]; then
+mode=${HOST_MATRIX_NAMESPACE:-auto}
+case "$mode" in
+  auto)
+    if unshare -Urnm --map-root-user true >/dev/null 2>&1; then
+      mode=user
+    elif [[ $(id -u) -eq 0 ]]; then
+      mode=root
+    else
+      printf 'host matrix requires root or unprivileged user namespaces\n' >&2
+      exit 1
+    fi
+    ;;
+  user|root) ;;
+  *)
+    printf 'HOST_MATRIX_NAMESPACE must be auto, user, or root\n' >&2
+    exit 1
+    ;;
+esac
+if [[ $mode == user ]]; then
   command -v unshare >/dev/null
-  command -v busybox >/dev/null
-  namespace=(unshare -Urnm --map-root-user)
 fi
+command -v busybox >/dev/null
 
 run_one() {
   local encoded name tag digest image_dir pin host
@@ -27,10 +43,12 @@ run_one() {
   base64 -d <<<"$encoded" > "$pin"
   host=$("$root/.github/scripts/extract-host-image.sh" "$pin" "$image_dir/image")
 
-  "${namespace[@]}" bash -euo pipefail -c '
-    if [[ $(id -u) -eq 0 ]]; then
-      busybox ip link set lo up
-    fi
+  local -a prefix=()
+  if [[ $mode == user ]]; then
+    prefix=(unshare -Urnm --map-root-user)
+  fi
+  "${prefix[@]}" bash -euo pipefail -c '
+    busybox ip link set lo up
     hosts=$(mktemp)
     printf "127.0.0.1 api.z.ai\n::1 localhost\n" > "$hosts"
     mount --bind "$hosts" /etc/hosts

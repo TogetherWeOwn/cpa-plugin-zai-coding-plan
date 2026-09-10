@@ -771,10 +771,11 @@ func validateReleaseWorkflowShape(raw []byte) error {
 			name:             "Test host compatibility matrix",
 			workingDirectory: "release-source",
 			env: map[string]string{
-				"VERSION": "${{ steps.release.outputs.version }}",
+				"VERSION":               "${{ steps.release.outputs.version }}",
+				"HOST_MATRIX_NAMESPACE": "root",
 			},
 			command: `set -euo pipefail
-				make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"`,
+				sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"`,
 		},
 		12: {
 			name:             "Stage release artifacts",

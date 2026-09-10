@@ -130,9 +130,10 @@ jobs:
         working-directory: release-source
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          HOST_MATRIX_NAMESPACE: root
         run: |
           set -euo pipefail
-          make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
+          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
       - name: Stage release artifacts
         working-directory: release-source
         env:
