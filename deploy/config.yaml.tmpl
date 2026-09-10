@@ -1,0 +1,39 @@
+# Merge these non-secret fields into the deployed CLIProxyAPI config.
+# The operator substitutes ZAI_CODING_PLAN_KEY from the host secret channel;
+# the rendered file must remain mode 0600 and must never enter git or logs.
+claude-api-key:
+  - api-key: ${ZAI_CODING_PLAN_KEY}
+    base-url: https://api.z.ai/api/anthropic
+    prefix: zai
+
+openai-compatibility:
+  - name: zai-coding-plan
+    base-url: https://api.z.ai/api/coding/paas/v4
+    api-key-entries:
+      - api-key: ${ZAI_CODING_PLAN_KEY}
+
+plugins:
+  enabled: true
+  dir: /app/plugins
+  store-sources:
+    - https://raw.githubusercontent.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/main/registry.json
+  configs:
+    zai-coding-plan:
+      enabled: true
+      priority: 1000
+      store:
+        version: 0.1.0
+        release-tag: v0.1.0
+      cpa-config-path: /app/config.yaml
+      quota-refresh-interval: 2m
+      authoritative-max-age: 5m
+      threshold-percent: 97
+      suspend-duration: 30m
+      fallback-cooldown: 10m
+      state-retention: 8d
+      default-plan: pro
+      accounts:
+        - key-suffix: ${ZAI_CODING_PLAN_KEY_SUFFIX}
+          name: zai-pro-1
+          plan: pro
+          disabled: false
