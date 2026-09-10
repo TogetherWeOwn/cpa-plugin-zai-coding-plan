@@ -23,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Security
 
 - Management routes rely on CLIProxyAPI management-key authentication.
-- Keys, authorization headers, raw request bodies, and key hashes are excluded from persistent state, logs, and status responses.
+- Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
 > This entry describes the v0.1.0 release candidate. The release workflow refuses publication unless the tag, registry, archive names, and checksums match this version at the reviewed release commit.
