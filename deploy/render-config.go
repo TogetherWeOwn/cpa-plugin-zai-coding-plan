@@ -40,7 +40,7 @@ func main() {
 		closeDirectory(configDirectory)
 		fatal("base config: " + err.Error())
 	}
-	overlay, err := readDocument(os.Args[2])
+	overlay, err := readTrustedDocument(os.Args[2])
 	if err != nil {
 		closeDirectory(configDirectory)
 		fatal("overlay config: " + err.Error())
@@ -149,10 +149,24 @@ func openConfigDirectory(basePath, candidatePath string) (*os.File, string, stri
 	return directory, filepath.Base(basePath), filepath.Base(candidatePath), nil
 }
 
-func readDocument(path string) (*yaml.Node, error) {
+func readTrustedDocument(path string) (*yaml.Node, error) {
 	file, err := openFileNoFollow(path, unix.O_RDONLY)
 	if err != nil {
 		return nil, errors.New("could not be opened securely")
+	}
+	info, err := file.Stat()
+	if err != nil {
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(errors.New("could not be inspected securely"), closeErr)
+		}
+		return nil, errors.New("could not be inspected securely")
+	}
+	statValue, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || statValue.Uid != uint32(os.Geteuid()) || info.Mode().Perm() != 0o644 {
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, errors.Join(errors.New("must be a mode-0644 file owned by the effective user"), closeErr)
+		}
+		return nil, errors.New("must be a mode-0644 file owned by the effective user")
 	}
 	return decodeDocument(file)
 }

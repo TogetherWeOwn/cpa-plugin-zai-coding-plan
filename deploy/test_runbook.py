@@ -36,12 +36,29 @@ class RunbookSecurityTest(unittest.TestCase):
         preflight = README.read_text().split("Run the credential-free checks", 1)[1].split("Verify the exact registry bytes", 1)[0]
         renderer = (ROOT / "deploy" / "render-config.go").read_text()
         self.assertIn("renderer_build=$(mktemp -d)", preflight)
+        self.assertIn("expected_deploy_commit=REPLACE_WITH_REVIEWED_PR_HEAD", preflight)
+        self.assertIn('test "$(git rev-parse HEAD)" = "$expected_deploy_commit"', preflight)
+        self.assertIn('test -z "$(git status --porcelain --untracked-files=all)"', preflight)
+        self.assertIn('git show "$expected_deploy_commit:deploy/$artifact"', preflight)
+        self.assertIn('git hash-object "$staging_tmp/$artifact"', preflight)
+        self.assertIn('git rev-parse "$expected_deploy_commit:deploy/$artifact"', preflight)
+        self.assertIn('staging_parent=$(dirname "$staging")', preflight)
+        self.assertIn('test "$(stat -c %U:%G "$staging_parent")" = root:root', preflight)
+        self.assertIn('mktemp -d --tmpdir="$staging_parent"', preflight)
+        self.assertIn('mv -T "$staging_tmp" "$staging"', preflight)
         self.assertIn("timeout --signal=TERM --kill-after=2s 60s", preflight)
         for setting in ("GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0", "-mod=readonly"):
             self.assertIn(setting, preflight)
         self.assertIn('go build -mod=readonly -buildvcs=false -trimpath', preflight)
-        self.assertIn('"$renderer_build/render-config" /usr/local/libexec/cliproxy/render-config', preflight)
+        self.assertIn('"$renderer_build/render-config" "$staging_tmp/render-config"', preflight)
+        self.assertIn('test "$(stat -c %U:%G "$staging_tmp")" = root:root', preflight)
+        self.assertIn('test "$((8#$(stat -c %a "$staging_tmp") & 8#022))" = 0', preflight)
         self.assertNotIn("go run", install)
+        self.assertNotIn("/home/ubuntu/cpa-plugin-zai-coding-plan", install)
+        self.assertIn('staging=/usr/local/libexec/cliproxy/zai-dogfood', install)
+        self.assertIn('"$staging/config.yaml.tmpl"', install)
+        self.assertIn('"$staging/prepare-usage-dir.py"', install)
+        self.assertIn('"$staging/verify-live.sh"', install)
         self.assertIn('test ! -L "$renderer"', install)
         self.assertIn('test -f "$renderer"', install)
         self.assertIn('test -x "$renderer"', install)
@@ -59,7 +76,8 @@ class RunbookSecurityTest(unittest.TestCase):
 
     def test_rollback_restores_atomically_and_reloads_running_service(self):
         rollback = README.read_text().split("## Rollback", 1)[1]
-        self.assertIn("repo=/home/ubuntu/cpa-plugin-zai-coding-plan", rollback)
+        self.assertIn("staging=/usr/local/libexec/cliproxy/zai-dogfood", rollback)
+        self.assertNotIn("/home/ubuntu/cpa-plugin-zai-coding-plan", rollback)
         self.assertIn("config=/home/ubuntu/cliproxy/config.yaml", rollback)
         self.assertIn("backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-", rollback)
         self.assertLess(rollback.index("backup="), rollback.index('install -m 0600 "$backup" "$restored"'))
@@ -71,7 +89,7 @@ class RunbookSecurityTest(unittest.TestCase):
     def test_rollback_removes_usage_output_with_no_follow_helper(self):
         rollback = README.read_text().split("## Rollback", 1)[1]
         helper = (ROOT / "deploy" / "remove-usage-output.py").read_text()
-        self.assertIn('python3 "$repo/deploy/remove-usage-output.py"', rollback)
+        self.assertIn('"$staging/remove-usage-output.py"', rollback)
         self.assertNotIn("rm -f /srv/cliproxy-usage/zai.json", rollback)
         self.assertIn("O_NOFOLLOW", helper)
         self.assertIn("dir_fd=directory_fd", helper)
@@ -102,7 +120,7 @@ class RunbookSecurityTest(unittest.TestCase):
         install = README.read_text().split("usage_dir=/srv/cliproxy-usage", 1)[1].split(
             "CLIPROXY_MANAGEMENT_KEY_FILE=", 1
         )[0]
-        self.assertIn('python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"', install)
+        self.assertIn('"$staging/prepare-usage-dir.py" "$usage_dir"', install)
         self.assertNotIn("install -d", install)
         self.assertNotIn("chmod", install)
         self.assertNotIn("chown", install)
@@ -126,7 +144,7 @@ class RunbookSecurityTest(unittest.TestCase):
             self.assertIn(option, delete)
         self.assertNotIn("--fail-with-body", delete)
         self.assertIn("continuing rollback", delete)
-        self.assertIn('python3 "$repo/deploy/rollback-delete-policy.py"', delete)
+        self.assertIn('"$staging/rollback-delete-policy.py"', delete)
         policy = (ROOT / "deploy" / "rollback-delete-policy.py").read_text()
         self.assertIn('response.get("error") == "plugin_not_found"', policy)
         self.assertIn('response.get("error") == "plugin_delete_requires_restart"', policy)

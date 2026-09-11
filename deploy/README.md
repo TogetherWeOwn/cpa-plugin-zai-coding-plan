@@ -10,21 +10,60 @@ This directory records the exact non-secret inputs and checks for the first Z.ai
 - Release workflow run `34490526081` passed the exact-image load check against `eceasy/cli-proxy-api@sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606`.
 - `config.yaml.tmpl` follows `docs/ARCHITECTURE.md`: full-key pairing is rendered only on the host; `zai-coding-plan` is the sole enabled scheduler at priority `1000`.
 
-Run the credential-free checks and build the renderer before opening the operator handoff. Build once in the verified source checkout; deployment copies this fixed local binary to `/usr/local/libexec/cliproxy/render-config`, so the privileged render step never invokes the Go toolchain or network.
+Run the credential-free checks, verify the exact PR head, and stage every artifact that will later be consumed by a privileged command. The checkout itself is not trusted: files are extracted from the pinned commit into a new root-owned directory, and their Git blob IDs are verified before use. Build the renderer from that staged source; the privileged render step never reads the writable checkout, invokes the Go toolchain, or reaches the network.
 
 ```sh
 ./deploy/acceptance_local.py
+expected_deploy_commit=REPLACE_WITH_REVIEWED_PR_HEAD
+staging=/usr/local/libexec/cliproxy/zai-dogfood
+artifacts='config.yaml.tmpl prepare-usage-dir.py remove-usage-output.py render-config.go rollback-delete-policy.py verify-live.sh'
+test "$(git rev-parse HEAD)" = "$expected_deploy_commit"
+test -z "$(git status --porcelain --untracked-files=all)"
+staging_parent=$(dirname "$staging")
+test ! -L "$staging_parent"
+test "$(stat -c %U:%G "$staging_parent")" = root:root
+test "$((8#$(stat -c %a "$staging_parent") & 8#022))" = 0
+staging_tmp=$(mktemp -d --tmpdir="$staging_parent" .zai-dogfood.XXXXXX)
 renderer_build=$(mktemp -d)
-trap 'rm -rf "$renderer_build"' EXIT
+trap 'rm -rf "$staging_tmp" "$renderer_build"' EXIT
+for artifact in $artifacts; do
+  git show "$expected_deploy_commit:deploy/$artifact" >"$staging_tmp/$artifact"
+  test "$(git hash-object "$staging_tmp/$artifact")" = \
+    "$(git rev-parse "$expected_deploy_commit:deploy/$artifact")"
+done
+chmod 0644 "$staging_tmp/config.yaml.tmpl" "$staging_tmp/render-config.go" "$staging_tmp/rollback-delete-policy.py"
+chmod 0755 "$staging_tmp/prepare-usage-dir.py" "$staging_tmp/remove-usage-output.py" "$staging_tmp/verify-live.sh"
 timeout --signal=TERM --kill-after=2s 60s \
   env GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off CGO_ENABLED=0 \
   go build -mod=readonly -buildvcs=false -trimpath \
-    -o "$renderer_build/render-config" ./deploy/render-config.go
-install -D -o root -g root -m 0755 \
-  "$renderer_build/render-config" /usr/local/libexec/cliproxy/render-config
-rm -rf "$renderer_build"
+    -o "$renderer_build/render-config" "$staging_tmp/render-config.go"
+chmod 0644 "$staging_tmp/config.yaml.tmpl"
+chmod 0755 "$staging_tmp/prepare-usage-dir.py" "$staging_tmp/remove-usage-output.py" \
+  "$staging_tmp/rollback-delete-policy.py" "$staging_tmp/verify-live.sh"
+rm "$staging_tmp/render-config.go"
+install -o root -g root -m 0755 \
+  "$renderer_build/render-config" "$staging_tmp/render-config"
+chmod 0755 "$staging_tmp"
+test "$(stat -c %U:%G "$staging_tmp")" = root:root
+test "$((8#$(stat -c %a "$staging_tmp") & 8#022))" = 0
+while IFS= read -r artifact; do
+  test ! -L "$artifact"
+  test "$(stat -c %U:%G "$artifact")" = root:root
+  test "$((8#$(stat -c %a "$artifact") & 8#022))" = 0
+done < <(find "$staging_tmp" -xdev -type f -print)
+if test -e "$staging" || test -L "$staging"; then
+  staging_old="${staging}.old"
+  test ! -e "$staging_old"
+  mv -T "$staging" "$staging_old"
+fi
+mv -T "$staging_tmp" "$staging"
+staging_tmp=
+rm -rf "${staging}.old" "$renderer_build"
+renderer_build=
 trap - EXIT
 ```
+
+Record `expected_deploy_commit` with the operator handoff. The placeholder must never be executed literally.
 
 Verify the exact registry bytes before merging the template into the host config:
 
@@ -46,8 +85,8 @@ The operator card must substitute the deployment's real container/config paths, 
 ```sh
 set -euo pipefail
 umask 077
-repo=/home/ubuntu/cpa-plugin-zai-coding-plan
-renderer=/usr/local/libexec/cliproxy/render-config
+staging=/usr/local/libexec/cliproxy/zai-dogfood
+renderer="$staging/render-config"
 config=/home/ubuntu/cliproxy/config.yaml
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 plan_key_file=/home/ubuntu/secure-drop/zai-coding-plan.key
@@ -81,7 +120,7 @@ test -x "$renderer"
 test "$(stat -c %U:%G:%a "$renderer")" = root:root:755
 ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
 ZAI_CODING_PLAN_KEY_SUFFIX_FILE="$plan_key_suffix_file" \
-  timeout --signal=TERM --kill-after=2s 10s "$renderer" "$config" "$repo/deploy/config.yaml.tmpl" "$candidate"
+  timeout --signal=TERM --kill-after=2s 10s "$renderer" "$config" "$staging/config.yaml.tmpl" "$candidate"
 test -s "$candidate"
 python3 - "$candidate" "$config_dir" <<'PY'
 import os, pathlib, sys
@@ -154,7 +193,7 @@ PY
 usage_dir=/srv/cliproxy-usage
 # This helper accepts only the fixed usage path, opens every ancestor with
 # O_NOFOLLOW, then verifies the pathname still names the secured directory fd.
-python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"
+python3 "$staging/prepare-usage-dir.py" "$usage_dir"
 test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
 ready=0
 for attempt in $(seq 1 20); do
@@ -164,7 +203,7 @@ for attempt in $(seq 1 20); do
     CLIPROXY_USAGE_DIR="$usage_dir" \
     CLIPROXY_DASHBOARD_URL=http://127.0.0.1:3000/api/telemetry/model-usage/zai \
     CLIPROXY_SERVICE_UNIT=cliproxy.service \
-      "$repo/deploy/verify-live.sh"
+      "$staging/verify-live.sh"
   then
     ready=1
     break
@@ -183,7 +222,7 @@ The plugin-store response must report `id=zai-coding-plan`, `version=0.1.0`, `in
 ```sh
 set -euo pipefail
 umask 077
-repo=/home/ubuntu/cpa-plugin-zai-coding-plan
+staging=/usr/local/libexec/cliproxy/zai-dogfood
 config=/home/ubuntu/cliproxy/config.yaml
 backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
@@ -219,7 +258,7 @@ delete_plugin() {
     return 0
   fi
   set +e
-  python3 "$repo/deploy/rollback-delete-policy.py" "$delete_rc" "$delete_status" "$delete_response"
+  python3 "$staging/rollback-delete-policy.py" "$delete_rc" "$delete_status" "$delete_response"
   delete_policy=$?
   set -e
   return "$delete_policy"
@@ -268,9 +307,9 @@ verify_status=$(curl -q --fail-early --max-redirs 0 --silent --show-error \
   --output "$verify_response" --stderr "$verify_error" --write-out '%{http_code}' \
   'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan/config')
 test "$verify_status" = 404
-python3 "$repo/deploy/rollback-delete-policy.py" 0 "$verify_status" "$verify_response"
+python3 "$staging/rollback-delete-policy.py" 0 "$verify_status" "$verify_response"
 systemctl reload cliproxy.service || systemctl restart cliproxy.service
-python3 "$repo/deploy/remove-usage-output.py"
+python3 "$staging/remove-usage-output.py"
 ```
 
 The rollback is complete only after plugin deletion is verified as `plugin_not_found` and the restored configuration has been loaded by the running service. A loaded plugin conflict triggers a restart, a second bounded DELETE, and the same absence verification. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.

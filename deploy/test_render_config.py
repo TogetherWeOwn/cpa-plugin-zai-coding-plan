@@ -38,7 +38,7 @@ class RenderConfigTest(unittest.TestCase):
             key_file.write_text(plan_key + "\n")
             suffix_file.write_text(suffix + "\n")
             base_path.chmod(0o600)
-            overlay_path.chmod(0o600)
+            overlay_path.chmod(0o644)
             candidate.chmod(0o600)
             key_file.chmod(0o600)
             suffix_file.chmod(0o600)
@@ -136,6 +136,39 @@ class RenderConfigTest(unittest.TestCase):
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(rendered, "")
         self.assertIn("could not be read", completed.stderr)
+
+    def test_rejects_overlay_without_exact_trusted_mode_without_rendering_secrets(self):
+        for mode in (0o600, 0o620, 0o602, 0o666):
+            with self.subTest(mode=oct(mode)), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                root.chmod(0o700)
+                base = root / "base.yaml"
+                overlay = root / "overlay.yaml"
+                candidate = root / "candidate.yaml"
+                key = root / "key"
+                suffix = root / "suffix"
+                base.write_text("port: 8317\n")
+                overlay.write_text("value: ${ZAI_CODING_PLAN_KEY}\n")
+                candidate.touch(mode=0o600)
+                key.write_text("fixture-key\n")
+                suffix.write_text("fixture-suffix\n")
+                for path in (base, candidate, key, suffix):
+                    path.chmod(0o600)
+                overlay.chmod(mode)
+                env = os.environ.copy()
+                env.update({"ZAI_CODING_PLAN_KEY_FILE": str(key), "ZAI_CODING_PLAN_KEY_SUFFIX_FILE": str(suffix)})
+                completed = subprocess.run(
+                    [str(self.renderer), str(base), str(overlay), str(candidate)],
+                    cwd=ROOT,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=5,
+                )
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertEqual(candidate.read_text(), "")
+                self.assertIn("mode-0644", completed.stderr)
+                self.assertNotIn("fixture-key", completed.stdout + completed.stderr)
 
     def test_replaces_same_identity_entries_without_duplicates(self):
         pinned_source = "https://raw.githubusercontent.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/5c758c04acbd9367d1c8fff1342bf651847dcac2/registry.json"
