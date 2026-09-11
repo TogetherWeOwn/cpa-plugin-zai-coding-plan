@@ -10,10 +10,20 @@ This directory records the exact non-secret inputs and checks for the first Z.ai
 - Release workflow run `34490526081` passed the exact-image load check against `eceasy/cli-proxy-api@sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606`.
 - `config.yaml.tmpl` follows `docs/ARCHITECTURE.md`: full-key pairing is rendered only on the host; `zai-coding-plan` is the sole enabled scheduler at priority `1000`.
 
-Run the credential-free checks before opening the operator handoff:
+Run the credential-free checks and build the renderer before opening the operator handoff. Build once in the verified source checkout; deployment copies this fixed local binary to `/usr/local/libexec/cliproxy/render-config`, so the privileged render step never invokes the Go toolchain or network.
 
 ```sh
 ./deploy/acceptance_local.py
+renderer_build=$(mktemp -d)
+trap 'rm -rf "$renderer_build"' EXIT
+timeout --signal=TERM --kill-after=2s 60s \
+  env GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off CGO_ENABLED=0 \
+  go build -mod=readonly -buildvcs=false -trimpath \
+    -o "$renderer_build/render-config" ./deploy/render-config.go
+install -D -o root -g root -m 0755 \
+  "$renderer_build/render-config" /usr/local/libexec/cliproxy/render-config
+rm -rf "$renderer_build"
+trap - EXIT
 ```
 
 Verify the exact registry bytes before merging the template into the host config:
@@ -37,6 +47,7 @@ The operator card must substitute the deployment's real container/config paths, 
 set -euo pipefail
 umask 077
 repo=/home/ubuntu/cpa-plugin-zai-coding-plan
+renderer=/usr/local/libexec/cliproxy/render-config
 config=/home/ubuntu/cliproxy/config.yaml
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 plan_key_file=/home/ubuntu/secure-drop/zai-coding-plan.key
@@ -64,9 +75,13 @@ test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
 candidate=$(mktemp --tmpdir="$config_dir" .config.yaml.zai.XXXXXX)
 trap 'rm -f "$curl_config" "$candidate"' EXIT
 chmod 0600 "$candidate"
+test ! -L "$renderer"
+test -f "$renderer"
+test -x "$renderer"
+test "$(stat -c %U:%G:%a "$renderer")" = root:root:755
 ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
 ZAI_CODING_PLAN_KEY_SUFFIX_FILE="$plan_key_suffix_file" \
-  go run "$repo/deploy/render-config.go" "$config" "$repo/deploy/config.yaml.tmpl" "$candidate"
+  timeout --signal=TERM --kill-after=2s 10s "$renderer" "$config" "$repo/deploy/config.yaml.tmpl" "$candidate"
 test -s "$candidate"
 python3 - "$candidate" "$config_dir" <<'PY'
 import os, pathlib, sys
@@ -185,21 +200,39 @@ path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
 PY
-delete_status=$(curl -q --fail-early --max-redirs 0 --silent --show-error \
-  --connect-timeout 2 --max-time 5 --max-filesize 1048576 \
-  --noproxy '*' --proxy '' --config "$curl_config" \
-  --output "$delete_response" --stderr "$delete_error" --write-out '%{http_code}' \
-  -X DELETE \
-  'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan') || delete_rc=$?
-delete_rc=${delete_rc:-0}
-if test "$delete_rc" -ne 0; then
-  printf 'plugin removal request failed (curl exit %s; continuing rollback; response body suppressed)\n' "$delete_rc" >&2
-  if grep -Eq '^curl: \([0-9]+\) (Connection|Could not|Failed|Operation timed out|Maximum file size exceeded|Received HTTP code|The requested URL returned error)[[:print:]]{0,240}$' "$delete_error"; then
-    tr -d '\r\n' <"$delete_error" >&2
-    printf '\n' >&2
+delete_plugin() {
+  : >"$delete_response"
+  : >"$delete_error"
+  delete_rc=0
+  delete_status=$(curl -q --fail-early --max-redirs 0 --silent --show-error \
+    --connect-timeout 2 --max-time 5 --max-filesize 1048576 \
+    --noproxy '*' --proxy '' --config "$curl_config" \
+    --output "$delete_response" --stderr "$delete_error" --write-out '%{http_code}' \
+    -X DELETE \
+    'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan') || delete_rc=$?
+  if test "$delete_rc" -ne 0; then
+    printf 'plugin removal request failed (curl exit %s; continuing rollback; response body suppressed)\n' "$delete_rc" >&2
+    if grep -Eq '^curl: \([0-9]+\) (Connection|Could not|Failed|Operation timed out|Maximum file size exceeded|Received HTTP code|The requested URL returned error)[[:print:]]{0,240}$' "$delete_error"; then
+      tr -d '\r\n' <"$delete_error" >&2
+      printf '\n' >&2
+    fi
+    return 0
   fi
-else
+  set +e
   python3 "$repo/deploy/rollback-delete-policy.py" "$delete_rc" "$delete_status" "$delete_response"
+  delete_policy=$?
+  set -e
+  return "$delete_policy"
+}
+restart_for_delete=0
+if delete_plugin; then
+  :
+else
+  delete_policy=$?
+  if test "$delete_policy" -ne 10; then
+    exit "$delete_policy"
+  fi
+  restart_for_delete=1
 fi
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"
@@ -222,11 +255,25 @@ try:
 finally:
     os.close(directory_fd)
 PY
+if test "$restart_for_delete" -eq 1; then
+  systemctl restart cliproxy.service
+  delete_plugin
+fi
+verify_response=$(mktemp)
+verify_error=$(mktemp)
+trap 'rm -f "$curl_config" "$delete_response" "$delete_error" "$verify_response" "$verify_error"' EXIT
+verify_status=$(curl -q --fail-early --max-redirs 0 --silent --show-error \
+  --connect-timeout 2 --max-time 5 --max-filesize 1048576 \
+  --noproxy '*' --proxy '' --config "$curl_config" \
+  --output "$verify_response" --stderr "$verify_error" --write-out '%{http_code}' \
+  'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan/config')
+test "$verify_status" = 404
+python3 "$repo/deploy/rollback-delete-policy.py" 0 "$verify_status" "$verify_response"
 systemctl reload cliproxy.service || systemctl restart cliproxy.service
 python3 "$repo/deploy/remove-usage-output.py"
 ```
 
-The rollback is complete only after the restored configuration has been loaded by the running service. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.
+The rollback is complete only after plugin deletion is verified as `plugin_not_found` and the restored configuration has been loaded by the running service. A loaded plugin conflict triggers a restart, a second bounded DELETE, and the same absence verification. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.
 
 ## Evidence and redaction
 

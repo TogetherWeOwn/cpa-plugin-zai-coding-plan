@@ -24,13 +24,25 @@ class RollbackDeletePolicyTest(unittest.TestCase):
             (0, 204, ""),
             (0, 404, '{"error":"plugin_not_found"}'),
             (7, 0, ""),
-            (0, 503, "upstream unavailable"),
+            (0, 503, '{"error":"upstream_unavailable"}'),
         ):
             with self.subTest(curl_exit=curl_exit, status=status):
                 completed = self.run_policy(curl_exit, status, body)
                 self.assertEqual(completed.returncode, 0, completed.stderr)
                 if body:
                     self.assertNotIn(body, completed.stdout + completed.stderr)
+
+    def test_requests_restart_and_retry_for_loaded_plugin_conflict(self):
+        body = '{"error":"plugin_delete_requires_restart","restart_required":true}'
+        completed = self.run_policy(0, 409, body)
+        self.assertEqual(completed.returncode, 10, completed.stderr)
+        self.assertNotIn(body, completed.stdout + completed.stderr)
+
+    def test_does_not_request_restart_for_unrelated_conflict(self):
+        body = '{"error":"another_conflict","secret":"fixture-management-marker"}'
+        completed = self.run_policy(0, 409, body)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
 
     def test_rejects_unexpected_404_without_printing_body(self):
         body = '{"error":"permission_denied","secret":"fixture-management-marker"}'

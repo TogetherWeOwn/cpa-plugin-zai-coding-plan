@@ -7,6 +7,7 @@ import pathlib
 import stat
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -177,6 +178,62 @@ class CollectorZaiTest(unittest.TestCase):
             seen,
             [("/v0/management/plugins/zai-coding-plan/status", "Bearer fixture-management-marker")],
         )
+
+    def test_rejects_nonpositive_or_nonfinite_request_deadlines(self):
+        origin = "http://127.0.0.1:1"
+        url = origin + "/v0/management/plugins/zai-coding-plan/status"
+        for timeout in (0, -1, math.nan, math.inf, -math.inf):
+            with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "positive finite"):
+                collector.fetch_status(url, "fixture-management-marker", timeout, (origin,))
+
+    def test_rejects_preexisting_process_alarm(self):
+        origin = "http://127.0.0.1:1"
+        url = origin + "/v0/management/plugins/zai-coding-plan/status"
+        with mock.patch.object(collector.signal, "getsignal", return_value=lambda *_args: None):
+            with self.assertRaisesRegex(ValueError, "unused process alarm"):
+                collector.fetch_status(url, "fixture-management-marker", 1, (origin,))
+        with mock.patch.object(collector.signal, "getitimer", return_value=(1.0, 0.0)):
+            with self.assertRaisesRegex(ValueError, "unused process alarm"):
+                collector.fetch_status(url, "fixture-management-marker", 1, (origin,))
+
+    def test_drip_response_exceeds_wall_clock_deadline(self):
+        payload = json.dumps(self.fixture("status-authoritative.json")).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                for byte in payload:
+                    try:
+                        self.wfile.write(bytes((byte,)))
+                        self.wfile.flush()
+                    except BrokenPipeError:
+                        return
+                    time.sleep(0.02)
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        origin = f"http://127.0.0.1:{server.server_port}"
+        started = time.monotonic()
+        try:
+            with self.assertRaisesRegex(ValueError, "wall-clock deadline"):
+                collector.fetch_status(
+                    f"{origin}/v0/management/plugins/zai-coding-plan/status",
+                    "fixture-management-marker",
+                    0.15,
+                    (origin,),
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+        elapsed = time.monotonic() - started
+        thread.join(timeout=1)
+        self.assertLess(elapsed, 1.0)
 
     def trusted_output(self, root):
         parent = root / "srv" / "cliproxy-usage"

@@ -21,16 +21,18 @@ def main() -> int:
         return 0
     if 200 <= http_status < 300:
         return 0
+    try:
+        raw = response_path.read_bytes()
+        if len(raw) > 1_048_576:
+            raise ValueError
+        response = json.loads(raw) if raw else {}
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        raise ValueError(f"plugin removal returned an unexpected {http_status} response")
+    if http_status == 404 and isinstance(response, dict) and response.get("error") == "plugin_not_found":
+        return 0
+    if http_status == 409 and isinstance(response, dict) and response.get("error") == "plugin_delete_requires_restart":
+        return 10
     if http_status == 404:
-        try:
-            raw = response_path.read_bytes()
-            if len(raw) > 1_048_576:
-                raise ValueError
-            response = json.loads(raw)
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
-            raise ValueError("plugin removal returned an unexpected 404 response")
-        if isinstance(response, dict) and response.get("error") == "plugin_not_found":
-            return 0
         raise ValueError("plugin removal returned an unexpected 404 response")
     print(f"rollback-delete: HTTP {http_status}; continuing rollback", file=sys.stderr)
     return 0

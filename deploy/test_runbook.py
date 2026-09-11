@@ -31,14 +31,27 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn('test -s "$registry"', registry)
         self.assertEqual(hashlib.sha256(REGISTRY.read_bytes()).hexdigest(), PINNED_DIGEST)
 
-    def test_config_replacement_is_rendered_validated_same_directory_fsynced_and_atomic(self):
+    def test_config_replacement_uses_built_bounded_renderer_and_atomic_replace(self):
         install = README.read_text().split("## Exact host install and validation", 1)[1].split("## Rollback", 1)[0]
+        preflight = README.read_text().split("Run the credential-free checks", 1)[1].split("Verify the exact registry bytes", 1)[0]
         renderer = (ROOT / "deploy" / "render-config.go").read_text()
+        self.assertIn("renderer_build=$(mktemp -d)", preflight)
+        self.assertIn("timeout --signal=TERM --kill-after=2s 60s", preflight)
+        for setting in ("GOTOOLCHAIN=local", "GOPROXY=off", "GOSUMDB=off", "CGO_ENABLED=0", "-mod=readonly"):
+            self.assertIn(setting, preflight)
+        self.assertIn('go build -mod=readonly -buildvcs=false -trimpath', preflight)
+        self.assertIn('"$renderer_build/render-config" /usr/local/libexec/cliproxy/render-config', preflight)
+        self.assertNotIn("go run", install)
+        self.assertIn('test ! -L "$renderer"', install)
+        self.assertIn('test -f "$renderer"', install)
+        self.assertIn('test -x "$renderer"', install)
+        self.assertIn('test "$(stat -c %U:%G:%a "$renderer")" = root:root:755', install)
+        self.assertIn('timeout --signal=TERM --kill-after=2s 10s "$renderer"', install)
         self.assertIn('mktemp --tmpdir="$config_dir"', install)
-        self.assertIn('go run "$repo/deploy/render-config.go" "$config" "$repo/deploy/config.yaml.tmpl" "$candidate"', install)
         self.assertIn('test -s "$candidate"', install)
-        self.assertIn("yaml.NewDecoder", renderer)
-        self.assertIn("must contain exactly one YAML document", renderer)
+        self.assertIn("unix.Openat", renderer)
+        self.assertIn("unix.O_NOFOLLOW", renderer)
+        self.assertIn("must share one directory", renderer)
         self.assertIn("os.fsync(handle.fileno())", install)
         self.assertIn('mv -T "$candidate" "$config"', install)
         self.assertIn("os.fsync(directory_fd)", install)
@@ -94,7 +107,7 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertNotIn("chmod", install)
         self.assertNotIn("chown", install)
 
-    def test_rollback_delete_is_bounded_and_suppresses_response_body(self):
+    def test_rollback_delete_restarts_retries_and_verifies_removal(self):
         rollback = README.read_text().split("## Rollback", 1)[1]
         delete = rollback.split("config_dir=", 1)[0]
         for option in (
@@ -115,9 +128,14 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn("continuing rollback", delete)
         self.assertIn('python3 "$repo/deploy/rollback-delete-policy.py"', delete)
         policy = (ROOT / "deploy" / "rollback-delete-policy.py").read_text()
-        self.assertIn('http_status == 404', policy)
         self.assertIn('response.get("error") == "plugin_not_found"', policy)
-        self.assertLess(delete.index("continuing rollback"), rollback.index("config_dir="))
+        self.assertIn('response.get("error") == "plugin_delete_requires_restart"', policy)
+        self.assertIn("return 10", policy)
+        self.assertIn('systemctl restart cliproxy.service\n  delete_plugin', rollback)
+        self.assertGreaterEqual(rollback.count("delete_plugin"), 3)
+        self.assertIn("/v0/management/plugins/zai-coding-plan/config", rollback)
+        self.assertIn('test "$verify_status" = 404', rollback)
+        self.assertIn('rollback-delete-policy.py" 0 "$verify_status"', rollback)
         self.assertIn("umask 077", rollback)
         self.assertRegex(delete, r"grep -Eq '[^']+' \"\$delete_error\"")
 

@@ -8,8 +8,11 @@ import math
 import os
 import pathlib
 import re
+import signal
 import stat
 import sys
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -250,23 +253,47 @@ def load_json_strict(raw: bytes) -> Any:
 
 def fetch_status(url: str, management_key: str, timeout: float, allowed_origins: tuple[str, ...] = DEFAULT_ALLOWED_ORIGINS) -> Any:
     validate_management_url(url, allowed_origins)
+    if not math.isfinite(timeout) or timeout <= 0:
+        fail("status endpoint timeout must be a positive finite number")
+    if threading.current_thread() is not threading.main_thread():
+        fail("status endpoint request must run on the main thread")
+    if signal.getsignal(signal.SIGALRM) != signal.SIG_DFL or signal.getitimer(signal.ITIMER_REAL) != (0.0, 0.0):
+        fail("status endpoint request requires an unused process alarm")
     request = urllib.request.Request(
         url,
         method="GET",
         headers={"Accept": "application/json", "Authorization": f"Bearer {management_key}"},
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirectHandler())
+
+    class RequestDeadlineExceeded(Exception):
+        pass
+
+    def deadline_exceeded(_signum, _frame):
+        raise RequestDeadlineExceeded
+
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    signal.signal(signal.SIGALRM, deadline_exceeded)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
-        with opener.open(request, timeout=timeout) as response:
-            if response.status != 200:
-                fail(f"status endpoint returned HTTP {response.status}")
-            raw = response.read(1_048_577)
-    except urllib.error.HTTPError as error:
-        if 300 <= error.code < 400:
-            fail("status endpoint redirect rejected")
-        fail(f"status endpoint returned HTTP {error.code}")
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-        fail("status endpoint request failed")
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                if response.status != 200:
+                    fail(f"status endpoint returned HTTP {response.status}")
+                raw = response.read(1_048_577)
+        except RequestDeadlineExceeded:
+            fail("status endpoint request exceeded its wall-clock deadline")
+        except urllib.error.HTTPError as error:
+            if 300 <= error.code < 400:
+                fail("status endpoint redirect rejected")
+            fail(f"status endpoint returned HTTP {error.code}")
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            fail("status endpoint request failed")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer != (0.0, 0.0):
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
     if len(raw) > 1_048_576:
         fail("status endpoint response exceeded 1 MiB")
     return load_json_strict(raw)
