@@ -35,6 +35,7 @@ class RunbookSecurityTest(unittest.TestCase):
         install = README.read_text().split("## Exact host install and validation", 1)[1].split("## Rollback", 1)[0]
         preflight = README.read_text().split("Run the credential-free checks", 1)[1].split("Verify the exact registry bytes", 1)[0]
         renderer = (ROOT / "deploy" / "render-config.go").read_text()
+        self.assertRegex(preflight, r"```bash\s+set -euo pipefail\s+\./deploy/acceptance_local\.py")
         self.assertIn("renderer_build=$(mktemp -d)", preflight)
         self.assertIn("expected_deploy_commit=REPLACE_WITH_REVIEWED_PR_HEAD", preflight)
         self.assertIn('test "$(git rev-parse HEAD)" = "$expected_deploy_commit"', preflight)

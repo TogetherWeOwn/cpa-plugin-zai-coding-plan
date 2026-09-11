@@ -12,7 +12,8 @@ This directory records the exact non-secret inputs and checks for the first Z.ai
 
 Run the credential-free checks, verify the exact PR head, and stage every artifact that will later be consumed by a privileged command. The checkout itself is not trusted: files are extracted from the pinned commit into a new root-owned directory, and their Git blob IDs are verified before use. Build the renderer from that staged source; the privileged render step never reads the writable checkout, invokes the Go toolchain, or reaches the network.
 
-```sh
+```bash
+set -euo pipefail
 ./deploy/acceptance_local.py
 expected_deploy_commit=REPLACE_WITH_REVIEWED_PR_HEAD
 staging=/usr/local/libexec/cliproxy/zai-dogfood
