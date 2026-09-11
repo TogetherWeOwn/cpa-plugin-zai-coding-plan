@@ -17,7 +17,7 @@ set -euo pipefail
 ./deploy/acceptance_local.py
 expected_deploy_commit=REPLACE_WITH_REVIEWED_PR_HEAD
 staging=/usr/local/libexec/cliproxy/zai-dogfood
-artifacts='config.yaml.tmpl prepare-usage-dir.py remove-usage-output.py render-config.go rollback-delete-policy.py verify-live.sh'
+artifacts='collector-zai.py config.yaml.tmpl prepare-usage-dir.py remove-usage-output.py render-config.go rollback-delete-policy.py verify-live.sh'
 actual_deploy_commit=$(git rev-parse HEAD)
 test "$actual_deploy_commit" = "$expected_deploy_commit"
 working_tree_status=$(git status --porcelain --untracked-files=all)
@@ -38,14 +38,16 @@ for artifact in $artifacts; do
   test "$staged_blob" = "$expected_blob"
 done
 chmod 0644 "$staging_tmp/config.yaml.tmpl" "$staging_tmp/render-config.go" "$staging_tmp/rollback-delete-policy.py"
-chmod 0755 "$staging_tmp/prepare-usage-dir.py" "$staging_tmp/remove-usage-output.py" "$staging_tmp/verify-live.sh"
+chmod 0755 "$staging_tmp/collector-zai.py" "$staging_tmp/prepare-usage-dir.py" \
+  "$staging_tmp/remove-usage-output.py" "$staging_tmp/verify-live.sh"
 timeout --signal=TERM --kill-after=2s 60s \
   env GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off CGO_ENABLED=0 \
   go build -mod=readonly -buildvcs=false -trimpath \
     -o "$renderer_build/render-config" "$staging_tmp/render-config.go"
 chmod 0644 "$staging_tmp/config.yaml.tmpl"
-chmod 0755 "$staging_tmp/prepare-usage-dir.py" "$staging_tmp/remove-usage-output.py" \
-  "$staging_tmp/rollback-delete-policy.py" "$staging_tmp/verify-live.sh"
+chmod 0755 "$staging_tmp/collector-zai.py" "$staging_tmp/prepare-usage-dir.py" \
+  "$staging_tmp/remove-usage-output.py" "$staging_tmp/rollback-delete-policy.py" \
+  "$staging_tmp/verify-live.sh"
 rm "$staging_tmp/render-config.go"
 install -o root -g root -m 0755 \
   "$renderer_build/render-config" "$staging_tmp/render-config"
@@ -64,14 +66,31 @@ while IFS= read -r artifact; do
   test "$((8#$artifact_mode & 8#022))" = 0
 done <"$artifact_list"
 rm -f "$artifact_list"
+staging_old=
 if test -e "$staging" || test -L "$staging"; then
   staging_old="${staging}.old"
   test ! -e "$staging_old"
+  test ! -L "$staging_old"
   mv -T "$staging" "$staging_old"
 fi
-mv -T "$staging_tmp" "$staging"
+# Publish, and restore the previous staging tree if the rename fails, so a failed
+# publication never leaves the host without a staged toolset.
+publish_rc=0
+mv -T "$staging_tmp" "$staging" || publish_rc=$?
+if test "$publish_rc" -ne 0; then
+  if test -n "$staging_old"; then
+    mv -T "$staging_old" "$staging"
+    staging_old=
+  fi
+  printf 'staging publication failed (mv exit %s); previous staging restored\n' "$publish_rc" >&2
+  exit "$publish_rc"
+fi
 staging_tmp=
-rm -rf "${staging}.old" "$renderer_build"
+if test -n "$staging_old"; then
+  rm -rf "$staging_old"
+  staging_old=
+fi
+rm -rf "$renderer_build"
 renderer_build=
 trap - EXIT
 ```
@@ -104,13 +123,48 @@ config=/home/ubuntu/cliproxy/config.yaml
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 plan_key_file=/home/ubuntu/secure-drop/zai-coding-plan.key
 plan_key_suffix_file=/home/ubuntu/secure-drop/zai-coding-plan.key-suffix
+# Validate the config directory and the config file itself BEFORE writing any backup, so a
+# symlinked or attacker-controlled directory can never redirect the backup copy.
+config_dir=$(dirname "$config")
+test ! -L "$config_dir"
+test -d "$config_dir"
+test "$(stat -c %U:%G "$config_dir")" = root:root
+test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
+test ! -L "$config"
+test -f "$config"
 backup="${config}.pre-zai-$(date -u +%Y%m%dT%H%M%SZ)"
-cp -a "$config" "$backup"
+test ! -e "$backup"
+test ! -L "$backup"
+cp -a --no-clobber "$config" "$backup"
+test -f "$backup"
 curl_config=$(mktemp)
 trap 'rm -f "$curl_config"' EXIT
 python3 - "$management_key_file" "$curl_config" <<'PY'
-import pathlib, sys
-key=pathlib.Path(sys.argv[1]).read_text().strip()
+import os, pathlib, stat, sys
+MAX_SECRET_BYTES = 65536
+# O_NOFOLLOW + fstat on the held descriptor: the bytes read are the bytes whose type,
+# owner, mode, and size were checked, so no pathname substitution can apply between them.
+fd=os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+try:
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit("management key file must be a regular file")
+    if info.st_uid != os.geteuid():
+        raise SystemExit("management key file must be owned by the effective user")
+    if info.st_mode & 0o077:
+        raise SystemExit("management key file must not be group- or world-accessible")
+    if info.st_size > MAX_SECRET_BYTES:
+        raise SystemExit("management key file exceeds the bounded size")
+    with os.fdopen(os.dup(fd), "rb") as handle:
+        raw=handle.read(MAX_SECRET_BYTES + 1)
+finally:
+    os.close(fd)
+if len(raw) > MAX_SECRET_BYTES:
+    raise SystemExit("management key file exceeds the bounded size")
+try:
+    key=raw.decode("utf-8").strip()
+except UnicodeDecodeError:
+    raise SystemExit("management key file must contain valid UTF-8")
 if not key or "\n" in key or "\r" in key:
     raise SystemExit("management key file must contain one non-empty line")
 path=pathlib.Path(sys.argv[2])
@@ -119,11 +173,8 @@ path.chmod(0o600)
 PY
 
 # Render the complete candidate config without printing credential values, then replace
-# config.yaml durably from the same directory. Never rename across filesystems.
-config_dir=$(dirname "$config")
-test ! -L "$config_dir"
-test "$(stat -c %U:%G "$config_dir")" = root:root
-test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
+# config.yaml durably from the same directory. Never rename across filesystems. The
+# directory was already validated above, before the backup was written.
 candidate=$(mktemp --tmpdir="$config_dir" .config.yaml.zai.XXXXXX)
 trap 'rm -f "$curl_config" "$candidate"' EXIT
 chmod 0600 "$candidate"
@@ -244,8 +295,31 @@ delete_response=$(mktemp)
 delete_error=$(mktemp)
 trap 'rm -f "$curl_config" "$delete_response" "$delete_error"' EXIT
 python3 - "$management_key_file" "$curl_config" <<'PY'
-import pathlib, sys
-key=pathlib.Path(sys.argv[1]).read_text().strip()
+import os, pathlib, stat, sys
+MAX_SECRET_BYTES = 65536
+# O_NOFOLLOW + fstat on the held descriptor: the bytes read are the bytes whose type,
+# owner, mode, and size were checked, so no pathname substitution can apply between them.
+fd=os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+try:
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode):
+        raise SystemExit("management key file must be a regular file")
+    if info.st_uid != os.geteuid():
+        raise SystemExit("management key file must be owned by the effective user")
+    if info.st_mode & 0o077:
+        raise SystemExit("management key file must not be group- or world-accessible")
+    if info.st_size > MAX_SECRET_BYTES:
+        raise SystemExit("management key file exceeds the bounded size")
+    with os.fdopen(os.dup(fd), "rb") as handle:
+        raw=handle.read(MAX_SECRET_BYTES + 1)
+finally:
+    os.close(fd)
+if len(raw) > MAX_SECRET_BYTES:
+    raise SystemExit("management key file exceeds the bounded size")
+try:
+    key=raw.decode("utf-8").strip()
+except UnicodeDecodeError:
+    raise SystemExit("management key file must contain valid UTF-8")
 if not key or "\n" in key or "\r" in key:
     raise SystemExit("management key file must contain one non-empty line")
 path=pathlib.Path(sys.argv[2])
@@ -288,7 +362,11 @@ else
 fi
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"
+test -d "$config_dir"
 test "$(stat -c %U:%G "$config_dir")" = root:root
+test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
+test ! -L "$backup"
+test -f "$backup"
 restored=$(mktemp --tmpdir="$config_dir" .config.yaml.rollback.XXXXXX)
 trap 'rm -f "$curl_config" "$restored"' EXIT
 install -m 0600 "$backup" "$restored"
@@ -307,9 +385,14 @@ try:
 finally:
     os.close(directory_fd)
 PY
+# Load the restored configuration immediately, before deletion verification. If any later
+# check fails and exits, the service is already running the pre-Z.ai config rather than the
+# rollback-time one. A pending restart for deletion subsumes this reload.
 if test "$restart_for_delete" -eq 1; then
   systemctl restart cliproxy.service
   delete_plugin
+else
+  systemctl reload cliproxy.service || systemctl restart cliproxy.service
 fi
 verify_response=$(mktemp)
 verify_error=$(mktemp)
@@ -321,11 +404,10 @@ verify_status=$(curl -q --fail-early --max-redirs 0 --silent --show-error \
   'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan/config')
 test "$verify_status" = 404
 python3 "$staging/rollback-delete-policy.py" 0 "$verify_status" "$verify_response"
-systemctl reload cliproxy.service || systemctl restart cliproxy.service
 python3 "$staging/remove-usage-output.py"
 ```
 
-The rollback is complete only after plugin deletion is verified as `plugin_not_found` and the restored configuration has been loaded by the running service. A loaded plugin conflict triggers a restart, a second bounded DELETE, and the same absence verification. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.
+The rollback is complete only after plugin deletion is verified as `plugin_not_found` and the restored configuration has been loaded by the running service. The restored config is loaded immediately after it is renamed into place and before deletion is verified, so a failure in the verification step still leaves the service running the pre-Z.ai configuration. A loaded plugin conflict triggers a restart, a second bounded DELETE, and the same absence verification; that restart is what loads the restored config in this path. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.
 
 ## Evidence and redaction
 

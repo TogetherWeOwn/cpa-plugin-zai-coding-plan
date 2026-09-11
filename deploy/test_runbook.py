@@ -273,6 +273,213 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn("ZAI_CODING_PLAN_KEY_FILE=", text)
         self.assertRegex(text, re.escape("dashboard") + ".*" + re.escape("service-log"))
 
+    def test_staging_stages_every_artifact_verify_live_executes(self):
+        """verify-live.sh runs the collector from its own directory, so the collector must
+        be staged alongside it or the privileged readiness loop invokes a missing file."""
+        preflight = staging_recipe()
+        verify_live = (ROOT / "deploy" / "verify-live.sh").read_text()
+        artifacts = re.search(r"^artifacts='([^']+)'", preflight, re.M)
+        self.assertIsNotNone(artifacts, "staging recipe must declare an artifacts list")
+        staged = set(artifacts.group(1).split())
+
+        referenced = set(re.findall(r'\$\(dirname "\$0"\)/([A-Za-z0-9_.-]+)', verify_live))
+        self.assertIn("collector-zai.py", referenced)
+        self.assertTrue(
+            referenced <= staged,
+            f"verify-live.sh executes unstaged sibling files: {sorted(referenced - staged)}",
+        )
+
+        for artifact in sorted(staged):
+            self.assertTrue(
+                (ROOT / "deploy" / artifact).is_file(),
+                f"staged artifact {artifact} does not exist in deploy/",
+            )
+        # Anything the runbook invokes out of the staging directory must also be staged.
+        for referenced_staging in set(re.findall(r'"\$staging/([A-Za-z0-9_.-]+)"', README.read_text())):
+            if referenced_staging == "render-config":
+                continue  # built from the staged render-config.go
+            self.assertIn(referenced_staging, staged)
+
+    def test_collector_is_staged_executable_and_not_removed_before_publication(self):
+        preflight = staging_recipe()
+        self.assertIn('"$staging_tmp/collector-zai.py"', preflight)
+        collector_chmods = re.findall(r"^chmod (\d+) ([^\n]*)$", preflight, re.M)
+        modes = [mode for mode, targets in collector_chmods if "collector-zai.py" in targets]
+        self.assertTrue(modes, "collector-zai.py must receive an explicit mode")
+        for mode in modes:
+            self.assertEqual(mode, "0755")
+        # Only the Go source is removed after the renderer is built.
+        self.assertIn('rm "$staging_tmp/render-config.go"', preflight)
+        self.assertNotIn('rm "$staging_tmp/collector-zai.py"', preflight)
+
+    def test_backup_is_written_only_after_config_directory_validation(self):
+        install = README.read_text().split("## Exact host install and validation", 1)[1].split("## Rollback", 1)[0]
+        backup_at = install.index('cp -a --no-clobber "$config" "$backup"')
+        for guard in (
+            'config_dir=$(dirname "$config")',
+            'test ! -L "$config_dir"',
+            'test "$(stat -c %U:%G "$config_dir")" = root:root',
+            'test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0',
+            'test ! -L "$config"',
+            'test -f "$config"',
+        ):
+            self.assertIn(guard, install)
+            self.assertLess(
+                install.index(guard),
+                backup_at,
+                f"{guard!r} must be checked before the backup is written",
+            )
+        self.assertIn('test ! -e "$backup"', install)
+        self.assertIn('test ! -L "$backup"', install)
+        # The directory must not be re-derived after validation.
+        self.assertEqual(install.count('config_dir=$(dirname "$config")'), 1)
+
+    def test_rollback_loads_restored_config_before_deletion_verification(self):
+        rollback = README.read_text().split("## Rollback", 1)[1]
+        restore_at = rollback.index('mv -T "$restored" "$config"')
+        reload_at = rollback.index("systemctl reload cliproxy.service || systemctl restart cliproxy.service")
+        verify_at = rollback.index('test "$verify_status" = 404')
+        self.assertLess(restore_at, reload_at, "restore must precede the reload")
+        self.assertLess(
+            reload_at,
+            verify_at,
+            "the restored config must be loaded before deletion verification can exit non-zero",
+        )
+        # The restart branch subsumes the reload; both paths load the restored config.
+        self.assertIn(
+            'systemctl restart cliproxy.service\n  delete_plugin\nelse\n  systemctl reload cliproxy.service',
+            rollback,
+        )
+        restart_at = rollback.index("systemctl restart cliproxy.service\n  delete_plugin")
+        self.assertLess(restore_at, restart_at, "restore must precede the delete restart")
+        self.assertIn('test ! -L "$backup"', rollback)
+        self.assertIn('test -f "$backup"', rollback)
+
+    def test_privileged_key_reads_are_descriptor_relative_and_bounded(self):
+        """Both privileged blocks read the management key; neither may read it by pathname,
+        or a writable-ancestor swap between validation and read substitutes the bytes."""
+        text = README.read_text()
+        self.assertNotIn("pathlib.Path(sys.argv[1]).read_text().strip()", text)
+        self.assertEqual(text.count("os.O_NOFOLLOW"), 2)
+        self.assertEqual(text.count("os.fstat(fd)"), 2)
+        for guard in (
+            "must be a regular file",
+            "must be owned by the effective user",
+            "must not be group- or world-accessible",
+        ):
+            self.assertEqual(text.count(guard), 2, f"{guard!r} must guard both key reads")
+        # Each block bounds the size twice: once from fstat, once on the bytes read.
+        self.assertEqual(text.count("exceeds the bounded size"), 4)
+        self.assertEqual(text.count("MAX_SECRET_BYTES = 65536"), 2)
+
+    def test_ci_runs_deployment_regressions_and_acceptance(self):
+        """The deployment Python suites are the only executable proof of the privileged
+        runbook; CI must run them or a regression reaches main unchallenged."""
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+        quality = workflow.split("quality:", 1)[1].split("\n  build:", 1)[0]
+        self.assertIn("python3 -m unittest discover -s deploy -p 'test_*.py'", quality)
+        self.assertIn("./deploy/acceptance_local.py", quality)
+        # They must run on pull_request, which is where PR #21 is gated.
+        self.assertIn("pull_request:", workflow.split("jobs:", 1)[0])
+        # Deployment regressions must run before the release/packaging steps that assume them.
+        self.assertLess(
+            quality.index("python3 -m unittest discover -s deploy"),
+            quality.index("make test-release"),
+        )
+
+    def test_staging_publication_restores_previous_tree_when_rename_fails(self):
+        """If the final publication rename fails, the prior staging tree must be put back
+        so the host is never left with no staged toolset."""
+        commands = ("git", "stat", "find", "timeout", "go", "install", "mv")
+        script = staging_recipe().replace("./deploy/acceptance_local.py", ":")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            staging_parent = root / "libexec"
+            staging_parent.mkdir()
+            published = staging_parent / "zai-dogfood"
+            published.mkdir()
+            sentinel = published / "previous-marker"
+            sentinel.write_text("previous staging tree\n")
+            trace = root / "trace"
+
+            for command in commands:
+                (bin_dir / command).symlink_to("dispatcher")
+            dispatcher = bin_dir / "dispatcher"
+            dispatcher.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/bin/sh
+                    set -eu
+                    command_name=$(basename "$0")
+                    printf '%s %s\\n' "$command_name" "$*" >>"$TRACE"
+                    case "$command_name:$*" in
+                      "git:rev-parse HEAD") printf '%s\\n' REPLACE_WITH_REVIEWED_PR_HEAD ;;
+                      "git:status --porcelain --untracked-files=all") : ;;
+                      "git:show "*) printf 'artifact\\n' ;;
+                      "git:hash-object "*) printf 'blob\\n' ;;
+                      "git:rev-parse REPLACE_WITH_REVIEWED_PR_HEAD:deploy/"*) printf 'blob\\n' ;;
+                      "stat:-c %U:%G "*) printf 'root:root\\n' ;;
+                      "stat:-c %a "*) printf '755\\n' ;;
+                      "find:"*) command /usr/bin/find "$@" ;;
+                      "timeout:"*)
+                        output=
+                        previous=
+                        for argument in "$@"; do
+                          if test "$previous" = "-o"; then output=$argument; fi
+                          previous=$argument
+                        done
+                        test -n "$output"
+                        : >"$output"
+                        ;;
+                      "go:"*) : ;;
+                      "install:"*)
+                        destination=
+                        for argument in "$@"; do destination=$argument; done
+                        : >"$destination"
+                        ;;
+                      "mv:"*)
+                        # Fail only the publication rename, whose source is the staging
+                        # temp dir. The archive and restore renames must still work, or
+                        # the recipe could not demonstrate a restore at all.
+                        source=
+                        target=
+                        for argument in "$@"; do
+                          source=$target
+                          target=$argument
+                        done
+                        case "$source" in
+                          *.zai-dogfood.*) exit 57 ;;
+                          *) command /bin/mv "$@" ;;
+                        esac
+                        ;;
+                    esac
+                    """
+                )
+            )
+            dispatcher.chmod(0o755)
+            wrapper = root / "run.sh"
+            wrapper.write_text(
+                script.replace(
+                    "staging=/usr/local/libexec/cliproxy/zai-dogfood",
+                    f"staging={shlex.quote(str(published))}",
+                )
+            )
+            env = os.environ.copy()
+            env.update({"PATH": f"{bin_dir}:/usr/bin:/bin", "TRACE": str(trace)})
+            completed = subprocess.run(["bash", str(wrapper)], cwd=ROOT, env=env, text=True, capture_output=True)
+            command_trace = trace.read_text() if trace.exists() else "no trace"
+            context = completed.stdout + completed.stderr + command_trace
+
+            self.assertEqual(completed.returncode, 57, context)
+            self.assertIn("staging publication failed", completed.stderr, context)
+            # The previous staging tree is back at the published path, not left as .old.
+            self.assertTrue(published.is_dir(), context)
+            self.assertEqual(sentinel.read_text(), "previous staging tree\n", context)
+            self.assertFalse(pathlib.Path(f"{published}.old").exists(), context)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,10 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test -race ./...
+      - name: Test deployment regressions
+        run: python3 -m unittest discover -s deploy -p 'test_*.py' -v
+      - name: Test deployment acceptance
+        run: ./deploy/acceptance_local.py
       - name: Test release validation
         run: make test-release
       - name: Validate release source

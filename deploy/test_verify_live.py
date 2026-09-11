@@ -33,6 +33,7 @@ class VerifyLiveTest(unittest.TestCase):
         status_state="registered",
         status_validation_error=None,
         collector_invocations=None,
+        secret_setup=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -43,6 +44,11 @@ class VerifyLiveTest(unittest.TestCase):
             plan_file = root / "plan.key"
             management_file.write_text("fixture-management-marker\n")
             plan_file.write_text("fixture-plan-marker\n")
+            # verify-live.sh requires secret files to be regular, owner-only, and bounded.
+            management_file.chmod(0o600)
+            plan_file.chmod(0o600)
+            if secret_setup is not None:
+                secret_setup(root, management_file, plan_file)
             curl_log = root / "curl-argv.log"
             self.write_executable(
                 bin_dir / "curl",
@@ -299,6 +305,95 @@ class VerifyLiveTest(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertNotIn("fixture-plan-marker", completed.stdout + completed.stderr)
                 self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
+
+    def test_dashboard_curl_is_time_size_and_proxy_bounded(self):
+        """The dashboard fetch must not honour ambient proxy variables; otherwise the
+        authenticated lane is loopback-bound but the dashboard scan is not."""
+        completed, curl_argv = self.run_verify()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        invocations = [
+            part
+            for part in curl_argv.split("---\n")
+            if "dashboard" in part and "%{http_code}" not in part
+        ]
+        self.assertEqual(len(invocations), 1, curl_argv)
+        args = invocations[0].splitlines()
+        self.assertEqual(args[0], "-q")
+        self.assertIn("--noproxy\n*", invocations[0])
+        self.assertIn("--proxy\n", invocations[0])
+        self.assertIn("--connect-timeout\n2", invocations[0])
+        self.assertIn("--max-time\n5", invocations[0])
+        self.assertIn("--max-filesize\n1048576", invocations[0])
+        self.assertIn("--max-redirs\n0", invocations[0])
+
+    def test_every_curl_invocation_suppresses_ambient_proxy(self):
+        completed, curl_argv = self.run_verify()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        invocations = [part for part in curl_argv.split("---\n") if part.strip()]
+        self.assertEqual(len(invocations), 3, curl_argv)
+        for invocation in invocations:
+            self.assertIn("--noproxy\n*", invocation)
+            self.assertIn("--proxy\n", invocation)
+            self.assertIn("--connect-timeout\n2", invocation)
+            self.assertIn("--max-redirs\n0", invocation)
+
+    def test_rejects_symlinked_secret_file_before_any_request(self):
+        def setup(root, management_file, plan_file):
+            real = root / "real-management.key"
+            real.write_text("fixture-management-marker\n")
+            real.chmod(0o600)
+            management_file.unlink()
+            management_file.symlink_to(real)
+
+        completed, curl_argv = self.run_verify(secret_setup=setup)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(curl_argv, "", "no request may be issued before secret validation")
+        self.assertIn("without following a symlink", completed.stderr)
+        self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
+
+    def test_rejects_group_or_world_accessible_secret_file(self):
+        for mode in (0o640, 0o604, 0o666):
+            for target in ("management", "plan"):
+                with self.subTest(mode=oct(mode), target=target):
+
+                    def setup(root, management_file, plan_file, mode=mode, target=target):
+                        (management_file if target == "management" else plan_file).chmod(mode)
+
+                    completed, curl_argv = self.run_verify(secret_setup=setup)
+                    self.assertNotEqual(completed.returncode, 0)
+                    self.assertEqual(curl_argv, "")
+                    self.assertIn("must not be group- or world-accessible", completed.stderr)
+
+    def test_rejects_non_regular_secret_file(self):
+        def setup(root, management_file, plan_file):
+            plan_file.unlink()
+            os.mkfifo(plan_file)
+
+        completed, curl_argv = self.run_verify(secret_setup=setup)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(curl_argv, "")
+        self.assertIn("must be a regular file", completed.stderr)
+
+    def test_rejects_oversized_secret_file(self):
+        def setup(root, management_file, plan_file):
+            plan_file.write_bytes(b"a" * 65537)
+            plan_file.chmod(0o600)
+
+        completed, curl_argv = self.run_verify(secret_setup=setup)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(curl_argv, "")
+        self.assertIn("exceeds the bounded size", completed.stderr)
+
+    def test_secret_reads_are_descriptor_relative_and_bounded(self):
+        """Every secret read must go through an O_NOFOLLOW descriptor whose fstat is the
+        thing validated, so a pathname swap between check and read cannot apply."""
+        script = SCRIPT.read_text()
+        self.assertNotIn("pathlib.Path(path).read_bytes()", script)
+        self.assertNotIn("pathlib.Path(sys.argv[1]).read_text()", script)
+        self.assertEqual(script.count("os.O_NOFOLLOW"), 4, "each secret open must be no-follow")
+        self.assertEqual(script.count("os.fstat(fd)"), 4)
+        self.assertGreaterEqual(script.count("65536"), 3)
+        self.assertGreaterEqual(script.count("max_secret_bytes"), 2)
 
 
 if __name__ == "__main__":

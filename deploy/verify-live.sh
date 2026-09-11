@@ -50,9 +50,47 @@ if parsed.path != "/v0/management/plugins/zai-coding-plan/status" or origin(stat
     raise SystemExit("management status URL is not approved")
 PY
 
+# Every secret file is opened with O_NOFOLLOW and must be a regular file owned by the
+# effective user, with no group/other access, and no larger than the bound below. A
+# symlink, FIFO, device, foreign owner, or loose mode is rejected before any read.
+python3 - "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
+import os, stat, sys
+MAX_SECRET_BYTES = 65536
+for path in sys.argv[1:]:
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except OSError as error:
+        raise SystemExit(f"secret input file could not be opened without following a symlink: {error.strerror}")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit("secret input file must be a regular file")
+        if info.st_uid != os.geteuid():
+            raise SystemExit("secret input file must be owned by the effective user")
+        if info.st_mode & 0o077:
+            raise SystemExit("secret input file must not be group- or world-accessible")
+        if info.st_size > MAX_SECRET_BYTES:
+            raise SystemExit("secret input file exceeds the bounded size")
+    finally:
+        os.close(fd)
+PY
+
 python3 - "$CLIPROXY_MANAGEMENT_KEY_FILE" "$curl_config" <<'PY'
-import pathlib, sys
-raw=pathlib.Path(sys.argv[1]).read_bytes()
+import os, pathlib, stat, sys
+MAX_SECRET_BYTES = 65536
+fd=os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+try:
+    info=os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+        raise SystemExit("management key file failed type, owner, or mode enforcement")
+    if info.st_size > MAX_SECRET_BYTES:
+        raise SystemExit("management key file exceeds the bounded size")
+    with os.fdopen(os.dup(fd), "rb") as handle:
+        raw=handle.read(MAX_SECRET_BYTES + 1)
+finally:
+    os.close(fd)
+if len(raw) > MAX_SECRET_BYTES:
+    raise SystemExit("management key file exceeds the bounded size")
 lines=raw.splitlines()
 if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
     raise SystemExit("management key file must contain exactly one non-empty line")
@@ -65,11 +103,11 @@ path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').r
 path.chmod(0o600)
 PY
 
-unauthenticated=$(curl -q --fail-early --max-redirs 0 --silent --show-error --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' --output /dev/null --write-out '%{http_code}' "$status_url")
+unauthenticated=$(curl -q --fail-early --max-redirs 0 --silent --show-error --connect-timeout 2 --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' --output /dev/null --write-out '%{http_code}' "$status_url")
 test "$unauthenticated" = 401
 
 curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' \
+  --connect-timeout 2 --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' \
   --config "$curl_config" \
   "$status_url" >"$status_file"
 
@@ -98,7 +136,7 @@ fi
 test "$state_check" = 0
 
 python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" "$CLIPROXY_EXPECTED_PLUGIN_VERSION" <<'PY'
-import json, math, pathlib, re, sys
+import json, math, os, pathlib, re, stat, sys
 expected_top={"plugin","status","version","generated_at","accounts"}
 required={"name","key_suffix","plan","five_hour_utilization","weekly_utilization","five_hour_resets_at","weekly_resets_at","quota_source","quota_observed_at","quota_age_seconds","quota_stale","offpeak","health","estimator_complete_since","delivery_warning","persistence_warning","unknown_model_warning","heuristic_dedup_warning","dedup_mode"}
 rfc3339=re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
@@ -108,7 +146,26 @@ def require(condition, message):
     if not condition:
         fail(message)
 def read_secret(path):
-    raw=pathlib.Path(path).read_bytes()
+    # O_NOFOLLOW + fstat on the held descriptor: the bytes read are the bytes whose
+    # type, owner, mode, and size were checked, so no pathname substitution applies.
+    max_secret_bytes=65536
+    fd=os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            fail("secret input file must be a regular file")
+        if info.st_uid != os.geteuid():
+            fail("secret input file must be owned by the effective user")
+        if info.st_mode & 0o077:
+            fail("secret input file must not be group- or world-accessible")
+        if info.st_size > max_secret_bytes:
+            fail("secret input file exceeds the bounded size")
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            raw=handle.read(max_secret_bytes + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > max_secret_bytes:
+        fail("secret input file exceeds the bounded size")
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
         fail("secret input file must contain exactly one non-empty line")
@@ -169,7 +226,7 @@ PY
   --url "$status_url"
 
 curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  --max-time 5 --max-filesize 1048576 \
+  --connect-timeout 2 --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' \
   "$CLIPROXY_DASHBOARD_URL" >"$dashboard_file"
 
 timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_JOURNAL_TIMEOUT" \
@@ -178,7 +235,7 @@ timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_JOURNAL_TIMEOUT"
   >"$log_file"
 
 python3 - "$CLIPROXY_USAGE_DIR/zai.json" "$dashboard_file" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
-import json, pathlib, re, sys
+import json, os, pathlib, re, stat, sys
 projected, dashboard, service_log = map(pathlib.Path, sys.argv[1:4])
 def fail(message):
     raise SystemExit(message)
@@ -186,7 +243,26 @@ def require(condition, message):
     if not condition:
         fail(message)
 def read_secret(path):
-    raw=pathlib.Path(path).read_bytes()
+    # O_NOFOLLOW + fstat on the held descriptor: the bytes read are the bytes whose
+    # type, owner, mode, and size were checked, so no pathname substitution applies.
+    max_secret_bytes=65536
+    fd=os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    try:
+        info=os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            fail("secret input file must be a regular file")
+        if info.st_uid != os.geteuid():
+            fail("secret input file must be owned by the effective user")
+        if info.st_mode & 0o077:
+            fail("secret input file must not be group- or world-accessible")
+        if info.st_size > max_secret_bytes:
+            fail("secret input file exceeds the bounded size")
+        with os.fdopen(os.dup(fd), "rb") as handle:
+            raw=handle.read(max_secret_bytes + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > max_secret_bytes:
+        fail("secret input file exceeds the bounded size")
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
         fail("secret input file must contain exactly one non-empty line")
