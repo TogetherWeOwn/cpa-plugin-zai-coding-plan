@@ -1,6 +1,11 @@
 import hashlib
+import os
 import pathlib
 import re
+import shlex
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -11,12 +16,104 @@ PINNED_COMMIT = "5c758c04acbd9367d1c8fff1342bf651847dcac2"
 PINNED_DIGEST = "86800494fa9606971c22ee5f08872dbc3c02280ad65fe9a88fdeaf9063c5db0d"
 
 
+def staging_recipe():
+    text = README.read_text()
+    section = text.split("Run the credential-free checks", 1)[1].split("Verify the exact registry bytes", 1)[0]
+    return section.split("```bash", 1)[1].split("```", 1)[0].strip()
+
+
 class RunbookSecurityTest(unittest.TestCase):
     def test_management_key_is_not_interpolated_into_curl_arguments(self):
         text = README.read_text() + (ROOT / "deploy" / "verify-live.sh").read_text()
         self.assertNotRegex(text, r'-H\s+["\']Authorization: Bearer \$\{?management_key')
         self.assertNotIn("management_key=$(<", text)
         self.assertIn('--config "$curl_config"', text)
+
+    def test_staging_recipe_stops_before_publication_on_command_failure(self):
+        commands = ("git", "stat", "find", "timeout", "go", "install")
+        failure_cases = (
+            ("sha", "git", "rev-parse HEAD"),
+            ("clean-tree", "git", "status --porcelain --untracked-files=all"),
+            ("ownership", "stat", "-c %U:%G"),
+            ("blob-hash", "git", "hash-object"),
+            ("blob-reference", "git", "rev-parse REPLACE_WITH_REVIEWED_PR_HEAD:deploy/"),
+            ("build", "timeout", "--signal=TERM"),
+            ("install", "install", "-o root -g root -m 0755"),
+            ("enumeration", "find", "-xdev -type f -print"),
+        )
+        script = staging_recipe().replace("./deploy/acceptance_local.py", ":")
+
+        for name, fail_command, fail_match in failure_cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                root = pathlib.Path(directory)
+                bin_dir = root / "bin"
+                bin_dir.mkdir()
+                staging_parent = root / "libexec"
+                staging_parent.mkdir()
+                published = root / "published"
+                trace = root / "trace"
+                for command in commands:
+                    (bin_dir / command).symlink_to("dispatcher")
+                dispatcher = bin_dir / "dispatcher"
+                dispatcher.write_text(
+                    textwrap.dedent(
+                        """\
+                        #!/bin/sh
+                        set -eu
+                        command_name=$(basename "$0")
+                        printf '%s %s\\n' "$command_name" "$*" >>"$TRACE"
+                        if test "$command_name" = "$FAIL_COMMAND" && case "$*" in *"$FAIL_MATCH"*) true;; *) false;; esac; then
+                          exit 41
+                        fi
+                        case "$command_name:$*" in
+                          "git:rev-parse HEAD") printf '%s\\n' REPLACE_WITH_REVIEWED_PR_HEAD ;;
+                          "git:status --porcelain --untracked-files=all") : ;;
+                          "git:show "*) printf 'artifact\\n' ;;
+                          "git:hash-object "*) printf 'blob\\n' ;;
+                          "git:rev-parse REPLACE_WITH_REVIEWED_PR_HEAD:deploy/"*) printf 'blob\\n' ;;
+                          "stat:-c %U:%G "*) printf 'root:root\\n' ;;
+                          "stat:-c %a "*) printf '755\\n' ;;
+                          "find:"*) command /usr/bin/find "$@" ;;
+                          "timeout:"*)
+                            output=
+                            previous=
+                            for argument in "$@"; do
+                              if test "$previous" = "-o"; then output=$argument; fi
+                              previous=$argument
+                            done
+                            test -n "$output"
+                            : >"$output"
+                            ;;
+                          "go:"*) : ;;
+                          "install:"*)
+                            destination=
+                            for argument in "$@"; do destination=$argument; done
+                            : >"$destination"
+                            ;;
+                        esac
+                        """
+                    )
+                )
+                dispatcher.chmod(0o755)
+                wrapper = root / "run.sh"
+                wrapper.write_text(
+                    script.replace("staging=/usr/local/libexec/cliproxy/zai-dogfood", f"staging={shlex.quote(str(published))}")
+                )
+                wrapper.chmod(0o755)
+                env = os.environ.copy()
+                env.update(
+                    {
+                        "PATH": f"{bin_dir}:/usr/bin:/bin",
+                        "TRACE": str(trace),
+                        "FAIL_COMMAND": fail_command,
+                        "FAIL_MATCH": fail_match,
+                    }
+                )
+                completed = subprocess.run(["bash", str(wrapper)], cwd=ROOT, env=env, text=True, capture_output=True)
+                command_trace = trace.read_text() if trace.exists() else "no trace"
+                self.assertEqual(completed.returncode, 41, completed.stdout + completed.stderr + command_trace)
+                self.assertIn(fail_command, command_trace)
+                self.assertFalse(published.exists(), command_trace)
 
     def test_registry_source_is_immutable_digest_verified_and_bounded(self):
         config = CONFIG.read_text()
@@ -38,13 +135,16 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertRegex(preflight, r"```bash\s+set -euo pipefail\s+\./deploy/acceptance_local\.py")
         self.assertIn("renderer_build=$(mktemp -d)", preflight)
         self.assertIn("expected_deploy_commit=REPLACE_WITH_REVIEWED_PR_HEAD", preflight)
-        self.assertIn('test "$(git rev-parse HEAD)" = "$expected_deploy_commit"', preflight)
-        self.assertIn('test -z "$(git status --porcelain --untracked-files=all)"', preflight)
+        self.assertIn('actual_deploy_commit=$(git rev-parse HEAD)', preflight)
+        self.assertIn('test "$actual_deploy_commit" = "$expected_deploy_commit"', preflight)
+        self.assertIn('working_tree_status=$(git status --porcelain --untracked-files=all)', preflight)
+        self.assertIn('test -z "$working_tree_status"', preflight)
         self.assertIn('git show "$expected_deploy_commit:deploy/$artifact"', preflight)
         self.assertIn('git hash-object "$staging_tmp/$artifact"', preflight)
         self.assertIn('git rev-parse "$expected_deploy_commit:deploy/$artifact"', preflight)
         self.assertIn('staging_parent=$(dirname "$staging")', preflight)
-        self.assertIn('test "$(stat -c %U:%G "$staging_parent")" = root:root', preflight)
+        self.assertIn('staging_parent_owner=$(stat -c %U:%G "$staging_parent")', preflight)
+        self.assertIn('test "$staging_parent_owner" = root:root', preflight)
         self.assertIn('mktemp -d --tmpdir="$staging_parent"', preflight)
         self.assertIn('mv -T "$staging_tmp" "$staging"', preflight)
         self.assertIn("timeout --signal=TERM --kill-after=2s 60s", preflight)
@@ -52,8 +152,10 @@ class RunbookSecurityTest(unittest.TestCase):
             self.assertIn(setting, preflight)
         self.assertIn('go build -mod=readonly -buildvcs=false -trimpath', preflight)
         self.assertIn('"$renderer_build/render-config" "$staging_tmp/render-config"', preflight)
-        self.assertIn('test "$(stat -c %U:%G "$staging_tmp")" = root:root', preflight)
-        self.assertIn('test "$((8#$(stat -c %a "$staging_tmp") & 8#022))" = 0', preflight)
+        self.assertIn('staging_tmp_owner=$(stat -c %U:%G "$staging_tmp")', preflight)
+        self.assertIn('test "$staging_tmp_owner" = root:root', preflight)
+        self.assertIn('staging_tmp_mode=$(stat -c %a "$staging_tmp")', preflight)
+        self.assertIn('test "$((8#$staging_tmp_mode & 8#022))" = 0', preflight)
         self.assertNotIn("go run", install)
         self.assertNotIn("/home/ubuntu/cpa-plugin-zai-coding-plan", install)
         self.assertIn('staging=/usr/local/libexec/cliproxy/zai-dogfood', install)

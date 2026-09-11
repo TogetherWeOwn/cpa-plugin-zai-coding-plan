@@ -18,19 +18,24 @@ set -euo pipefail
 expected_deploy_commit=REPLACE_WITH_REVIEWED_PR_HEAD
 staging=/usr/local/libexec/cliproxy/zai-dogfood
 artifacts='config.yaml.tmpl prepare-usage-dir.py remove-usage-output.py render-config.go rollback-delete-policy.py verify-live.sh'
-test "$(git rev-parse HEAD)" = "$expected_deploy_commit"
-test -z "$(git status --porcelain --untracked-files=all)"
+actual_deploy_commit=$(git rev-parse HEAD)
+test "$actual_deploy_commit" = "$expected_deploy_commit"
+working_tree_status=$(git status --porcelain --untracked-files=all)
+test -z "$working_tree_status"
 staging_parent=$(dirname "$staging")
 test ! -L "$staging_parent"
-test "$(stat -c %U:%G "$staging_parent")" = root:root
-test "$((8#$(stat -c %a "$staging_parent") & 8#022))" = 0
+staging_parent_owner=$(stat -c %U:%G "$staging_parent")
+test "$staging_parent_owner" = root:root
+staging_parent_mode=$(stat -c %a "$staging_parent")
+test "$((8#$staging_parent_mode & 8#022))" = 0
 staging_tmp=$(mktemp -d --tmpdir="$staging_parent" .zai-dogfood.XXXXXX)
 renderer_build=$(mktemp -d)
 trap 'rm -rf "$staging_tmp" "$renderer_build"' EXIT
 for artifact in $artifacts; do
   git show "$expected_deploy_commit:deploy/$artifact" >"$staging_tmp/$artifact"
-  test "$(git hash-object "$staging_tmp/$artifact")" = \
-    "$(git rev-parse "$expected_deploy_commit:deploy/$artifact")"
+  staged_blob=$(git hash-object "$staging_tmp/$artifact")
+  expected_blob=$(git rev-parse "$expected_deploy_commit:deploy/$artifact")
+  test "$staged_blob" = "$expected_blob"
 done
 chmod 0644 "$staging_tmp/config.yaml.tmpl" "$staging_tmp/render-config.go" "$staging_tmp/rollback-delete-policy.py"
 chmod 0755 "$staging_tmp/prepare-usage-dir.py" "$staging_tmp/remove-usage-output.py" "$staging_tmp/verify-live.sh"
@@ -45,13 +50,20 @@ rm "$staging_tmp/render-config.go"
 install -o root -g root -m 0755 \
   "$renderer_build/render-config" "$staging_tmp/render-config"
 chmod 0755 "$staging_tmp"
-test "$(stat -c %U:%G "$staging_tmp")" = root:root
-test "$((8#$(stat -c %a "$staging_tmp") & 8#022))" = 0
+staging_tmp_owner=$(stat -c %U:%G "$staging_tmp")
+test "$staging_tmp_owner" = root:root
+staging_tmp_mode=$(stat -c %a "$staging_tmp")
+test "$((8#$staging_tmp_mode & 8#022))" = 0
+artifact_list="$renderer_build/staged-files"
+find "$staging_tmp" -xdev -type f -print >"$artifact_list"
 while IFS= read -r artifact; do
   test ! -L "$artifact"
-  test "$(stat -c %U:%G "$artifact")" = root:root
-  test "$((8#$(stat -c %a "$artifact") & 8#022))" = 0
-done < <(find "$staging_tmp" -xdev -type f -print)
+  artifact_owner=$(stat -c %U:%G "$artifact")
+  test "$artifact_owner" = root:root
+  artifact_mode=$(stat -c %a "$artifact")
+  test "$((8#$artifact_mode & 8#022))" = 0
+done <"$artifact_list"
+rm -f "$artifact_list"
 if test -e "$staging" || test -L "$staging"; then
   staging_old="${staging}.old"
   test ! -e "$staging_old"
