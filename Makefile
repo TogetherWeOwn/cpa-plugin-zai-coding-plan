@@ -1,4 +1,4 @@
-VERSION ?= 0.1.0
+VERSION ?= 0.2.0
 GO ?= go
 PLUGIN_ID = zai-coding-plan
 OUT ?= dist/$(PLUGIN_ID)-v$(VERSION).so

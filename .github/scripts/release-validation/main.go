@@ -410,8 +410,8 @@ func validateReleaseWorkflowBoundary(root string) error {
 		return err
 	}
 	ciBranches, err := yamlStringSequence(ciPush["branches"], "CI push branches")
-	if err != nil || len(ciBranches) != 2 || ciBranches[0] != "main" || ciBranches[1] != "release-recovery/v0.1.0" {
-		return errors.New("CI push trigger must contain only main and release-recovery/v0.1.0")
+	if err != nil || len(ciBranches) != 1 || ciBranches[0] != "main" {
+		return errors.New("CI push trigger must contain only main")
 	}
 
 	path := filepath.Join(root, ".github", "workflows", "release.yml")
@@ -470,12 +470,18 @@ func validateReleaseWorkflowBoundary(root string) error {
 	const publishCommand = `set -euo pipefail
 actual_tag_object=$(gh api "repos/${GH_REPO}/git/ref/tags/${RAW_TAG}" --jq .object.sha)
 test "$actual_tag_object" = "$EXPECTED_TAG_OBJECT"
-test "$RAW_TAG" = v0.1.0
-test "$EXPECTED_TAG_OBJECT" = 93441174a393b2d7487df954b4f10103742285fb
 gh release create "$RAW_TAG" \
   "release-artifacts/zai-coding-plan-v${VERSION}.so" \
   "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
   release-artifacts/checksums.txt \
+  release-artifacts/compatibility-evidence.json \
+  release-artifacts/config.yaml.tmpl \
+  release-artifacts/router-capacity-source.json \
+  release-artifacts/verify-live.sh \
+  release-artifacts/prepare-usage-dir.py \
+  release-artifacts/remove-usage-output.py \
+  release-artifacts/README.md \
+  release-artifacts/release-sha.txt \
   --verify-tag --generate-notes`
 	var downloaded, published bool
 	for _, step := range publish.Steps {
@@ -519,7 +525,7 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := requireOnlyYAMLKeys(trigger, "release workflow trigger", "push", "workflow_run"); err != nil {
+	if err := requireOnlyYAMLKeys(trigger, "release workflow trigger", "push"); err != nil {
 		return err
 	}
 	push, err := yamlMapping(trigger["push"], "release push trigger")
@@ -533,25 +539,6 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	if err != nil || len(tags) != 1 || tags[0] != "v*" {
 		return errors.New("release push trigger must contain only v* tags")
 	}
-	workflowRun, err := yamlMapping(trigger["workflow_run"], "release recovery trigger")
-	if err != nil {
-		return err
-	}
-	if err := requireOnlyYAMLKeys(workflowRun, "release recovery trigger", "workflows", "types", "branches"); err != nil {
-		return err
-	}
-	workflows, err := yamlStringSequence(workflowRun["workflows"], "release recovery workflows")
-	if err != nil || len(workflows) != 1 || workflows[0] != "CI" {
-		return errors.New("release recovery trigger must use only the CI workflow")
-	}
-	types, err := yamlStringSequence(workflowRun["types"], "release recovery event types")
-	if err != nil || len(types) != 1 || types[0] != "completed" {
-		return errors.New("release recovery trigger must use only completed events")
-	}
-	branches, err := yamlStringSequence(workflowRun["branches"], "release recovery branches")
-	if err != nil || len(branches) != 1 || branches[0] != "release-recovery/v0.1.0" {
-		return errors.New("release recovery trigger must use only release-recovery/v0.1.0")
-	}
 	jobs, err := yamlMapping(workflow["jobs"], "release workflow jobs")
 	if err != nil {
 		return err
@@ -563,7 +550,7 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	if err != nil {
 		return err
 	}
-	if err := requireOnlyYAMLKeys(build, "release build job", "if", "runs-on", "outputs", "steps"); err != nil {
+	if err := requireOnlyYAMLKeys(build, "release build job", "runs-on", "outputs", "steps"); err != nil {
 		return err
 	}
 	if yamlScalarValue(build["runs-on"]) != "ubuntu-24.04" {
@@ -575,10 +562,6 @@ func validateReleaseWorkflowShape(raw []byte) error {
 	}
 	if len(outputs) != 3 || outputs["version"] != "${{ steps.release.outputs.version }}" || outputs["tag"] != "${{ steps.target.outputs.tag }}" || outputs["tag_object"] != "${{ steps.target.outputs.tag_object }}" {
 		return errors.New("release build job must export only the validated version, tag, and tag object")
-	}
-	const recoveryGuard = "github.event_name == 'push' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == 'release-recovery/v0.1.0' && github.event.workflow_run.head_sha == github.workflow_sha)"
-	if normalizeShellCommand(yamlScalarValue(build["if"])) != recoveryGuard {
-		return errors.New("release build job must use the canonical recovery event guard")
 	}
 	buildSteps := build["steps"]
 	if buildSteps == nil || buildSteps.Kind != yaml.SequenceNode || len(buildSteps.Content) != 14 {
@@ -695,14 +678,13 @@ func validateReleaseWorkflowShape(raw []byte) error {
 			id:               "target",
 			workingDirectory: "release-controls",
 			env: map[string]string{
-				"EVENT_NAME":       "${{ github.event_name }}",
-				"EVENT_REF":        "${{ github.ref }}",
-				"EVENT_SHA":        "${{ github.sha }}",
-				"WORKFLOW_RUN_SHA": "${{ github.event.workflow_run.head_sha }}",
+				"EVENT_NAME": "${{ github.event_name }}",
+				"EVENT_REF":  "${{ github.ref }}",
+				"EVENT_SHA":  "${{ github.sha }}",
 			},
 			command: `set -euo pipefail
 				raw_tag=$(.github/scripts/select-release-tag.sh \
-				  "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" "$WORKFLOW_RUN_SHA" .)
+				  "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" .)
 				tag_object=$(git rev-parse "$raw_tag")
 				printf 'tag=%s\n' "$raw_tag" >> "$GITHUB_OUTPUT"
 				printf 'tag_object=%s\n' "$tag_object" >> "$GITHUB_OUTPUT"`,
@@ -781,13 +763,18 @@ func validateReleaseWorkflowShape(raw []byte) error {
 			name:             "Stage release artifacts",
 			workingDirectory: "release-source",
 			env: map[string]string{
-				"VERSION": "${{ steps.release.outputs.version }}",
+				"VERSION":     "${{ steps.release.outputs.version }}",
+				"RELEASE_SHA": "${{ steps.target.outputs.tag_object }}",
 			},
 			command: `set -euo pipefail
 				mkdir release-artifacts
 				cp "dist/zai-coding-plan-v${VERSION}.so" \
 				   "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" \
-				   dist/checksums.txt release-artifacts/`,
+				   dist/checksums.txt release-artifacts/
+				cp "$RUNNER_TEMP/host-images.json" release-artifacts/compatibility-evidence.json
+				cp deploy/config.yaml.tmpl deploy/router-capacity-source.json deploy/verify-live.sh \
+				   deploy/prepare-usage-dir.py deploy/remove-usage-output.py deploy/rollback.sh deploy/README.md release-artifacts/
+				printf '%s\n' "$RELEASE_SHA" > release-artifacts/release-sha.txt`,
 		},
 	}
 	for index, canonical := range canonicalRunSteps {
@@ -1059,6 +1046,46 @@ func readersEqual(left, right io.Reader) (bool, error) {
 		return false, err
 	}
 	return string(leftHash.Sum(nil)) == string(rightHash.Sum(nil)), nil
+}
+
+func validateOperatorBundle(root, distPath, version string) error {
+	bundle := filepath.Join(distPath, fmt.Sprintf("%s-v%s-operator.zip", pluginID, version))
+	if _, err := os.Stat(bundle); err != nil {
+		return fmt.Errorf("operator bundle is required: %w", err)
+	}
+	archive, err := zip.OpenReader(bundle)
+	if err != nil {
+		return fmt.Errorf("open operator bundle: %w", err)
+	}
+	defer archive.Close()
+	want := map[string]struct{}{
+		"compatibility-evidence.json": {}, "config.yaml.tmpl": {}, "router-capacity-source.json": {},
+		"verify-live.sh": {}, "prepare-usage-dir.py": {}, "remove-usage-output.py": {},
+		"rollback.sh": {}, "README.md": {}, "release-sha.txt": {},
+	}
+	seen := make(map[string]struct{}, len(archive.File))
+	for _, entry := range archive.File {
+		name := entry.Name
+		if name == "" || filepath.Base(name) != name || strings.Contains(name, "..") || entry.FileInfo().IsDir() {
+			return fmt.Errorf("operator bundle contains unsafe entry %q", name)
+		}
+		if _, ok := want[name]; !ok {
+			return fmt.Errorf("operator bundle contains unexpected entry %q", name)
+		}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("operator bundle contains duplicate entry %q", name)
+		}
+		seen[name] = struct{}{}
+	}
+	if len(seen) != len(want) {
+		return fmt.Errorf("operator bundle contains %d entries, want %d", len(seen), len(want))
+	}
+	for name := range want {
+		if _, ok := seen[name]; !ok {
+			return fmt.Errorf("operator bundle is missing %s", name)
+		}
+	}
+	return nil
 }
 
 func validateChecksums(path string, artifactPaths []string) error {

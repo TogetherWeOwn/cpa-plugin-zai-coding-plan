@@ -6,14 +6,14 @@
       "name": "Z.AI Coding Plan",
       "description": "Quota-aware Z.AI Coding Plan account pooling for CLIProxyAPI.",
       "author": "TogetherWeOwn",
-      "version": "0.1.0",
+      "version": "0.2.0",
       "repository": "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
       "homepage": "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
       "license": "MIT",
       "platforms": ["linux-amd64"],
       "capabilities": ["scheduler", "usage", "management"],
       "release": {
-        "archive": "zai-coding-plan_0.1.0_linux_amd64.zip",
+        "archive": "zai-coding-plan_0.2.0_linux_amd64.zip",
         "checksums": "checksums.txt"
       },
       "tags": ["Z.AI", "GLM", "Coding Plan", "quota", "pool"]

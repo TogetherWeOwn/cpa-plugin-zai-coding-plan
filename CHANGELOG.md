@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-11
+
+### Added
+
+- v0.2.0 release packaging and strict archive/checksum validation for the Linux/amd64 shared library and plugin-store archive.
+- Deployed, latest, and CLIProxyAPI v7.2.67 baseline compatibility evidence in the release gate.
+- Credential-free live verification, bounded canary guidance, and recoverable rollback procedures for the Z.ai lane.
+
+### Security
+
+- Live verification rejects malformed or confidential management responses, unsafe key-file permissions, missing managed capacity, and unbounded service output.
+- Rollback validates the backup and safe configuration directory before management-plane mutation and atomically restores the configuration.
+
 ## [0.1.0] - 2026-09-10
 
 ### Added
@@ -26,7 +39,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-> This entry describes the v0.1.0 release candidate. The release workflow refuses publication unless the tag, registry, archive names, and checksums match this version at the reviewed release commit.
-
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0
 [0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0

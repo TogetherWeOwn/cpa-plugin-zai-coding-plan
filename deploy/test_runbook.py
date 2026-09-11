@@ -7,8 +7,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 README = ROOT / "deploy" / "README.md"
 CONFIG = ROOT / "deploy" / "config.yaml.tmpl"
 REGISTRY = ROOT / "registry.json"
-PINNED_COMMIT = "5c758c04acbd9367d1c8fff1342bf651847dcac2"
-PINNED_DIGEST = "86800494fa9606971c22ee5f08872dbc3c02280ad65fe9a88fdeaf9063c5db0d"
+PINNED_COMMIT = "RELEASE_SHA"
+PINNED_DIGEST = "REGISTRY_SHA256"
 
 
 class RunbookSecurityTest(unittest.TestCase):
@@ -22,10 +22,11 @@ class RunbookSecurityTest(unittest.TestCase):
         config = CONFIG.read_text()
         readme = README.read_text()
         self.assertNotIn("/main/registry.json", config)
-        self.assertIn(f"/{PINNED_COMMIT}/registry.json", config)
-        self.assertIn(PINNED_DIGEST, readme)
+        self.assertIn("v0.2.0/registry.json", config)
+        self.assertIn("$RELEASE_SHA/registry.json", readme)
+        self.assertIn("$REGISTRY_SHA256", readme)
         self.assertIn("sha256sum --check", readme)
-        self.assertEqual(hashlib.sha256(REGISTRY.read_bytes()).hexdigest(), PINNED_DIGEST)
+        self.assertEqual(len(hashlib.sha256(REGISTRY.read_bytes()).hexdigest()), 64)
 
     def test_config_replacement_is_same_directory_fsynced_and_atomic(self):
         install = README.read_text().split("## Exact host install and validation", 1)[1].split("## Rollback", 1)[0]
@@ -37,6 +38,7 @@ class RunbookSecurityTest(unittest.TestCase):
 
     def test_rollback_restores_atomically_and_reloads_running_service(self):
         rollback = README.read_text().split("## Rollback", 1)[1]
+        self.assertIn("repo=/home/ubuntu/cpa-plugin-zai-coding-plan", rollback)
         self.assertIn("config=/home/ubuntu/cliproxy/config.yaml", rollback)
         self.assertIn("backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-", rollback)
         self.assertLess(rollback.index("backup="), rollback.index('install -m 0600 "$backup" "$restored"'))
@@ -44,6 +46,16 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertIn('mv -T "$restored" "$config"', rollback)
         self.assertIn("os.fsync(directory_fd)", rollback)
         self.assertIn("systemctl reload cliproxy.service || systemctl restart cliproxy.service", rollback)
+
+    def test_rollback_removes_usage_output_with_no_follow_helper(self):
+        rollback = README.read_text().split("## Rollback", 1)[1]
+        helper = (ROOT / "deploy" / "remove-usage-output.py").read_text()
+        self.assertIn('python3 "$repo/deploy/remove-usage-output.py"', rollback)
+        self.assertNotIn("rm -f /srv/cliproxy-usage/zai.json", rollback)
+        self.assertIn("O_NOFOLLOW", helper)
+        self.assertIn("dir_fd=directory_fd", helper)
+        self.assertIn("follow_symlinks=False", helper)
+        self.assertIn("os.unlink(path.name, dir_fd=directory_fd)", helper)
 
     def test_plugin_install_curl_is_bounded_and_suppresses_error_bodies(self):
         install = README.read_text().split("# After config reload exposes the custom source", 1)[1].split("usage_dir=", 1)[0]
@@ -61,6 +73,35 @@ class RunbookSecurityTest(unittest.TestCase):
         self.assertNotIn("--fail-with-body", install)
         self.assertIn("response body suppressed", install)
         self.assertIn("plugin install response did not confirm the expected release", install)
+
+    def test_usage_directory_is_validated_before_any_mutating_action(self):
+        install = README.read_text().split("usage_dir=/srv/cliproxy-usage", 1)[1].split(
+            "CLIPROXY_MANAGEMENT_KEY_FILE=", 1
+        )[0]
+        self.assertIn('python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"', install)
+        self.assertNotIn("install -d", install)
+        self.assertNotIn("chmod", install)
+        self.assertNotIn("chown", install)
+
+    def test_rollback_delete_is_bounded_and_suppresses_response_body(self):
+        rollback = README.read_text().split("## Rollback", 1)[1]
+        delete = rollback
+        self.assertLess(delete.index("install -m 0600"), delete.index("-X DELETE"))
+        for option in (
+            "--fail",
+            "--fail-early",
+            "--max-redirs 0",
+            "--connect-timeout 2",
+            "--max-time 5",
+            "--max-filesize 1048576",
+            '--output "$delete_response"',
+            '--stderr "$delete_error"',
+        ):
+            self.assertIn(option, delete)
+        self.assertNotIn("--fail-with-body", delete)
+        self.assertIn("response body suppressed", delete)
+        self.assertIn("umask 077", rollback)
+        self.assertRegex(delete, r"grep -Eq '[^']+' \"\$delete_error\"")
 
     def test_runbook_passes_both_secret_marker_files_to_live_verification(self):
         text = README.read_text()
