@@ -21,9 +21,11 @@ Verify the exact registry bytes before merging the template into the host config
 ```sh
 registry=$(mktemp)
 trap 'rm -f "$registry"' EXIT
-curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+  --connect-timeout 2 --max-time 10 --max-filesize 1048576 \
   'https://raw.githubusercontent.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/5c758c04acbd9367d1c8fff1342bf651847dcac2/registry.json' \
   >"$registry"
+test -s "$registry"
 printf '%s  %s\n' '86800494fa9606971c22ee5f08872dbc3c02280ad65fe9a88fdeaf9063c5db0d' "$registry" | sha256sum --check --status
 ```
 
@@ -38,6 +40,7 @@ repo=/home/ubuntu/cpa-plugin-zai-coding-plan
 config=/home/ubuntu/cliproxy/config.yaml
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 plan_key_file=/home/ubuntu/secure-drop/zai-coding-plan.key
+plan_key_suffix_file=/home/ubuntu/secure-drop/zai-coding-plan.key-suffix
 backup="${config}.pre-zai-$(date -u +%Y%m%dT%H%M%SZ)"
 cp -a "$config" "$backup"
 curl_config=$(mktemp)
@@ -60,12 +63,17 @@ test "$(stat -c %U:%G "$config_dir")" = root:root
 test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
 candidate=$(mktemp --tmpdir="$config_dir" .config.yaml.zai.XXXXXX)
 trap 'rm -f "$curl_config" "$candidate"' EXIT
-# Merge deploy/config.yaml.tmpl into "$candidate" without logging rendered secrets.
 chmod 0600 "$candidate"
+ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
+ZAI_CODING_PLAN_KEY_SUFFIX_FILE="$plan_key_suffix_file" \
+  go run "$repo/deploy/render-config.go" "$config" "$repo/deploy/config.yaml.tmpl" "$candidate"
+test -s "$candidate"
 python3 - "$candidate" "$config_dir" <<'PY'
 import os, pathlib, sys
 candidate=pathlib.Path(sys.argv[1])
 directory=pathlib.Path(sys.argv[2])
+if candidate.stat().st_size <= 0:
+    raise SystemExit("candidate config is empty")
 with candidate.open("rb") as handle:
     os.fsync(handle.fileno())
 directory_fd=os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
@@ -92,9 +100,9 @@ systemctl reload cliproxy.service || systemctl restart cliproxy.service
 install_response=$(mktemp)
 install_error=$(mktemp)
 trap 'rm -f "$curl_config" "$install_response" "$install_error"' EXIT
-if curl --fail --fail-early --max-redirs 0 --silent --show-error \
+if curl -q --fail --fail-early --max-redirs 0 --silent --show-error \
   --connect-timeout 2 --max-time 10 --max-filesize 1048576 \
-  --config "$curl_config" \
+  --noproxy '*' --proxy '' --config "$curl_config" \
   --output "$install_response" --stderr "$install_error" \
   -X POST \
   -H 'Content-Type: application/json' \
@@ -133,12 +141,22 @@ usage_dir=/srv/cliproxy-usage
 # O_NOFOLLOW, then verifies the pathname still names the secured directory fd.
 python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"
 test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
-CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
-ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
-CLIPROXY_USAGE_DIR="$usage_dir" \
-CLIPROXY_DASHBOARD_URL=http://127.0.0.1:3000/api/telemetry/model-usage/zai \
-CLIPROXY_SERVICE_UNIT=cliproxy.service \
-  "$repo/deploy/verify-live.sh"
+ready=0
+for attempt in $(seq 1 20); do
+  if CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
+    ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
+    CLIPROXY_EXPECTED_PLUGIN_VERSION=0.1.0 \
+    CLIPROXY_USAGE_DIR="$usage_dir" \
+    CLIPROXY_DASHBOARD_URL=http://127.0.0.1:3000/api/telemetry/model-usage/zai \
+    CLIPROXY_SERVICE_UNIT=cliproxy.service \
+      "$repo/deploy/verify-live.sh"
+  then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+test "$ready" = 1
 ```
 
 The plugin-store response must report `id=zai-coding-plan`, `version=0.1.0`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
@@ -167,22 +185,21 @@ path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
 PY
-if curl --fail --fail-early --max-redirs 0 --silent --show-error \
+delete_status=$(curl -q --fail-early --max-redirs 0 --silent --show-error \
   --connect-timeout 2 --max-time 5 --max-filesize 1048576 \
-  --config "$curl_config" \
-  --output "$delete_response" --stderr "$delete_error" \
+  --noproxy '*' --proxy '' --config "$curl_config" \
+  --output "$delete_response" --stderr "$delete_error" --write-out '%{http_code}' \
   -X DELETE \
-  'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan'
-then
-  :
-else
-  rc=$?
-  printf 'plugin removal request failed (curl exit %s; response body suppressed)\n' "$rc" >&2
+  'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan') || delete_rc=$?
+delete_rc=${delete_rc:-0}
+if test "$delete_rc" -ne 0; then
+  printf 'plugin removal request failed (curl exit %s; continuing rollback; response body suppressed)\n' "$delete_rc" >&2
   if grep -Eq '^curl: \([0-9]+\) (Connection|Could not|Failed|Operation timed out|Maximum file size exceeded|Received HTTP code|The requested URL returned error)[[:print:]]{0,240}$' "$delete_error"; then
     tr -d '\r\n' <"$delete_error" >&2
     printf '\n' >&2
   fi
-  exit "$rc"
+else
+  python3 "$repo/deploy/rollback-delete-policy.py" "$delete_rc" "$delete_status" "$delete_response"
 fi
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"

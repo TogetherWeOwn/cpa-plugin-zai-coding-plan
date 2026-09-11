@@ -8,6 +8,7 @@ set -euo pipefail
 : "${CLIPROXY_DASHBOARD_URL:=http://127.0.0.1:3000/api/telemetry/model-usage/zai}"
 : "${CLIPROXY_SERVICE_UNIT:=cliproxy.service}"
 : "${CLIPROXY_JOURNAL_TIMEOUT:=5}"
+: "${CLIPROXY_EXPECTED_PLUGIN_VERSION:?set CLIPROXY_EXPECTED_PLUGIN_VERSION to the installed release}"
 
 python3 - "$CLIPROXY_JOURNAL_TIMEOUT" <<'PY'
 import re, sys
@@ -72,7 +73,31 @@ curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --config "$curl_config" \
   "$status_url" >"$status_file"
 
-python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
+set +e
+python3 - "$status_file" <<'PY'
+import json, pathlib, sys
+try:
+    status=json.loads(pathlib.Path(sys.argv[1]).read_bytes())
+except (OSError, UnicodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+if isinstance(status, dict) and status.get("status") == "reconfigure_rejected" and isinstance(status.get("validation_error"), str):
+    raise SystemExit(10)
+raise SystemExit(0)
+PY
+state_check=$?
+set -e
+if test "$state_check" = 10; then
+  "${COLLECTOR_ZAI:-$(dirname "$0")/collector-zai.py}" \
+    --management-key-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
+    --secret-marker-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
+    --secret-marker-file "$ZAI_CODING_PLAN_KEY_FILE" \
+    --url "$status_url"
+  printf 'dogfood-live: rejected configuration projected as stale config_error\n' >&2
+  exit 1
+fi
+test "$state_check" = 0
+
+python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" "$CLIPROXY_EXPECTED_PLUGIN_VERSION" <<'PY'
 import json, math, pathlib, re, sys
 expected_top={"plugin","status","version","generated_at","accounts"}
 required={"name","key_suffix","plan","five_hour_utilization","weekly_utilization","five_hour_resets_at","weekly_resets_at","quota_source","quota_observed_at","quota_age_seconds","quota_stale","offpeak","health","estimator_complete_since","delivery_warning","persistence_warning","unknown_model_warning","heuristic_dedup_warning","dedup_mode"}
@@ -121,7 +146,7 @@ except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
 scan_decoded(status, markers)
 require(isinstance(status, dict) and set(status) == expected_top, "authenticated status response has unexpected top-level fields")
 require(status["plugin"]=="zai-coding-plan" and status["status"]=="registered", "authenticated status response has unexpected plugin state")
-require(isinstance(status["version"], str) and bool(status["version"]), "authenticated status response has invalid version")
+require(status["version"]==sys.argv[4], "authenticated status response has unexpected plugin version")
 require(isinstance(status["generated_at"], str) and bool(rfc3339.fullmatch(status["generated_at"])), "authenticated status response has invalid generated_at")
 require(isinstance(status["accounts"], list) and bool(status["accounts"]), "authenticated status response has no accounts")
 for account in status["accounts"]:

@@ -28,6 +28,11 @@ class VerifyLiveTest(unittest.TestCase):
         journal_stalls=False,
         journal_timeout="1",
         python_optimize=False,
+        expected_version="0.1.0",
+        status_version="0.1.0",
+        status_state="registered",
+        status_validation_error=None,
+        collector_invocations=None,
     ):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
@@ -60,10 +65,10 @@ class VerifyLiveTest(unittest.TestCase):
                     if status_json is not None:
                         print(status_json)
                         raise SystemExit
-                    print(json.dumps({{
+                    payload={{
                         "plugin":"zai-coding-plan",
-                        "status":"registered",
-                        "version":"0.0.0-dev",
+                        "status":{status_state!r},
+                        "version":{status_version!r},
                         "generated_at":"2026-09-10T15:00:00Z",
                         "accounts":[{{
                             "name":"zai-pro-1","key_suffix":"redacted","plan":{status_plan!r},
@@ -75,7 +80,11 @@ class VerifyLiveTest(unittest.TestCase):
                             "persistence_warning":False,"unknown_model_warning":False,
                             "heuristic_dedup_warning":False,"dedup_mode":"bounded_hash_heuristic"
                         }}]
-                    }}))
+                    }}
+                    validation_error={status_validation_error!r}
+                    if validation_error is not None:
+                        payload["validation_error"]=validation_error
+                    print(json.dumps(payload))
                 """,
             )
             journal_body = (
@@ -91,11 +100,14 @@ class VerifyLiveTest(unittest.TestCase):
                 """
             )
             self.write_executable(bin_dir / "journalctl", journal_body)
+            collector_log = root / "collector.log"
             self.write_executable(
                 bin_dir / "collector-zai",
                 f"""
                 #!/usr/bin/env python3
                 import json, os, pathlib
+                with pathlib.Path({str(collector_log)!r}).open("a") as log:
+                    log.write("called\\n")
                 output=pathlib.Path({str(usage_dir / "zai.json")!r})
                 output.parent.mkdir(parents=True, exist_ok=True)
                 os.chmod(output.parent, 0o700)
@@ -119,6 +131,7 @@ class VerifyLiveTest(unittest.TestCase):
                     "CLIPROXY_DASHBOARD_URL": "http://127.0.0.1/dashboard",
                     "COLLECTOR_ZAI": str(bin_dir / "collector-zai"),
                     "CLIPROXY_JOURNAL_TIMEOUT": journal_timeout,
+                    "CLIPROXY_EXPECTED_PLUGIN_VERSION": expected_version,
                     "HTTP_PROXY": "http://proxy.invalid:9876",
                     "HTTPS_PROXY": "http://proxy.invalid:9876",
                     "ALL_PROXY": "socks5://proxy.invalid:9876",
@@ -130,6 +143,8 @@ class VerifyLiveTest(unittest.TestCase):
             if management_url is not None:
                 env["CLIPROXY_MANAGEMENT_URL"] = management_url
             completed = subprocess.run([str(SCRIPT)], cwd=ROOT, env=env, text=True, capture_output=True)
+            if collector_invocations is not None:
+                collector_invocations.append(len(collector_log.read_text().splitlines()) if collector_log.exists() else 0)
             return completed, curl_log.read_text() if curl_log.exists() else ""
 
     def test_management_key_never_appears_in_curl_argv(self):
@@ -155,6 +170,24 @@ class VerifyLiveTest(unittest.TestCase):
         self.assertIn("--max-redirs\n0", invocations[0])
         self.assertIn("--noproxy\n*", invocations[0])
         self.assertIn("--proxy\n", invocations[0])
+
+    def test_rejects_wrong_plugin_version_before_collector(self):
+        calls = []
+        completed, _ = self.run_verify(status_version="0.0.0-dev", collector_invocations=calls)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(calls, [0])
+        self.assertIn("unexpected plugin version", completed.stderr)
+
+    def test_reconfigure_rejected_invokes_collector_before_failing(self):
+        calls = []
+        completed, _ = self.run_verify(
+            status_state="reconfigure_rejected",
+            status_validation_error="invalid replacement configuration",
+            collector_invocations=calls,
+        )
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(calls, [1])
+        self.assertIn("projected as stale config_error", completed.stderr)
 
     def test_unauthenticated_loopback_curl_disables_ambient_config_and_proxy(self):
         completed, curl_argv = self.run_verify()
