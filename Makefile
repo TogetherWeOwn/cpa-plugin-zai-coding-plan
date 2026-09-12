@@ -3,7 +3,10 @@ GO ?= go
 PLUGIN_ID = zai-coding-plan
 OUT ?= dist/$(PLUGIN_ID)-v$(VERSION).so
 ARCHIVE ?= dist/$(PLUGIN_ID)_$(VERSION)_linux_amd64.zip
+OPERATOR ?= dist/$(PLUGIN_ID)-v$(VERSION)-operator.zip
 CHECKSUMS ?= dist/checksums.txt
+RELEASE_SHA ?= $(shell git rev-parse HEAD)
+COMPATIBILITY_EVIDENCE ?= .github/host-images.json
 DEPLOY_DIR ?= ../../plugins/linux/amd64
 
 .PHONY: fmt-check vet lint test test-release validate-source scan-secrets validate-release build-host-integration test-host-image test-host-matrix build package deploy clean
@@ -57,10 +60,39 @@ build:
 	test -s "$(OUT)"
 
 package: build
+	mkdir -p "$(dir $(OPERATOR))"
+	install -m 0644 "$(COMPATIBILITY_EVIDENCE)" "$(dir $(OPERATOR))compatibility-evidence.json"
+	install -m 0644 deploy/config.yaml.tmpl "$(dir $(OPERATOR))config.yaml.tmpl"
+	install -m 0644 registry.json "$(dir $(OPERATOR))registry.json"
+	install -m 0644 deploy/router-capacity-source.json "$(dir $(OPERATOR))router-capacity-source.json"
+	install -m 0755 deploy/verify-live.sh "$(dir $(OPERATOR))verify-live.sh"
+	install -m 0755 deploy/prepare-usage-dir.py "$(dir $(OPERATOR))prepare-usage-dir.py"
+	install -m 0755 deploy/remove-usage-output.py "$(dir $(OPERATOR))remove-usage-output.py"
+	install -m 0755 deploy/rollback.sh "$(dir $(OPERATOR))rollback.sh"
+	install -m 0644 deploy/README.md "$(dir $(OPERATOR))README.md"
+	printf '%s\n' "$(RELEASE_SHA)" > "$(dir $(OPERATOR))release-sha.txt"
+	printf '%s\n' \
+		"compatibility-evidence.json=$(dir $(OPERATOR))compatibility-evidence.json" \
+		"config.yaml.tmpl=$(dir $(OPERATOR))config.yaml.tmpl" \
+		"registry.json=$(dir $(OPERATOR))registry.json" \
+		"router-capacity-source.json=$(dir $(OPERATOR))router-capacity-source.json" \
+		"verify-live.sh=$(dir $(OPERATOR))verify-live.sh" \
+		"prepare-usage-dir.py=$(dir $(OPERATOR))prepare-usage-dir.py" \
+		"remove-usage-output.py=$(dir $(OPERATOR))remove-usage-output.py" \
+		"rollback.sh=$(dir $(OPERATOR))rollback.sh" \
+		"README.md=$(dir $(OPERATOR))README.md" \
+		"release-sha.txt=$(dir $(OPERATOR))release-sha.txt" \
+		> "$(dir $(OPERATOR))operator-manifest.txt"
+	cp "$(dir $(OPERATOR))operator-manifest.txt" "$(dir $(OPERATOR))checksum-manifest.txt"
 	$(GO) run -buildvcs=false ./.github/scripts/package-release.go \
 		-library "$(OUT)" -entry "$(PLUGIN_ID).so" \
-		-archive "$(ARCHIVE)" -checksum "$(CHECKSUMS)"
+		-archive "$(ARCHIVE)" -operator "$(OPERATOR)" \
+		-operator-manifest "$(dir $(OPERATOR))operator-manifest.txt" \
+		-checksum "$(CHECKSUMS)" \
+		-checksum-manifest "$(dir $(OPERATOR))checksum-manifest.txt"
+	rm -f "$(dir $(OPERATOR))operator-manifest.txt" "$(dir $(OPERATOR))checksum-manifest.txt"
 	test -s "$(ARCHIVE)"
+	test -s "$(OPERATOR)"
 	test -s "$(CHECKSUMS)"
 
 deploy: build

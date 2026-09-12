@@ -22,7 +22,7 @@ unzip -Z1 "$bundle" | sort
 Each bundle entry must match the strict manifest exactly; extra, duplicate, traversal, or unresolved-template entries are invalid.
 
 - The plugin-store registry source is pinned to the immutable release commit recorded in the bundle manifest.
-- `checksums.txt` covers the shared library, plugin-store archive, operator bundle, compatibility evidence, live verifier, rollback script, and corrected templates.
+- `checksums.txt` covers every published file: the shared library, plugin-store archive, operator bundle, registry, compatibility evidence, live verifier, rollback script, helper scripts, provenance, runbook, and corrected templates.
 
 Run the credential-free checks before opening the operator handoff:
 
@@ -35,10 +35,13 @@ Verify the exact registry bytes before merging the template into the host config
 ```sh
 registry=$(mktemp)
 trap 'rm -f "$registry"' EXIT
-curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  "https://raw.githubusercontent.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/$RELEASE_SHA/registry.json" \
-  >"$registry"
-printf '%s  %s\n' "$REGISTRY_SHA256" "$registry" | sha256sum --check --status
+release_dir=/path/to/downloaded-v0.2.0-release-assets
+cp "$release_dir/registry.json" "$registry"
+grep -F "  registry.json" "$release_dir/checksums.txt" \
+  | sed "s#  registry.json#  $registry#" \
+  | sha256sum --check --status
+release_sha=$(<"$release_dir/release-sha.txt")
+test "$release_sha" = "$RELEASE_SHA"
 ```
 
 ## Exact host install and validation

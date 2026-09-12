@@ -35,11 +35,30 @@ trap 'rm -rf "$work_dir"' EXIT
 run_bounded_check() {
   local label=$1
   shift
-  if ! timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_CANARY_TIMEOUT" "$@" >"$work_dir/$label.out" 2>"$work_dir/$label.err"; then
+  local stdout_pipe="$work_dir/$label.stdout.pipe"
+  local stderr_pipe="$work_dir/$label.stderr.pipe"
+  mkfifo "$stdout_pipe" "$stderr_pipe"
+  python3 -c 'import pathlib, sys; raw=sys.stdin.buffer.read(1_048_577); pathlib.Path(sys.argv[1]).write_bytes(raw[:1_048_576]); raise SystemExit(len(raw) > 1_048_576)' "$work_dir/$label.out" <"$stdout_pipe" &
+  local stdout_pid=$!
+  python3 -c 'import pathlib, sys; raw=sys.stdin.buffer.read(1_048_577); pathlib.Path(sys.argv[1]).write_bytes(raw[:1_048_576]); raise SystemExit(len(raw) > 1_048_576)' "$work_dir/$label.err" <"$stderr_pipe" &
+  local stderr_pid=$!
+  set +e
+  timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_CANARY_TIMEOUT" "$@" >"$stdout_pipe" 2>"$stderr_pipe"
+  local command_status=$?
+  wait "$stdout_pid"
+  local stdout_status=$?
+  wait "$stderr_pid"
+  local stderr_status=$?
+  set -e
+  rm -f "$stdout_pipe" "$stderr_pipe"
+  if test "$stdout_status" -ne 0 || test "$stderr_status" -ne 0; then
+    printf '%s output exceeded 1 MiB per stream\n' "$label" >&2
+    exit 1
+  fi
+  if test "$command_status" -ne 0; then
     printf '%s failed\n' "$label" >&2
     exit 1
   fi
-  test "$(wc -c <"$work_dir/$label.out")" -le 1048576 || { printf '%s output exceeded 1 MiB\n' "$label" >&2; exit 1; }
 }
 
 if test -n "$CLIPROXY_ROUTER_DRY_RUN"; then
