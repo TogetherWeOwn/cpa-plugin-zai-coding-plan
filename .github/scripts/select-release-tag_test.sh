@@ -6,7 +6,7 @@ main_sha=$(git rev-parse HEAD)
 control_directory=$(mktemp -d)
 trap 'rm -rf "$control_directory"' EXIT
 
-git clone -q --no-hardlinks . "$control_directory"
+git clone -q --no-hardlinks --no-tags . "$control_directory"
 git -C "$control_directory" checkout -q --detach "$main_sha"
 test ! -e "$control_directory/release-source"
 
