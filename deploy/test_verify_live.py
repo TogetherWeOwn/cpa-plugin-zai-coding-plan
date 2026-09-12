@@ -27,6 +27,8 @@ class VerifyLiveTest(unittest.TestCase):
         dashboard_json=None,
         journal_stalls=False,
         journal_timeout="1",
+        router_dry_run=None,
+        canary_command=None,
         python_optimize=False,
     ):
         with tempfile.TemporaryDirectory() as directory:
@@ -131,6 +133,10 @@ class VerifyLiveTest(unittest.TestCase):
                 env["PYTHONOPTIMIZE"] = "1"
             if management_url is not None:
                 env["CLIPROXY_MANAGEMENT_URL"] = management_url
+            if router_dry_run is not None:
+                env["CLIPROXY_ROUTER_DRY_RUN"] = router_dry_run
+            if canary_command is not None:
+                env["CLIPROXY_CANARY_COMMAND"] = canary_command
             completed = subprocess.run([str(SCRIPT)], cwd=ROOT, env=env, text=True, capture_output=True)
             return completed, curl_log.read_text() if curl_log.exists() else ""
 
@@ -244,6 +250,25 @@ class VerifyLiveTest(unittest.TestCase):
         self.assertLess(elapsed, 10)
         self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
         self.assertNotIn("fixture-plan-marker", completed.stdout + completed.stderr)
+
+    def test_router_dry_run_stdout_is_bounded_during_execution(self):
+        command = "python3 -c 'import os; os.write(1, b\"x\" * 1048577)'"
+        completed, curl_argv = self.run_verify(router_dry_run=command)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(curl_argv, "")
+        self.assertIn("output exceeded 1 MiB per stream", completed.stderr)
+
+    def test_router_dry_run_stderr_is_bounded_during_execution(self):
+        command = "python3 -c 'import os; os.write(2, b\"x\" * 1048577)'"
+        completed, curl_argv = self.run_verify(router_dry_run=command)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(curl_argv, "")
+        self.assertIn("output exceeded 1 MiB per stream", completed.stderr)
+
+    def test_canary_stdout_and_stderr_accept_bounded_output(self):
+        command = "python3 -c 'import os; os.write(1, b\"ok\"); os.write(2, b\"warning\")'"
+        completed, _ = self.run_verify(canary_command=command)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
 
     def test_raw_authenticated_status_rejects_markers_before_projection(self):
         for marker in ("fixture-management-marker", "fixture-plan-marker", "marker"):

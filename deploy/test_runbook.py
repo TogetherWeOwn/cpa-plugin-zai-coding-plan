@@ -23,9 +23,11 @@ class RunbookSecurityTest(unittest.TestCase):
         readme = README.read_text()
         self.assertNotIn("/main/registry.json", config)
         self.assertIn("v0.2.0/registry.json", config)
-        self.assertIn("$RELEASE_SHA/registry.json", readme)
-        self.assertIn("$REGISTRY_SHA256", readme)
-        self.assertIn("sha256sum --check", readme)
+        self.assertIn('release_dir=/path/to/downloaded-v0.2.0-release-assets', readme)
+        self.assertIn('"$release_dir/registry.json"', readme)
+        self.assertIn('grep -F "  registry.json" "$release_dir/checksums.txt"', readme)
+        self.assertIn("sha256sum --check --status", readme)
+        self.assertIn('release_sha=$(<"$release_dir/release-sha.txt")', readme)
         self.assertEqual(len(hashlib.sha256(REGISTRY.read_bytes()).hexdigest()), 64)
 
     def test_config_replacement_is_same_directory_fsynced_and_atomic(self):

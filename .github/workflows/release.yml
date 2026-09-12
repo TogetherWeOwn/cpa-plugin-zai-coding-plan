@@ -71,6 +71,7 @@ jobs:
           git fetch --no-tags origin main
           git merge-base --is-ancestor "$release_sha" origin/main
           printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+          printf 'release_sha=%s\n' "$release_sha" >> "$GITHUB_OUTPUT"
       - name: Verify
         working-directory: release-source
         run: |
@@ -85,16 +86,25 @@ jobs:
         with:
           version: v2.13.2
           working-directory: release-source
+      - name: Resolve immutable host image matrix
+        working-directory: release-source
+        run: |
+          set -euo pipefail
+          .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Package
         working-directory: release-source
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          RAW_TAG: ${{ steps.target.outputs.tag }}
         run: |
           set -euo pipefail
           library="dist/zai-coding-plan-v${VERSION}.so"
           archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
-          make package VERSION="$VERSION" OUT="$library" ARCHIVE="$archive"
-      - name: Verify plugin-store artifact
+          make package VERSION="$VERSION" OUT="$library" ARCHIVE="$archive" \
+            OPERATOR="dist/zai-coding-plan-v${VERSION}-operator.zip" \
+            RELEASE_SHA="$(git rev-parse "$RAW_TAG^{commit}")" \
+            COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/host-images.json"
+      - name: Verify release artifacts
         working-directory: release-source
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -108,11 +118,6 @@ jobs:
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
           go run -buildvcs=false ./.github/scripts/release-validation \
             -mode release -version "$VERSION" -tag "$RAW_TAG"
-      - name: Resolve immutable host image matrix
-        working-directory: release-source
-        run: |
-          set -euo pipefail
-          .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Test host compatibility matrix
         working-directory: release-source
         env:
@@ -125,17 +130,26 @@ jobs:
         working-directory: release-source
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          RELEASE_SHA: ${{ steps.target.outputs.tag_object }}
+          RELEASE_SHA: ${{ steps.release.outputs.release_sha }}
         run: |
           set -euo pipefail
           mkdir release-artifacts
           cp "dist/zai-coding-plan-v${VERSION}.so" \
              "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" \
-             dist/checksums.txt release-artifacts/
-          cp "$RUNNER_TEMP/host-images.json" release-artifacts/compatibility-evidence.json
-          cp deploy/config.yaml.tmpl deploy/router-capacity-source.json deploy/verify-live.sh \
-             deploy/prepare-usage-dir.py deploy/remove-usage-output.py deploy/rollback.sh deploy/README.md release-artifacts/
-          printf '%s\n' "$RELEASE_SHA" > release-artifacts/release-sha.txt
+             "dist/zai-coding-plan-v${VERSION}-operator.zip" \
+             dist/checksums.txt \
+             dist/compatibility-evidence.json \
+             dist/config.yaml.tmpl \
+             dist/registry.json \
+             dist/router-capacity-source.json \
+             dist/verify-live.sh \
+             dist/prepare-usage-dir.py \
+             dist/remove-usage-output.py \
+             dist/rollback.sh \
+             dist/README.md \
+             dist/release-sha.txt \
+             release-artifacts/
+          test "$(<release-artifacts/release-sha.txt)" = "$RELEASE_SHA"
       - name: Upload release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -169,13 +183,16 @@ jobs:
           gh release create "$RAW_TAG" \
             "release-artifacts/zai-coding-plan-v${VERSION}.so" \
             "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
+            "release-artifacts/zai-coding-plan-v${VERSION}-operator.zip" \
             release-artifacts/checksums.txt \
             release-artifacts/compatibility-evidence.json \
             release-artifacts/config.yaml.tmpl \
+            release-artifacts/registry.json \
             release-artifacts/router-capacity-source.json \
             release-artifacts/verify-live.sh \
             release-artifacts/prepare-usage-dir.py \
             release-artifacts/remove-usage-output.py \
+            release-artifacts/rollback.sh \
             release-artifacts/README.md \
             release-artifacts/release-sha.txt \
             --verify-tag --generate-notes

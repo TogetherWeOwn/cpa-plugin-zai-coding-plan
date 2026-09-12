@@ -53,9 +53,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Resolve immutable host image matrix
+        run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Package plugin
-        run: make package VERSION=0.2.0
-      - name: Verify plugin-store artifact
+        run: make package VERSION=0.2.0 COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/host-images.json"
+      - name: Verify release artifacts
         run: |
           set -euo pipefail
           library="dist/zai-coding-plan-v0.2.0.so"
@@ -65,8 +67,6 @@ jobs:
           test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
           make validate-release VERSION=0.2.0 TAG=v0.2.0
-      - name: Resolve immutable host image matrix
-        run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Test host compatibility matrix
         env:
           HOST_MATRIX_NAMESPACE: root
