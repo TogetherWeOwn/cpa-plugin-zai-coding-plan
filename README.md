@@ -23,7 +23,7 @@ Quota data comes from Z.AI's plan endpoint when available. The token-based credi
 - a Z.AI Coding Plan used through supported coding tools
 - Go 1.26 and a GCC-compatible C toolchain only when building from source
 
-The compatibility baseline is CLIProxyAPI v7.2.67. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the pinned SDK, ABI, scheduler-exclusivity, persistence, and threat-model contracts.
+The supported host range is CLIProxyAPI v7.2.67 through the newest `eceasy/cli-proxy-api` v7.2.x tag that passes the compatibility matrix. CI always tests the historical v7.2.67 baseline, the operator-recorded deployed image, and the latest published tag. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the pinned SDK, ABI, scheduler-exclusivity, persistence, and threat-model contracts.
 
 ## Install
 
@@ -49,7 +49,17 @@ install -m 0755 "zai-coding-plan-v${version}.so" /path/to/cliproxy/plugins/linux
 
 Verify `checksums.txt`, then supply `zai-coding-plan_0.1.0_linux_amd64.zip` to the CLIProxyAPI plugin-store flow. The archive contains exactly one root-level entry named `zai-coding-plan.so`.
 
-Restart CLIProxyAPI after changing the native plugin. Confirm registration and all three capabilities before sending traffic. The release is not valid until CI performs this check against the approved immutable `eceasy/cli-proxy-api` v7.2.67 linux/amd64 manifest digest recorded in [`.github/release-host-image.json`](.github/release-host-image.json).
+Restart CLIProxyAPI after changing the native plugin. Confirm registration and all three capabilities before sending traffic. The release is not valid until CI passes the immutable host matrix: the deployed digest from [`deploy/deployed-host-image.json`](deploy/deployed-host-image.json), the latest `eceasy/cli-proxy-api` tag resolved to its linux/amd64 manifest at run time, and the historical baseline from [`.github/host-images.json`](.github/host-images.json).
+
+### Host compatibility matrix
+
+The matrix is maintained in three places:
+
+- the operator updates [`deploy/deployed-host-image.json`](deploy/deployed-host-image.json) immediately after a host deployment, recording the exact linux/amd64 manifest digest;
+- [`.github/host-images.json`](.github/host-images.json) keeps the v7.2.67 baseline while that version remains supported;
+- [`.github/scripts/resolve-host-images.sh`](.github/scripts/resolve-host-images.sh) queries Docker Hub on every run and resolves the highest semantic v7.2.x tag to an immutable linux/amd64 manifest digest.
+
+For every image, CI loads the plugin, checks registration and all three advertised capabilities, sends real requests through the host scheduler, and requires HTTP `200` round trips for `zai/smoke-model` and `zai-openai/smoke-model` against an isolated TLS stub. Any `zai_unmanaged_candidate`, scheduler rejection, missing upstream request, or non-200 response fails the job. [`.github/workflows/host-compatibility.yml`](.github/workflows/host-compatibility.yml) runs this check on pull requests, `main`, manual dispatch, and daily at 07:17 UTC. A failed scheduled run creates a GitHub Actions notification; branch protection should require **Host compatibility / Deployed, latest, and baseline host images** before merge.
 
 ## Configure CLIProxyAPI credentials
 
@@ -135,6 +145,8 @@ curl --fail-with-body \
 | `POST` | `/v0/management/plugins/zai-coding-plan/unblock` | Clear transient blocks without erasing retained quota or usage. Optional JSON: `{"account":"name-or-suffix"}`. |
 | `POST` | `/v0/management/plugins/zai-coding-plan/account-config` | Save or clear validated non-secret account and polling settings. |
 
+The plugin also registers a **Z.ai Quota** resource entry at `/v0/resource/plugins/zai-coding-plan/status`, so current Management Center builds place Z.ai in the left navigation. CLIProxyAPI resource routes are intentionally unauthenticated; the resource page therefore contains no quota payload and no management credential. Detailed quota remains on the authenticated status endpoint above until the Management Center accepts native plugin-backed Quota-page cards.
+
 Status accounts include `five_hour_utilization`, `weekly_utilization`, `five_hour_resets_at`, `weekly_resets_at`, `quota_source`, `quota_observed_at`, `quota_age_seconds`, `quota_stale`, `offpeak`, `health`, and bounded integrity-warning fields. They never expose keys or key hashes.
 
 `account-config` requires an `account` name or suffix. It accepts non-secret fields such as `name`, `plan`, `disabled`, `five_hour_credits`, `weekly_credits`, `threshold_percent`, `polling_interval`, `authoritative_max_age`, and `timeout`; `{"account":"...","clear":true}` restores the base configuration for that account.
@@ -161,7 +173,7 @@ A v0.1.0 tag is created only after all implementation slices are merged and the 
 
 1. green formatting, vet, race-test, lint, build, packaging, secret-scan, and license/notice checks;
 2. machine-checked tag, binary, archive, registry, changelog, and checksum consistency;
-3. a load test in the approved immutable `eceasy/cli-proxy-api` v7.2.67 linux/amd64 image manifest that observes scheduler, usage, and management capabilities plus unauthenticated `401` and authenticated redacted `200` status responses;
+3. the immutable host compatibility matrix green for both release-required rows (the operator-reported deployed digest and the latest Docker Hub tag), with the supported v7.2.67 baseline also exercised; each row must advertise scheduler, usage, and management capabilities, return management `401`/redacted `200`, and serve both prefixed inference paths through a real scheduler pick;
 4. an exact-SHA code review; and
 5. a separate exact-SHA security review for credential handling and management operations.
 

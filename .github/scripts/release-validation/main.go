@@ -22,11 +22,11 @@ import (
 )
 
 const (
-	pluginID             = "zai-coding-plan"
-	libraryName          = pluginID + ".so"
-	hostImageRepository  = "eceasy/cli-proxy-api"
-	hostImageTag         = "v7.2.67"
-	hostImageAMD64Digest = "sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606"
+	pluginID                     = "zai-coding-plan"
+	libraryName                  = pluginID + ".so"
+	hostImageRepository          = "eceasy/cli-proxy-api"
+	baselineHostImageTag         = "v7.2.67"
+	baselineHostImageAMD64Digest = "sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606"
 )
 
 var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
@@ -281,22 +281,48 @@ func normalizeDocument(value string) string {
 }
 
 func validateHostImagePin(root string) error {
-	path := filepath.Join(root, ".github", "release-host-image.json")
-	raw, err := os.ReadFile(path)
+	matrixRaw, err := os.ReadFile(filepath.Join(root, ".github", "host-images.json"))
 	if err != nil {
-		return fmt.Errorf("read release host image pin: %w", err)
+		return fmt.Errorf("read host image matrix: %w", err)
 	}
-	var pin struct {
+	var matrix struct {
+		Repository string `json:"repository"`
+		Platform   string `json:"platform"`
+		Baseline   struct {
+			Tag            string `json:"tag"`
+			ManifestDigest string `json:"manifest_digest"`
+		} `json:"baseline"`
+	}
+	if err := json.Unmarshal(matrixRaw, &matrix); err != nil {
+		return fmt.Errorf("parse host image matrix: %w", err)
+	}
+	if matrix.Repository != hostImageRepository || matrix.Platform != "linux/amd64" || matrix.Baseline.Tag != baselineHostImageTag || matrix.Baseline.ManifestDigest != baselineHostImageAMD64Digest {
+		return errors.New("host image matrix does not preserve the approved v7.2.67 linux/amd64 baseline")
+	}
+	deployedRaw, err := os.ReadFile(filepath.Join(root, "deploy", "deployed-host-image.json"))
+	if err != nil {
+		return fmt.Errorf("read deployed host image pin: %w", err)
+	}
+	var deployed struct {
 		Repository     string `json:"repository"`
 		Tag            string `json:"tag"`
 		Platform       string `json:"platform"`
 		ManifestDigest string `json:"manifest_digest"`
 	}
-	if err := json.Unmarshal(raw, &pin); err != nil {
-		return fmt.Errorf("parse release host image pin: %w", err)
+	if err := json.Unmarshal(deployedRaw, &deployed); err != nil {
+		return fmt.Errorf("parse deployed host image pin: %w", err)
 	}
-	if pin.Repository != hostImageRepository || pin.Tag != hostImageTag || pin.Platform != "linux/amd64" || pin.ManifestDigest != hostImageAMD64Digest {
-		return fmt.Errorf("release host image pin does not match the approved v7.2.67 linux/amd64 manifest")
+	if deployed.Repository != hostImageRepository || deployed.Platform != "linux/amd64" || !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(deployed.Tag) || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(deployed.ManifestDigest) {
+		return errors.New("deployed host image pin is invalid")
+	}
+	for _, path := range []string{
+		filepath.Join(root, ".github", "scripts", "resolve-host-images.sh"),
+		filepath.Join(root, ".github", "scripts", "run-host-matrix.sh"),
+		filepath.Join(root, ".github", "workflows", "host-compatibility.yml"),
+	} {
+		if err := requireNonEmpty(path); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -736,23 +762,20 @@ func validateReleaseWorkflowShape(raw []byte) error {
 				  -mode release -version "$VERSION" -tag "$RAW_TAG"`,
 		},
 		10: {
-			name:             "Extract approved host image",
-			id:               "host",
+			name:             "Resolve immutable host image matrix",
 			workingDirectory: "release-source",
 			command: `set -euo pipefail
-				host=$(.github/scripts/extract-host-image.sh .github/release-host-image.json "$RUNNER_TEMP/host-image")
-				printf 'binary=%s\n' "$host" >> "$GITHUB_OUTPUT"`,
+				.github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"`,
 		},
 		11: {
-			name:             "Test approved host image",
+			name:             "Test host compatibility matrix",
 			workingDirectory: "release-source",
 			env: map[string]string{
-				"VERSION":     "${{ steps.release.outputs.version }}",
-				"HOST_BINARY": "${{ steps.host.outputs.binary }}",
+				"VERSION":               "${{ steps.release.outputs.version }}",
+				"HOST_MATRIX_NAMESPACE": "root",
 			},
 			command: `set -euo pipefail
-				go run -buildvcs=false ./.github/scripts/host-integration \
-				  -host-binary "$HOST_BINARY" -plugin "dist/zai-coding-plan-v${VERSION}.so"`,
+				sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"`,
 		},
 		12: {
 			name:             "Stage release artifacts",

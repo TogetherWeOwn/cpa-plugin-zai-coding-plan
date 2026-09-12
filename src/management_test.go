@@ -16,18 +16,64 @@ import (
 )
 
 func TestManagementRegistrationDeclaresAllRoutes(t *testing.T) {
-	routes := managementRegistration().Routes
+	registration := managementRegistration()
 	want := map[string]string{
 		http.MethodGet + " " + managementStatusPath:         "",
 		http.MethodPost + " " + managementRefreshPath:       "",
 		http.MethodPost + " " + managementUnblockPath:       "",
 		http.MethodPost + " " + managementAccountConfigPath: "",
 	}
-	for _, route := range routes {
+	for _, route := range registration.Routes {
 		delete(want, route.Method+" "+route.Path)
 	}
-	if len(routes) != 4 || len(want) != 0 {
-		t.Fatalf("routes = %#v, missing = %#v", routes, want)
+	if len(registration.Routes) != 4 || len(want) != 0 {
+		t.Fatalf("routes = %#v, missing = %#v", registration.Routes, want)
+	}
+	if len(registration.Resources) != 1 {
+		t.Fatalf("resources = %#v, want one quota menu", registration.Resources)
+	}
+	resource := registration.Resources[0]
+	if resource.Path != resourceStatusPath || resource.Menu != "Z.ai Quota" {
+		t.Fatalf("resource = %#v", resource)
+	}
+}
+
+func TestResourceStatusPageDoesNotExposeQuotaOrManagementAuthentication(t *testing.T) {
+	runtime := &pluginRuntime{}
+	wrongPath := runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/attacker/resource/plugins/" + pluginID + resourceStatusPath,
+	})
+	if wrongPath.StatusCode != http.StatusNotFound {
+		t.Fatalf("lookalike resource path status = %d, want 404", wrongPath.StatusCode)
+	}
+
+	response := runtime.handleManagement(context.Background(), pluginapi.ManagementRequest{
+		Method: http.MethodGet,
+		Path:   "/v0/resource/plugins/" + pluginID + resourceStatusPath,
+	})
+	if response.StatusCode != http.StatusOK || response.Headers.Get("Content-Type") != resourceContentType {
+		t.Fatalf("resource response = %d %#v", response.StatusCode, response.Headers)
+	}
+	body := string(response.Body)
+	for _, forbidden := range []string{"five_hour_utilization", "weekly_utilization", "managementKey", "Authorization:"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("resource page contains forbidden %q", forbidden)
+		}
+	}
+	for _, required := range []string{"Z.ai Coding Plan quota", managementStatusPath} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("resource page missing %q", required)
+		}
+	}
+	csp := response.Headers.Get("Content-Security-Policy")
+	for _, directive := range []string{"default-src 'none'", "style-src 'unsafe-inline'", "base-uri 'none'", "form-action 'none'"} {
+		if !strings.Contains(csp, directive) {
+			t.Fatalf("content security policy %q missing %q", csp, directive)
+		}
+	}
+	if strings.Contains(csp, "frame-ancestors") {
+		t.Fatalf("content security policy %q blocks documented cross-origin Management Center embedding", csp)
 	}
 }
 
