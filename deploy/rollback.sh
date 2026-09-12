@@ -45,9 +45,29 @@ test "$(stat -c '%u:%a' -- "$CLIPROXY_BACKUP")" = '0:600' || {
   exit 1
 }
 
-restored=$(mktemp --tmpdir="$config_dir" .config.yaml.rollback.XXXXXX)
+restored=
+curl_config=
 cleanup() { rm -f -- "$restored" "$curl_config"; }
 trap cleanup EXIT
+
+# Validate the management key and build the curl config BEFORE replacing the live
+# config file below, so an invalid key can never abort this script after the restore
+# has already landed but before the service has been told to reload it.
+curl_config=$(mktemp)
+python3 - "$CLIPROXY_MANAGEMENT_KEY_FILE" "$curl_config" <<'PY'
+import os, pathlib, sys
+key_path=pathlib.Path(sys.argv[1])
+if key_path.is_symlink() or key_path.stat().st_uid != 0 or key_path.stat().st_mode & 0o777 != 0o600:
+    raise SystemExit('management key file must be root-owned mode 0600 and not a symlink')
+key=key_path.read_text().strip()
+if not key or '\n' in key or '\r' in key:
+    raise SystemExit('management key file must contain one non-empty line')
+path=pathlib.Path(sys.argv[2])
+path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
+path.chmod(0o600)
+PY
+
+restored=$(mktemp --tmpdir="$config_dir" .config.yaml.rollback.XXXXXX)
 install -m 0600 -- "$CLIPROXY_BACKUP" "$restored"
 python3 - "$restored" "$config_dir" <<'PY'
 import os, pathlib, sys
@@ -62,19 +82,6 @@ PY
 mv -T -- "$restored" "$CLIPROXY_CONFIG"
 restored=
 
-curl_config=$(mktemp)
-python3 - "$CLIPROXY_MANAGEMENT_KEY_FILE" "$curl_config" <<'PY'
-import os, pathlib, sys
-key_path=pathlib.Path(sys.argv[1])
-if key_path.is_symlink() or key_path.stat().st_uid != 0 or key_path.stat().st_mode & 0o777 != 0o600:
-    raise SystemExit('management key file must be root-owned mode 0600 and not a symlink')
-key=key_path.read_text().strip()
-if not key or '\n' in key or '\r' in key:
-    raise SystemExit('management key file must contain one non-empty line')
-path=pathlib.Path(sys.argv[2])
-path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
-path.chmod(0o600)
-PY
 if curl -q --fail --fail-early --max-redirs 0 --silent --show-error --connect-timeout 2 --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' --config "$curl_config" -X DELETE "$management_url" >/dev/null; then
   printf '%s\n' 'management-plane plugin removal PASS'
 else
