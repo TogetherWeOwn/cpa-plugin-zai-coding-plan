@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, release-recovery/v0.1.0]
+    branches: [main]
   pull_request:
 
 permissions:
@@ -54,20 +54,20 @@ jobs:
           go-version-file: go.mod
           cache: true
       - name: Package plugin
-        run: make package VERSION=0.1.0
+        run: make package VERSION=0.2.0
       - name: Verify plugin-store artifact
         run: |
           set -euo pipefail
-          library="dist/zai-coding-plan-v0.1.0.so"
-          archive="dist/zai-coding-plan_0.1.0_linux_amd64.zip"
+          library="dist/zai-coding-plan-v0.2.0.so"
+          archive="dist/zai-coding-plan_0.2.0_linux_amd64.zip"
           test -s "$library"
           nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
           test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
           cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
-          make validate-release VERSION=0.1.0 TAG=v0.1.0
+          make validate-release VERSION=0.2.0 TAG=v0.2.0
       - name: Resolve immutable host image matrix
         run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Test host compatibility matrix
         env:
           HOST_MATRIX_NAMESPACE: root
-        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.1.0 OUT=dist/zai-coding-plan-v0.1.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
+        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.2.0 OUT=dist/zai-coding-plan-v0.2.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"

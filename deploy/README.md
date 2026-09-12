@@ -1,14 +1,28 @@
-# v0.1.0 dogfood deployment
+# v0.2.0 dogfood deployment
 
 This directory records the exact non-secret inputs and checks for the first Z.ai lane deployment. It does not contain a plan key, management key, host token, or populated config.
 
 ## Preconditions proved before host changes
 
-- Tag `v0.1.0` resolves to commit `5c758c04acbd9367d1c8fff1342bf651847dcac2`.
-- The plugin-store registry source is pinned to that immutable commit. Its `registry.json` SHA-256 is `86800494fa9606971c22ee5f08872dbc3c02280ad65fe9a88fdeaf9063c5db0d`.
-- `checksums.txt` pins the store archive to `6593a624135d07fdc54516a7837d873c2f54b6b4cdc0f70810c13ae0235ec2bf` and the shared library to `6a24524516054ede57a1faf91cabe91c4d200fa1a7bb54485dbacb1a30bc72c5`.
-- Release workflow run `34490526081` passed the exact-image load check against `eceasy/cli-proxy-api@sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606`.
+- The tagged v0.2.0 commit, registry bytes, and release checksums are recorded by the release artifact manifest; do not substitute a working-tree or untagged artifact.
+- The compatibility evidence records deployed, latest, and v7.2.67 baseline image digests and successful host checks.
 - `config.yaml.tmpl` follows `docs/ARCHITECTURE.md`: full-key pairing is rendered only on the host; `zai-coding-plan` is the sole enabled scheduler at priority `1000`.
+
+The release operator bundle is the source of truth for the exact commit, registry digest, compatibility evidence, live verifier, rollback script, and per-file modes. Verify its manifest and `checksums.txt` before using any command below.
+
+### Release preflight
+
+```sh
+bundle=/path/to/zai-coding-plan-v0.2.0-operator.zip
+checksums=/path/to/checksums.txt
+sha256sum --check "$checksums"
+unzip -Z1 "$bundle" | sort
+```
+
+Each bundle entry must match the strict manifest exactly; extra, duplicate, traversal, or unresolved-template entries are invalid.
+
+- The plugin-store registry source is pinned to the immutable release commit recorded in the bundle manifest.
+- `checksums.txt` covers the shared library, plugin-store archive, operator bundle, compatibility evidence, live verifier, rollback script, and corrected templates.
 
 Run the credential-free checks before opening the operator handoff:
 
@@ -22,9 +36,9 @@ Verify the exact registry bytes before merging the template into the host config
 registry=$(mktemp)
 trap 'rm -f "$registry"' EXIT
 curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  'https://raw.githubusercontent.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/5c758c04acbd9367d1c8fff1342bf651847dcac2/registry.json' \
+  "https://raw.githubusercontent.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/$RELEASE_SHA/registry.json" \
   >"$registry"
-printf '%s  %s\n' '86800494fa9606971c22ee5f08872dbc3c02280ad65fe9a88fdeaf9063c5db0d' "$registry" | sha256sum --check --status
+printf '%s  %s\n' "$REGISTRY_SHA256" "$registry" | sha256sum --check --status
 ```
 
 ## Exact host install and validation
@@ -44,7 +58,10 @@ curl_config=$(mktemp)
 trap 'rm -f "$curl_config"' EXIT
 python3 - "$management_key_file" "$curl_config" <<'PY'
 import pathlib, sys
-key=pathlib.Path(sys.argv[1]).read_text().strip()
+key_path=pathlib.Path(sys.argv[1])
+if key_path.is_symlink() or key_path.stat().st_mode & 0o777 != 0o600:
+    raise SystemExit("management key file must be mode 0600 and not a symlink")
+key=key_path.read_text().strip()
 if not key or "\n" in key or "\r" in key:
     raise SystemExit("management key file must contain one non-empty line")
 path=pathlib.Path(sys.argv[2])
@@ -98,7 +115,7 @@ if curl --fail --fail-early --max-redirs 0 --silent --show-error \
   --output "$install_response" --stderr "$install_error" \
   -X POST \
   -H 'Content-Type: application/json' \
-  --data '{"version":"0.1.0"}' \
+  --data '{"version":"0.2.0"}' \
   'http://127.0.0.1:8317/v0/management/plugin-store/zai-coding-plan/install'
 then
   :
@@ -120,17 +137,18 @@ try:
     response=json.loads(path.read_text())
 except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit("plugin install response was not valid JSON")
-expected={"id":"zai-coding-plan","version":"0.1.0","install_type":"github-release"}
+expected={"id":"zai-coding-plan","version":"0.2.0","install_type":"github-release"}
 if any(response.get(key) != value for key, value in expected.items()):
     raise SystemExit("plugin install response did not confirm the expected release")
 path_value=response.get("path")
-if not isinstance(path_value, str) or "/linux/amd64/" not in path_value or "0.1.0" not in path_value:
+if not isinstance(path_value, str) or "/linux/amd64/" not in path_value or "0.2.0" not in path_value:
     raise SystemExit("plugin install response did not report the expected versioned linux/amd64 path")
 PY
 
 usage_dir=/srv/cliproxy-usage
-install -d -o root -g root -m 0700 "$usage_dir"
-test ! -L "$usage_dir"
+# This helper accepts only the fixed usage path, opens every ancestor with
+# O_NOFOLLOW, then verifies the pathname still names the secured directory fd.
+python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"
 test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
 CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
 ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
@@ -140,7 +158,7 @@ CLIPROXY_SERVICE_UNIT=cliproxy.service \
   "$repo/deploy/verify-live.sh"
 ```
 
-The plugin-store response must report `id=zai-coding-plan`, `version=0.1.0`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
+The plugin-store response must report `id=zai-coding-plan`, `version=0.2.0`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
 
 `router-capacity-source.json` is the exact Model Router capacity-source shape for one opaque Z.ai model ID. Repeat it per model ID and retain `unknownTelemetry: fail-open` during dogfood. The operator dispatcher already maps `zai/*`, `zai-openai/*`, and `glm*` to lane `zai`; the live check is a dry-run selection with the Z.ai model enabled, followed by one bounded canary issue. Do not re-pin an issue mid-run.
 
@@ -149,25 +167,32 @@ The plugin-store response must report `id=zai-coding-plan`, `version=0.1.0`, `in
 ```sh
 set -euo pipefail
 umask 077
+repo=/home/ubuntu/cpa-plugin-zai-coding-plan
 config=/home/ubuntu/cliproxy/config.yaml
 backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
+test -f "$backup" && test ! -L "$backup"
+test "$(stat -c %a "$backup")" = 600
+config_dir=$(dirname "$config")
+test ! -L "$config_dir"
+test "$(stat -c %U:%G "$config_dir")" = root:root
+test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 curl_config=$(mktemp)
-trap 'rm -f "$curl_config"' EXIT
+delete_response=$(mktemp)
+delete_error=$(mktemp)
+trap 'rm -f "$curl_config" "$delete_response" "$delete_error"' EXIT
 python3 - "$management_key_file" "$curl_config" <<'PY'
 import pathlib, sys
-key=pathlib.Path(sys.argv[1]).read_text().strip()
+key_path=pathlib.Path(sys.argv[1])
+if key_path.is_symlink() or key_path.stat().st_mode & 0o777 != 0o600:
+    raise SystemExit("management key file must be mode 0600 and not a symlink")
+key=key_path.read_text().strip()
 if not key or "\n" in key or "\r" in key:
     raise SystemExit("management key file must contain one non-empty line")
 path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
 PY
-curl --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  --max-time 5 --max-filesize 1048576 \
-  --config "$curl_config" \
-  -X DELETE \
-  'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan'
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"
 test "$(stat -c %U:%G "$config_dir")" = root:root
@@ -189,8 +214,23 @@ try:
 finally:
     os.close(directory_fd)
 PY
+if curl --fail --fail-early --max-redirs 0 --silent --show-error \
+  --connect-timeout 2 --max-time 5 --max-filesize 1048576 \
+  --config "$curl_config" \
+  --output "$delete_response" --stderr "$delete_error" \
+  -X DELETE \
+  'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan'
+then
+  :
+else
+  if grep -Eq '^curl: \([0-9]+\) [[:print:]]{0,240}$' "$delete_error"; then
+    tr -d '\r\n' <"$delete_error" >&2
+    printf '\n' >&2
+  fi
+  printf 'management unavailable; configuration restore remains recoverable; plugin cleanup is pending (response body suppressed)\n' >&2
+fi
 systemctl reload cliproxy.service || systemctl restart cliproxy.service
-rm -f /srv/cliproxy-usage/zai.json
+python3 "$repo/deploy/remove-usage-output.py"
 ```
 
 The rollback is complete only after the restored configuration has been loaded by the running service. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.

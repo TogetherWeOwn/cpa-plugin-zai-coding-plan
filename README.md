@@ -3,7 +3,7 @@
 `zai-coding-plan` is a native Linux/amd64 plugin for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI). It pairs the Anthropic and OpenAI-compatible credentials backed by each Z.AI Coding Plan key, tracks the plan's five-hour and weekly quota, keeps impaired accounts out of scheduling, and exposes redacted status through CLIProxyAPI's authenticated management API.
 
 > [!IMPORTANT]
-> Version `0.1.0` is a release candidate until the exact release commit passes CI, immutable-image compatibility, code-review, and security-review gates and the `v0.1.0` tag is published. Do not deploy an untagged artifact as a release.
+> Version `0.2.0` is a release candidate until the exact release commit passes CI, immutable-image compatibility, code-review, and security-review gates and the `v0.2.0` tag is published. Do not deploy an untagged artifact as a release.
 
 ## Capabilities
 
@@ -30,8 +30,8 @@ The supported host range is CLIProxyAPI v7.2.67 through the newest `eceasy/cli-p
 Release assets use one version consistently:
 
 ```text
-zai-coding-plan-v0.1.0.so
-zai-coding-plan_0.1.0_linux_amd64.zip
+zai-coding-plan-v0.2.0.so
+zai-coding-plan_0.2.0_linux_amd64.zip
 checksums.txt
 ```
 
@@ -40,14 +40,14 @@ checksums.txt
 Download the versioned shared library and `checksums.txt` from the same GitHub release, then verify before installation:
 
 ```sh
-version=0.1.0
+version=0.2.0
 sha256sum --check checksums.txt
 install -m 0755 "zai-coding-plan-v${version}.so" /path/to/cliproxy/plugins/linux/amd64/
 ```
 
 ### Install the plugin-store archive
 
-Verify `checksums.txt`, then supply `zai-coding-plan_0.1.0_linux_amd64.zip` to the CLIProxyAPI plugin-store flow. The archive contains exactly one root-level entry named `zai-coding-plan.so`.
+Verify `checksums.txt`, then supply `zai-coding-plan_0.2.0_linux_amd64.zip` to the CLIProxyAPI plugin-store flow. The archive contains exactly one root-level entry named `zai-coding-plan.so`.
 
 Restart CLIProxyAPI after changing the native plugin. Confirm registration and all three capabilities before sending traffic. The release is not valid until CI passes the immutable host matrix: the deployed digest from [`deploy/deployed-host-image.json`](deploy/deployed-host-image.json), the latest `eceasy/cli-proxy-api` tag resolved to its linux/amd64 manifest at run time, and the historical baseline from [`.github/host-images.json`](.github/host-images.json).
 
@@ -160,8 +160,8 @@ make test
 make lint
 make test-release
 make validate-source
-make package VERSION=0.1.0
-make validate-release VERSION=0.1.0 TAG=v0.1.0
+make package VERSION=0.2.0
+make validate-release VERSION=0.2.0 TAG=v0.2.0
 (cd dist && sha256sum --check checksums.txt)
 ```
 
@@ -169,7 +169,7 @@ make validate-release VERSION=0.1.0 TAG=v0.1.0
 
 ## Release policy
 
-A v0.1.0 tag is created only after all implementation slices are merged and the exact release commit has:
+A v0.2.0 tag is created only after all implementation slices are merged and the exact release commit has:
 
 1. green formatting, vet, race-test, lint, build, packaging, secret-scan, and license/notice checks;
 2. machine-checked tag, binary, archive, registry, changelog, and checksum consistency;

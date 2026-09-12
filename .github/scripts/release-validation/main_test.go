@@ -19,14 +19,14 @@ func TestValidateVersion(t *testing.T) {
 		version string
 		wantErr bool
 	}{
-		{name: "release", tag: "v0.1.0", version: "0.1.0"},
-		{name: "prerelease", tag: "v0.1.0-rc.1", version: "0.1.0-rc.1"},
-		{name: "tag mismatch", tag: "v0.1.1", version: "0.1.0", wantErr: true},
-		{name: "missing tag prefix", tag: "0.1.0", version: "0.1.0", wantErr: true},
+		{name: "release", tag: "v0.2.0", version: "0.2.0"},
+		{name: "prerelease", tag: "v0.2.0-rc.1", version: "0.2.0-rc.1"},
+		{name: "tag mismatch", tag: "v0.1.1", version: "0.2.0", wantErr: true},
+		{name: "missing tag prefix", tag: "0.2.0", version: "0.2.0", wantErr: true},
 		{name: "leading zero", tag: "v0.01.0", version: "0.01.0", wantErr: true},
 		{name: "make expression", tag: "v$(shell,id)", version: "$(shell,id)", wantErr: true},
-		{name: "newline", tag: "v0.1.0\nnext", version: "0.1.0\nnext", wantErr: true},
-		{name: "slash", tag: "v0.1.0/path", version: "0.1.0/path", wantErr: true},
+		{name: "newline", tag: "v0.2.0\nnext", version: "0.2.0\nnext", wantErr: true},
+		{name: "slash", tag: "v0.2.0/path", version: "0.2.0/path", wantErr: true},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -42,8 +42,8 @@ func TestValidateVersion(t *testing.T) {
 func TestValidateRelease(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err != nil {
+	writeReleaseFixture(t, root, "0.2.0")
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -51,9 +51,9 @@ func TestValidateRelease(t *testing.T) {
 func TestValidateReleaseRejectsRegistryMismatch(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
+	writeReleaseFixture(t, root, "0.2.0")
 	writeRegistry(t, root, "0.1.1")
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "registry version") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "registry version") {
 		t.Fatalf("validateRelease() error = %v, want registry version error", err)
 	}
 }
@@ -61,14 +61,14 @@ func TestValidateReleaseRejectsRegistryMismatch(t *testing.T) {
 func TestValidateReleaseRejectsRegistryArchiveMismatch(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
+	writeReleaseFixture(t, root, "0.2.0")
 	writeRegistryValue(t, root, registryPlugin{
 		ID:      pluginID,
-		Version: "0.1.0",
+		Version: "0.2.0",
 		License: "MIT",
 		Release: registryRelease{Archive: pluginID + "_0.1.1_linux_amd64.zip", Checksums: "checksums.txt"},
 	})
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "registry archive") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "registry archive") {
 		t.Fatalf("validateRelease() error = %v, want registry archive error", err)
 	}
 }
@@ -76,10 +76,10 @@ func TestValidateReleaseRejectsRegistryArchiveMismatch(t *testing.T) {
 func TestValidateReleaseRequiresChecksumsForBothArtifacts(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
-	archive := filepath.Join(root, "dist", pluginID+"_0.1.0_linux_amd64.zip")
+	writeReleaseFixture(t, root, "0.2.0")
+	archive := filepath.Join(root, "dist", pluginID+"_0.2.0_linux_amd64.zip")
 	writeChecksums(t, filepath.Join(root, "dist", "checksums.txt"), []string{archive})
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "want 2") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "want 2") {
 		t.Fatalf("validateRelease() error = %v, want missing artifact checksum error", err)
 	}
 }
@@ -87,12 +87,12 @@ func TestValidateReleaseRequiresChecksumsForBothArtifacts(t *testing.T) {
 func TestValidateReleaseRejectsArchiveMismatch(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
-	archive := filepath.Join(root, "dist", pluginID+"_0.1.0_linux_amd64.zip")
+	writeReleaseFixture(t, root, "0.2.0")
+	archive := filepath.Join(root, "dist", pluginID+"_0.2.0_linux_amd64.zip")
 	writeArchive(t, archive, []byte("different"))
-	library := filepath.Join(root, "dist", pluginID+"-v0.1.0.so")
+	library := filepath.Join(root, "dist", pluginID+"-v0.2.0.so")
 	writeChecksums(t, filepath.Join(root, "dist", "checksums.txt"), []string{library, archive})
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "does not match") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("validateRelease() error = %v, want archive mismatch error", err)
 	}
 }
@@ -338,38 +338,9 @@ func TestValidateReleaseWorkflowBoundaryRejectsFoldedPublicationCommand(t *testi
 	}
 }
 
-func TestValidateReleaseWorkflowBoundaryRejectsRecoveryWeakening(t *testing.T) {
-	t.Parallel()
-	for _, test := range []struct {
-		name string
-		old  string
-		new  string
-	}{
-		{name: "direct branch push", old: "tags: [\"v*\"]", new: "tags: [\"v*\"]\n    branches: [release-recovery/v0.1.0]"},
-		{name: "broad recovery branch", old: "branches: [release-recovery/v0.1.0]", new: "branches: [release-recovery/*]"},
-		{name: "failed upstream accepted", old: "github.event.workflow_run.conclusion == 'success'", new: "github.event.workflow_run.conclusion != ''"},
-		{name: "mutable control checkout", old: "ref: ${{ github.sha }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
-		{name: "control validation removed", old: "working-directory: release-controls\n        run: |\n          set -euo pipefail", new: "working-directory: release-source\n        run: |\n          set -euo pipefail"},
-		{name: "mutable recovery checkout", old: "ref: ${{ steps.target.outputs.tag }}", new: "ref: ${{ github.event.workflow_run.head_sha }}"},
-		{name: "branch-derived publish tag", old: "RAW_TAG: ${{ needs.build.outputs.tag }}", new: "RAW_TAG: ${{ github.ref_name }}"},
-		{name: "missing publish tag object", old: "EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag_object }}", new: "EXPECTED_TAG_OBJECT: deadbeef"},
-	} {
-		test := test
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			root := t.TempDir()
-			workflow := strings.Replace(validReleaseWorkflow, test.old, test.new, 1)
-			writeReleaseWorkflows(t, root, workflow)
-			if err := validateReleaseWorkflowBoundary(root); err == nil {
-				t.Fatal("validateReleaseWorkflowBoundary() accepted weakened recovery workflow")
-			}
-		})
-	}
-}
-
 func writeReleaseWorkflows(t *testing.T, root, release string) {
 	t.Helper()
-	writeWorkflow(t, root, "ci.yml", "name: CI\non:\n  push:\n    branches: [main, release-recovery/v0.1.0]\n  pull_request:\n")
+	writeWorkflow(t, root, "ci.yml", "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\n")
 	writeWorkflow(t, root, "release.yml", release)
 }
 
@@ -388,21 +359,10 @@ const validReleaseWorkflow = `name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_run:
-    workflows: [CI]
-    types: [completed]
-    branches: [release-recovery/v0.1.0]
 permissions:
   contents: read
 jobs:
   build:
-    if: >-
-      github.event_name == 'push' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_repository.full_name == github.repository &&
-       github.event.workflow_run.head_branch == 'release-recovery/v0.1.0' &&
-       github.event.workflow_run.head_sha == github.workflow_sha)
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.release.outputs.version }}
@@ -436,11 +396,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_REF: ${{ github.ref }}
           EVENT_SHA: ${{ github.sha }}
-          WORKFLOW_RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           raw_tag=$(.github/scripts/select-release-tag.sh \
-            "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" "$WORKFLOW_RUN_SHA" .)
+            "$EVENT_NAME" "$EVENT_REF" "$EVENT_SHA" .)
           tag_object=$(git rev-parse "$raw_tag")
           printf 'tag=%s\n' "$raw_tag" >> "$GITHUB_OUTPUT"
           printf 'tag_object=%s\n' "$tag_object" >> "$GITHUB_OUTPUT"
@@ -520,12 +479,17 @@ jobs:
         working-directory: release-source
         env:
           VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_SHA: ${{ steps.target.outputs.tag_object }}
         run: |
           set -euo pipefail
           mkdir release-artifacts
           cp "dist/zai-coding-plan-v${VERSION}.so" \
              "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" \
              dist/checksums.txt release-artifacts/
+          cp "$RUNNER_TEMP/host-images.json" release-artifacts/compatibility-evidence.json
+          cp deploy/config.yaml.tmpl deploy/router-capacity-source.json deploy/verify-live.sh \
+             deploy/prepare-usage-dir.py deploy/remove-usage-output.py deploy/rollback.sh deploy/README.md release-artifacts/
+          printf '%s\n' "$RELEASE_SHA" > release-artifacts/release-sha.txt
       - name: Upload release artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -555,13 +519,20 @@ jobs:
           set -euo pipefail
           actual_tag_object=$(gh api "repos/${GH_REPO}/git/ref/tags/${RAW_TAG}" --jq .object.sha)
           test "$actual_tag_object" = "$EXPECTED_TAG_OBJECT"
-          test "$RAW_TAG" = v0.1.0
-          test "$EXPECTED_TAG_OBJECT" = 93441174a393b2d7487df954b4f10103742285fb
           gh release create "$RAW_TAG" \
             "release-artifacts/zai-coding-plan-v${VERSION}.so" \
             "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
             release-artifacts/checksums.txt \
+            release-artifacts/compatibility-evidence.json \
+            release-artifacts/config.yaml.tmpl \
+            release-artifacts/router-capacity-source.json \
+            release-artifacts/verify-live.sh \
+            release-artifacts/prepare-usage-dir.py \
+            release-artifacts/remove-usage-output.py \
+            release-artifacts/README.md \
+            release-artifacts/release-sha.txt \
             --verify-tag --generate-notes
+
 `
 
 func writeReleaseFixture(t *testing.T, root, version string) {
@@ -635,7 +606,7 @@ func writeDocumentation(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte(canonicalNotice), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changelog := "## [0.1.0] - 2026-09-08\n\n[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0\n"
+	changelog := "## [0.2.0] - 2026-09-08\n\n[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0\n"
 	if err := os.WriteFile(filepath.Join(root, "CHANGELOG.md"), []byte(changelog), 0o644); err != nil {
 		t.Fatal(err)
 	}
