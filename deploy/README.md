@@ -119,7 +119,7 @@ if curl --fail --fail-early --max-redirs 0 --silent --show-error \
   -X POST \
   -H 'Content-Type: application/json' \
   --data '{"version":"0.2.0"}' \
-  'http://127.0.0.1:8317/v0/management/plugin-store/zai-coding-plan/install'
+  'http://127.0.0.1:8317/v0/management/plugin-store/subscription-pool/install'
 then
   :
 else
@@ -140,7 +140,7 @@ try:
     response=json.loads(path.read_text())
 except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit("plugin install response was not valid JSON")
-expected={"id":"zai-coding-plan","version":"0.2.0","install_type":"github-release"}
+expected={"id":"subscription-pool","version":"0.2.0","install_type":"github-release"}
 if any(response.get(key) != value for key, value in expected.items()):
     raise SystemExit("plugin install response did not confirm the expected release")
 path_value=response.get("path")
@@ -161,7 +161,7 @@ CLIPROXY_SERVICE_UNIT=cliproxy.service \
   "$repo/deploy/verify-live.sh"
 ```
 
-The plugin-store response must report `id=zai-coding-plan`, `version=0.2.0`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
+The plugin-store response must report `id=subscription-pool`, `version=0.2.0`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
 
 `router-capacity-source.json` is the exact Model Router capacity-source shape for one opaque Z.ai model ID. Repeat it per model ID and retain `unknownTelemetry: fail-open` during dogfood. The operator dispatcher already maps `zai/*`, `zai-openai/*`, and `glm*` to lane `zai`; the live check is a dry-run selection with the Z.ai model enabled, followed by one bounded canary issue. Do not re-pin an issue mid-run.
 
@@ -222,7 +222,7 @@ if curl --fail --fail-early --max-redirs 0 --silent --show-error \
   --config "$curl_config" \
   --output "$delete_response" --stderr "$delete_error" \
   -X DELETE \
-  'http://127.0.0.1:8317/v0/management/plugins/zai-coding-plan'
+  'http://127.0.0.1:8317/v0/management/plugins/subscription-pool'
 then
   :
 else

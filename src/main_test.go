@@ -3,12 +3,43 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/zai"
 )
+
+// writeSrcCPAConfigFixture writes a host CLIProxyAPI config in the
+// coordinator's own nested shape, mirroring
+// internal/coordinator/zai_integration_test.go's writeCoordinatorCPAConfigFixture,
+// so ABI-layer tests here can drive a real coordinator+zai module without
+// touching any of zai's now-unexported internals.
+func writeSrcCPAConfigFixture(t *testing.T, path, authDir, key string) {
+	t.Helper()
+	raw := "auth-dir: " + authDir + "\n" +
+		"plugins:\n" +
+		"  enabled: true\n" +
+		"  configs:\n" +
+		"    " + pluginID + ":\n" +
+		"      enabled: true\n" +
+		"      priority: 1000\n" +
+		"claude-api-key:\n" +
+		"  - api-key: " + key + "\n" +
+		"    base-url: https://api.z.ai/api/anthropic\n" +
+		"openai-compatibility:\n" +
+		"  - name: zai-coding-plan\n" +
+		"    base-url: https://api.z.ai/api/coding/paas/v4\n" +
+		"    api-key-entries:\n" +
+		"      - api-key: " + key + "\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestPluginRegistration(t *testing.T) {
 	registration := pluginRegistration()
@@ -29,7 +60,19 @@ func TestPluginRegistration(t *testing.T) {
 func TestSchedulerPickDeclinesUnmanagedTraffic(t *testing.T) {
 	previous := runtimeState
 	defer func() { runtimeState = previous }()
-	runtimeState = schedulerTestRuntime(time.Now().UTC(), schedulerAccount("managed", "claude-auth", "openai-auth"))
+
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeSrcCPAConfigFixture(t, configPath, authDir, "test-only-scheduler-key")
+
+	c := coordinator.New(zai.NewModule())
+	rawConfig := []byte("cpa-config-path: " + configPath + "\nproviders:\n  zai:\n    default-plan: pro\n")
+	if err := c.Reconfigure(rawConfig); err != nil {
+		t.Fatalf("Reconfigure() error = %v", err)
+	}
+	runtimeState = c
+
 	request, err := json.Marshal(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: "other-auth", Provider: "gemini"}}})
 	if err != nil {
 		t.Fatal(err)
@@ -51,8 +94,24 @@ func TestSchedulerPickDeclinesUnmanagedTraffic(t *testing.T) {
 	}
 }
 
+// managementRoutesWire mirrors the JSON shape of the coordinator's
+// (unexported) managementRoutesBody, since only its JSON tags, not the type
+// itself, are part of the ABI contract this package relies on.
+type managementRoutesWire struct {
+	Routes []struct {
+		Method      string `json:"method"`
+		Path        string `json:"path"`
+		Description string `json:"description,omitempty"`
+	} `json:"routes"`
+	Resources []struct {
+		Path        string `json:"path"`
+		Menu        string `json:"menu"`
+		Description string `json:"description,omitempty"`
+	} `json:"resources,omitempty"`
+}
+
 func TestManagementRegistrationRoutes(t *testing.T) {
-	raw, err := okEnvelope(managementRegistration())
+	raw, err := okEnvelope(runtimeState.ManagementRegistration())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,24 +119,28 @@ func TestManagementRegistrationRoutes(t *testing.T) {
 	if err := json.Unmarshal(raw, &envelope); err != nil {
 		t.Fatal(err)
 	}
-	var routes managementRoutes
+	var routes managementRoutesWire
 	if err := json.Unmarshal(envelope.Result, &routes); err != nil {
 		t.Fatal(err)
 	}
-	if len(routes.Routes) != 4 {
-		t.Fatalf("routes = %#v, want four routes", routes.Routes)
+	// The coordinator's own aggregated status route, plus the zai module's 4
+	// declared routes (status/refresh/unblock/account-config) = 5 total.
+	if len(routes.Routes) != 5 {
+		t.Fatalf("routes = %#v, want 5 routes (coordinator status + zai's 4)", routes.Routes)
 	}
-	if route := routes.Routes[0]; route.Method != "GET" || route.Path != managementStatusPath {
-		t.Fatalf("route = %#v, want GET %s", route, managementStatusPath)
+	wantStatusPath := "/v0/management/plugins/" + pluginID + "/status"
+	if route := routes.Routes[0]; route.Method != "GET" || route.Path != wantStatusPath {
+		t.Fatalf("route = %#v, want GET %s", route, wantStatusPath)
 	}
 }
 
 func TestManagementHandleStatus(t *testing.T) {
 	// The host forwards the full request path (internal/pluginhost
 	// management.go ServeManagementHTTP passes r.URL.Path verbatim).
+	statusPath := "/v0/management/plugins/" + pluginID + "/status"
 	request, err := json.Marshal(pluginapi.ManagementRequest{
 		Method: "GET",
-		Path:   managementStatusPath,
+		Path:   statusPath,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -99,10 +162,14 @@ func TestManagementHandleStatus(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status code = %d, want 200", resp.StatusCode)
 	}
-	if got := resp.Headers.Get("Content-Type"); got != managementContentType {
-		t.Fatalf("content type = %q, want %q", got, managementContentType)
+	if got := resp.Headers.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("content type = %q, want application/json", got)
 	}
-	var status managementStatusBody
+	var status struct {
+		Plugin  string `json:"plugin"`
+		Status  string `json:"status"`
+		Version string `json:"version"`
+	}
 	if err := json.Unmarshal(resp.Body, &status); err != nil {
 		t.Fatal(err)
 	}

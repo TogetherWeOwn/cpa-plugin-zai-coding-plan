@@ -2,9 +2,9 @@
   "schema_version": 1,
   "plugins": [
     {
-      "id": "zai-coding-plan",
-      "name": "Z.AI Coding Plan",
-      "description": "Quota-aware Z.AI Coding Plan account pooling for CLIProxyAPI.",
+      "id": "subscription-pool",
+      "name": "Subscription Pool",
+      "description": "Neutral multi-provider subscription-pool coordinator for CLIProxyAPI, currently hosting quota-aware Z.AI Coding Plan account pooling.",
       "author": "TogetherWeOwn",
       "version": "0.2.0",
       "repository": "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
@@ -13,7 +13,7 @@
       "platforms": ["linux-amd64"],
       "capabilities": ["scheduler", "usage", "management"],
       "release": {
-        "archive": "zai-coding-plan_0.2.0_linux_amd64.zip",
+        "archive": "subscription-pool_0.2.0_linux_amd64.zip",
         "checksums": "checksums.txt"
       },
       "tags": ["Z.AI", "GLM", "Coding Plan", "quota", "pool"]

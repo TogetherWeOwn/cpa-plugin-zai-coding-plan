@@ -2,20 +2,20 @@
 
 ## Purpose
 
-`cpa-plugin-zai-coding-plan` is a native CLIProxyAPI (CPA) plugin that makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes.
+`subscription-pool` (repository `cpa-plugin-zai-coding-plan`) is a native CLIProxyAPI (CPA) plugin. It is a neutral coordinator that hosts one or more provider modules behind a single CPA scheduler/usage-plugin slot; today it hosts exactly one, `zai`, which makes a pool of Z.ai GLM Coding Plan subscriptions behave as quota-aware logical accounts across CPA's Anthropic and OpenAI-compatible lanes.
 
-Version 0.1:
+Version 0.1 (zai module):
 
 1. discover and pair the two CPA credentials backed by each plan key;
 2. poll Z.AI's plan-quota endpoint for authoritative five-hour and weekly utilization, with local credit estimation as a degraded fallback;
 3. remain CPA's sole active scheduler plugin, delegate to CPA's native scheduler while every account is healthy, and exclude an entire paired account when it is exhausted, suspended, disabled, or invalid; and
 4. expose authenticated management status and recovery operations.
 
-The plugin does not proxy inference, rewrite requests, or mint credentials. Its primary quota signal is `GET https://api.z.ai/api/monitor/usage/quota/limit`, queried per account with that account's plan key. Local accounting is a conservative fallback when the endpoint fails, and an observed upstream `429` remains authoritative.
+The plugin does not proxy inference, rewrite requests, or mint credentials. The zai module's primary quota signal is `GET https://api.z.ai/api/monitor/usage/quota/limit`, queried per account with that account's plan key. Local accounting is a conservative fallback when the endpoint fails, and an observed upstream `429` remains authoritative.
 
 ## Exact CLIProxyAPI plugin contract
 
-The baseline is CLIProxyAPI v7.2.67, using the same SDK version and native-plugin pattern as the MIT-licensed reference [`hrz6976/cpa-plugin-opencode-go-pool`](https://github.com/hrz6976/cpa-plugin-opencode-go-pool):
+The baseline is CLIProxyAPI v7.2.67, using the SDK's native c-shared/dlopen plugin pattern:
 
 ```go
 require github.com/router-for-me/CLIProxyAPI/v7 v7.2.67
@@ -122,28 +122,43 @@ Registration advertises schema version 1 and the `scheduler`, `usage_plugin`, an
 
 ## Module layout
 
+The coordinator/provider split gives each provider module a compiler-enforced privacy boundary: Go's `c-shared` build mode requires every file in `src/` to stay `package main` (only files there may `import "C"` / `//export`), but any other directory is a normal importable package. `src/` therefore shrinks to pure ABI glue, `internal/coordinator` owns lifecycle/dispatch, and each provider lives in its own `internal/providers/<id>` package that no other package can reach into.
+
 ```text
 .
 ├── .github/
 │   ├── ISSUE_TEMPLATE/
 │   ├── workflows/ci.yml
 │   ├── workflows/release.yml
+│   ├── workflows/host-compatibility.yml
 │   └── pull_request_template.md
 ├── docs/ARCHITECTURE.md
 ├── src/
-│   ├── main.go          # C ABI init/call/free/shutdown
-│   ├── dispatch.go      # RPC dispatch and registration
-│   ├── hostcalls.go     # envelopes and redacted host logging
-│   ├── config.go        # plugin config and CPA config projection
-│   ├── accounts.go      # exact-key pairing and stable auth IDs
-│   ├── settings.go      # atomic 0600 persistence
-│   ├── quota.go         # bounded authoritative quota polling/parsing
-│   ├── credits.go       # fixed-point fallback credit calculation
-│   ├── windows.go       # fallback five-hour and weekly ledgers
-│   ├── state.go         # synchronized account health
-│   ├── failures.go      # 401/403/429 classification/reset hints
-│   ├── scheduler.go     # degraded-mode healthy selection
-│   └── management.go    # management registration/handlers
+│   ├── plugin.go             # envelope/wire-error types, plugin registration metadata
+│   ├── plugin_linux.go       # C ABI init/call/free/shutdown
+│   └── runtime_state.go      # var runtimeState = coordinator.New(zai.New())
+├── internal/
+│   ├── providermodule/
+│   │   └── interface.go      # Module interface + HostConfig; the coordinator/provider boundary
+│   ├── coordinator/
+│   │   ├── coordinator.go    # Coordinator: lifecycle, scheduler dispatch, PluginID
+│   │   ├── registry.go       # authID -> providerID dispatch registry + invariant 1 enforcement
+│   │   ├── config.go         # plugins.configs.subscription-pool.* parsing, providers.<id> projection
+│   │   ├── management.go     # aggregated status route + per-module route delegation
+│   │   └── manifest.go       # manifest.json + empty provider stub-dir creation
+│   ├── providers/zai/
+│   │   ├── module.go         # zaiModule: providermodule.Module wrapping the zai runtime
+│   │   ├── accounts.go       # exact-key pairing and stable auth IDs
+│   │   ├── settings.go       # atomic 0600 persistence (via internal/securestore)
+│   │   ├── quota.go          # bounded authoritative quota polling/parsing
+│   │   ├── credits.go        # fixed-point fallback credit calculation
+│   │   ├── windows.go        # fallback five-hour and weekly ledgers
+│   │   ├── failures.go       # 401/403/429 classification/reset hints
+│   │   ├── scheduler.go      # degraded-mode healthy selection
+│   │   ├── management.go     # zai's own management routes/handlers
+│   │   └── runtime.go        # zai runtime state machine
+│   ├── securestore/          # generic 0700/0600, symlink-rejecting, atomic-replace storage
+│   └── testfixture/          # shared CPA config fixture builder for tests
 ├── config.example.yaml
 ├── registry.json
 ├── Makefile
@@ -151,7 +166,7 @@ Registration advertises schema version 1 and the `scheduler`, `usage_plugin`, an
 └── go.sum
 ```
 
-Files may stay in `package main`, matching the reference plugin and Go's `c-shared` build constraint. Policy code must remain independently testable without CGO or wall-clock sleeps.
+Only `src/` must stay `package main`; every `internal/` package is independently testable without CGO or wall-clock sleeps, and `internal/providers/zai` in particular carries no CGO dependency at all.
 
 ## Configuration
 
@@ -178,49 +193,54 @@ A valid logical account has exactly one matching Claude entry and exactly one ma
 
 ### Plugin schema
 
-Implemented v0.1 configuration:
+The coordinator owns only `enabled`, `priority`, and `cpa-config-path`; everything else nests under `providers.<id>`, and each provider owns its own sub-schema exclusively. `providers.zai`'s field set is an unchanged lift of the pre-coordinator flat schema:
 
 ```yaml
 plugins:
   enabled: true
   configs:
-    zai-coding-plan:
+    subscription-pool:
       enabled: true
       priority: 1000
       cpa-config-path: /app/config.yaml
-      quota-refresh-interval: 2m
-      authoritative-max-age: 5m
-      threshold-percent: 97
-      suspend-duration: 30m
-      fallback-cooldown: 10m
-      state-retention: 8d
-      default-plan: pro
-      accounts:
-        - key-suffix: "display-or-override-match"
-          name: "zai-pro-1"
-          plan: pro
-          disabled: false
-          five-hour-credits: 12000
-          weekly-credits: 60000
+      providers:
+        zai:
+          quota-refresh-interval: 2m
+          authoritative-max-age: 5m
+          threshold-percent: 97
+          suspend-duration: 30m
+          fallback-cooldown: 10m
+          state-retention: 8d
+          default-plan: pro
+          accounts:
+            - key-suffix: "display-or-override-match"
+              name: "zai-pro-1"
+              plan: pro
+              disabled: false
+              five-hour-credits: 12000
+              weekly-credits: 60000
+        opencode-go: {}
 ```
+
+`providers.opencode-go` is currently unimplemented; the coordinator only reserves its empty on-disk stub directory (see Persistence). Its schema and module logic land in a separate slice and must never be developed from, or informed by, any read of a third-party opencode-go plugin implementation.
 
 | Field | Default | Rule |
 |---|---:|---|
 | `priority` | `1000` | Host-level `PluginInstanceConfig` field, not plugin payload. V0.1 requires this plugin to be the only enabled scheduler; the high value makes accidental lower-priority schedulers non-winning but is not a substitute for exclusivity validation. |
 | `cpa-config-path` | `config.yaml` | Host config path readable by the plugin. |
-| `quota-refresh-interval` | `2m` | Base jittered interval; accept only one to three minutes in v0.1. |
-| `authoritative-max-age` | `5m` | Maximum age for scheduling from the last successful quota response before switching to the estimator. Must exceed the maximum jittered poll interval. |
-| `threshold-percent` | `97` | Integer 1–100; either window reaching it exhausts the account. |
-| `suspend-duration` | `30m` | Positive duration for 401/403. |
-| `fallback-cooldown` | `10m` | Conservative 429 block when no trustworthy reset is present. |
-| `state-retention` | `8d` | Must exceed one week. |
-| `default-plan` | none | Optional `lite`, `pro`, or `max`; otherwise each account declares a plan. |
-| `accounts[].key-suffix` | required | Override matcher only; ambiguous matches fail closed. |
-| `accounts[].name` | generated | Unique display name. |
-| `accounts[].plan` | inherited | `lite`, `pro`, `max`, or `custom`. |
-| `accounts[].disabled` | `false` | Excludes both credentials. |
-| `accounts[].five-hour-credits` | plan value | Positive custom override. |
-| `accounts[].weekly-credits` | plan value | Positive custom override. |
+| `providers.zai.quota-refresh-interval` | `2m` | Base jittered interval; accept only one to three minutes in v0.1. |
+| `providers.zai.authoritative-max-age` | `5m` | Maximum age for scheduling from the last successful quota response before switching to the estimator. Must exceed the maximum jittered poll interval. |
+| `providers.zai.threshold-percent` | `97` | Integer 1–100; either window reaching it exhausts the account. |
+| `providers.zai.suspend-duration` | `30m` | Positive duration for 401/403. |
+| `providers.zai.fallback-cooldown` | `10m` | Conservative 429 block when no trustworthy reset is present. |
+| `providers.zai.state-retention` | `8d` | Must exceed one week. |
+| `providers.zai.default-plan` | none | Optional `lite`, `pro`, or `max`; otherwise each account declares a plan. |
+| `providers.zai.accounts[].key-suffix` | required | Override matcher only; ambiguous matches fail closed. |
+| `providers.zai.accounts[].name` | generated | Unique display name. |
+| `providers.zai.accounts[].plan` | inherited | `lite`, `pro`, `max`, or `custom`. |
+| `providers.zai.accounts[].disabled` | `false` | Excludes both credentials. |
+| `providers.zai.accounts[].five-hour-credits` | plan value | Positive custom override. |
+| `providers.zai.accounts[].weekly-credits` | plan value | Positive custom override. |
 
 Published plan buckets:
 
@@ -343,9 +363,18 @@ A real 429 overrides a lower estimate. Repeated failures extend, never shorten, 
 
 ## Scheduler
 
-CPA v7.2.67 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `zai-coding-plan`. Startup/dogfood validation inspects the configured and registered capability set and refuses the Z.ai lane if any second scheduler is enabled or if this plugin is not first. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
+CPA v7.2.67 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `subscription-pool`. Startup/dogfood validation inspects the configured and registered capability set and refuses the lane if any second scheduler is enabled or if this plugin is not first. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
 
-For `scheduler.pick`:
+The coordinator, not any individual provider module, holds this single scheduler slot and dispatches every `scheduler.pick`/`usage.handle` call across its hosted modules under six invariants:
+
+1. **No overlapping ownership.** The dispatch registry (`authID -> providerID`) is rebuilt from every module's `OwnedAuthIDs()` after each successful reconfigure, staged then swapped atomically. If any auth ID is claimed by more than one module, the whole reconfigure fails and the previous registry stays live.
+2. **Zero recognizing modules -> unhandled.** The coordinator calls every module's `Recognize` on the incoming candidates before calling any module's `Pick`. If none recognize any candidate, it returns `Handled:false` so unrelated providers remain untouched.
+3. **More than one recognizing module -> fail closed.** If candidates in one request are recognized by more than one module, the coordinator returns a `coordinator_mixed_provider_pick` error rather than calling any module's `Pick`.
+4. **Usage dispatches strictly by auth ID.** `usage.handle` looks up `record.AuthID` in the registry and never trusts a self-reported provider field on the record; an auth ID the registry does not map to any hosted module is a silent no-op, matching CPA's own behavior for usage records belonging to unrelated providers.
+5. **Recognized-but-unmanaged or all-impaired never silently falls back.** Exactly one module recognizes the candidates, and the coordinator propagates that module's own `Pick` result verbatim, including any hard scheduler error such as `zai_unmanaged_candidate` or `zai_no_capacity`.
+6. **Never blend domains.** A structural consequence of invariant 3: no code path can merge two modules' pick results, because a mixed-recognition request never reaches any module's `Pick`.
+
+For the zai module's own `Pick`, called only once the coordinator has established zai (and no other module) owns every candidate in the request:
 
 1. Map candidates to logical accounts and reject the call with a scheduler error if any recognized Z.ai candidate is absent from the validated snapshot.
 2. Recompute expired health.
@@ -353,41 +382,57 @@ For `scheduler.pick`:
 4. In degraded state, discard every candidate belonging to an impaired account, including its sibling credential.
 5. Round-robin among healthy candidates per provider/model, preserving header-derived stickiness when possible (`X-Session-ID`, `Session-Id`, `Session_id`, `X-Client-Request-Id`). Return the selected `AuthID` with `Handled:true`.
 6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a non-retryable scheduler error such as `zai_no_capacity`. In v7.2.67, returning `Handled:false` falls back to built-in selection and is forbidden on this path.
-7. If the request contains no recognized Z.ai candidate, return `Handled:false` so unrelated providers remain untouched.
+7. If the request contains no recognized Z.ai candidate, return `Handled:false` (so the coordinator's invariant 2 branch is unreachable here — Recognize already filtered this module out).
 
-The scheduler performs no disk, network, or host callback while holding its lock. Contract tests assert the all-impaired plugin error propagates through `pluginhost.PickAuth` with `handled=true` and cannot fall back to a known-bad credential.
+The scheduler performs no disk, network, or host callback while holding its lock. Contract tests assert the all-impaired module error propagates through the coordinator and `pluginhost.PickAuth` with `handled=true` and cannot fall back to a known-bad credential.
 
 ## Management API
 
-`management.register` adds routes mounted by CPA under `/v0/management` and protected by CPA's management key:
+`management.register` adds routes mounted by CPA under `/v0/management` and protected by CPA's management key. The coordinator itself answers one aggregated status route; each hosted module additionally declares its own routes, which the coordinator dispatches to verbatim (no path rewriting in this slice — a module's route keeps whatever path it declared before the coordinator existed):
 
-| Method/path | Purpose |
-|---|---|
-| `GET /v0/management/plugins/zai-coding-plan/status` | Redacted utilization/reset state, quota source and freshness, off-peak state, health, and warnings. |
-| `POST /v0/management/plugins/zai-coding-plan/refresh` | Poll quota now, compact fallback state, and recompute health. |
-| `POST /v0/management/plugins/zai-coding-plan/unblock` | Clear transient blocks, then recompute retained quota/usage. |
-| `POST /v0/management/plugins/zai-coding-plan/account-config` | Save/clear non-key plan metadata. |
+| Method/path | Owner | Purpose |
+|---|---|---|
+| `GET /v0/management/plugins/subscription-pool/status` | coordinator | Aggregated status: `{"plugin":"subscription-pool","status":...,"providers":{"<id>":<module's own Status() JSON>}}`. Callers reading a specific provider's fields (e.g. `accounts`) must unwrap `providers.<id>` first. |
+| `GET /v0/management/plugins/zai-coding-plan/status` | zai module | Redacted utilization/reset state, quota source and freshness, off-peak state, health, and warnings. This is also exactly the JSON aggregated under `providers.zai` in the coordinator's own status route above. |
+| `POST /v0/management/plugins/zai-coding-plan/refresh` | zai module | Poll quota now, compact fallback state, and recompute health. |
+| `POST /v0/management/plugins/zai-coding-plan/unblock` | zai module | Clear transient blocks, then recompute retained quota/usage. |
+| `POST /v0/management/plugins/zai-coding-plan/account-config` | zai module | Save/clear non-key plan metadata. |
 
-Collector-facing status is locked by `src/testdata/status_authoritative.golden.json` and `src/testdata/status_fallback.golden.json`. Utilizations are finite ratios in `[0,1]`; `quota_age_seconds` is a non-negative integer; timestamp fields are RFC 3339; `quota_source` is `quota_api` or `estimate`; and unknown top-level or account fields fail closed. Freshness, reset, off-peak, health, and estimator-integrity fields are machine-visible. `quota_error` is omitted when empty and otherwise contains only a bounded redacted message. Status never contains full keys, derived account identities, request bodies, authorization headers, or management credentials. A retained snapshot returned with `status=reconfigure_rejected` is projected only as stale `config_error` capacity and cannot be selected as healthy capacity; live installation verification rejects that state outright.
+Collector-facing zai status is locked by `internal/providers/zai/testdata/status_authoritative.golden.json` and `status_fallback.golden.json`. Utilizations are finite ratios in `[0,1]`; `quota_age_seconds` is a non-negative integer; timestamp fields are RFC 3339; `quota_source` is `quota_api` or `estimate`; and unknown top-level or account fields fail closed. Freshness, reset, off-peak, health, and estimator-integrity fields are machine-visible. `quota_error` is omitted when empty and otherwise contains only a bounded redacted message. Status never contains full keys, derived account identities, request bodies, authorization headers, or management credentials. A retained snapshot returned with `status=reconfigure_rejected` is projected only as stale `config_error` capacity and cannot be selected as healthy capacity; live installation verification rejects that state outright.
 
 The host collector writes its separate sanitized lane file only beneath a pre-created root-owned real directory. It rejects symlinked or substituted output parents, holds an `O_DIRECTORY|O_NOFOLLOW` descriptor across mode enforcement, same-directory temporary creation, atomic replacement, and directory fsync, and writes the final file as mode `0600`. This root-owned collector output is distinct from the unprivileged CPA state directory below.
 
-CPA must reject unauthenticated management HTTP requests before dispatch. The plugin registers `/v0/resource/plugins/zai-coding-plan/status` as a Management Center menu entry, but CPA deliberately dispatches resource routes without management authentication. The resource therefore serves only a static explanatory shell with a restrictive content-security policy; quota data remains exclusively on the authenticated management endpoint.
+CPA must reject unauthenticated management HTTP requests before dispatch. The zai module registers `/v0/resource/plugins/zai-coding-plan/status` as a Management Center menu entry (kept Z.ai-branded, since this is the zai module's own resource view, distinct from the coordinator's neutral identity), but CPA deliberately dispatches resource routes without management authentication. The resource therefore serves only a static explanatory shell with a restrictive content-security policy; quota data remains exclusively on the authenticated management endpoint.
 
 ## Persistence and concurrency
 
+The coordinator namespaces all on-disk state under its own plugin ID, then gives each hosted module an isolated subdirectory it alone writes to:
+
 ```text
-<auth-dir>/zai-coding-plan/
-├── settings.json
-├── state.json
-└── settings.recovery.json  # transient during settings commit recovery
+<auth-dir>/subscription-pool/
+├── manifest.json              # coordinator-owned, diagnostic only — never read back for dispatch
+└── providers/
+    ├── zai/
+    │   ├── settings.json
+    │   ├── state.json
+    │   └── settings.recovery.json  # transient during settings commit recovery
+    └── opencode-go/                # reserved, empty stub — no module implemented yet
 ```
 
-Requirements:
+`manifest.json` records which providers are currently registered and when; the in-memory dispatch registry, rebuilt from every live module's `OwnedAuthIDs()` on each reconfigure, remains the sole source of truth for dispatch — the manifest is never consulted to make a routing decision. Manifest write failures are soft (logged, never fail `Reconfigure`).
+
+`internal/securestore` implements the durable-storage primitives once, generically, and both the coordinator (for `manifest.json` and the `providers/opencode-go` stub) and the zai module (for its own `providers/zai/*`) use it as a library rather than reimplementing it:
 
 - directory mode `0700`;
 - files mode `0600`, including replacements;
 - reject symlink targets and use atomic same-directory replacement;
+- `os.SameFile`-based detection of a directory replaced out from under an open handle;
+- two-phase commit with a recovery marker for interrupted writes.
+
+`internal/securestore` does no path composition itself — callers build the full absolute directory (e.g. `filepath.Join(pluginAuthDir, "providers", "zai")`) before opening a store, keeping each module decoupled from the coordinator's own identity.
+
+zai-module-specific requirements, unchanged from pre-coordinator behavior:
+
 - never persist the API key;
 - key settings by hashed account identity so renames survive but rotations reset;
 - one in-process mutex protects the active snapshot, state, dedup set, and cursors;
@@ -427,7 +472,8 @@ Z.ai keys, CPA management authentication, usage/account state, local ledger inte
 
 | Threat | Control |
 |---|---|
-| Scheduler precedence bypasses quota enforcement | Require `zai-coding-plan` to be the only enabled scheduler, validate the configured/registered capability set before admitting the lane, and retain `priority: 1000` only as defense in depth. |
+| Scheduler precedence bypasses quota enforcement | Require `subscription-pool` to be the only enabled scheduler, validate the configured/registered capability set before admitting the lane, and retain `priority: 1000` only as defense in depth. |
+| A provider module blends into or reads another module's private state | Compiler-enforced package boundary (`internal/providermodule.Module`, one package per provider) plus the coordinator's dispatch registry rejecting any auth ID claimed by more than one module. |
 | Keys leak through logs/status/errors | Keys live only in the active in-memory account snapshot for exact pairing and authenticated quota requests; they are never persisted or returned. Central redaction and tests scan every serialized output/log/error path for fixture keys. |
 | Quota request leaks or is redirected | Fix production requests to HTTPS `api.z.ai`, reject redirects, disable ambient proxy use by default, never forward credentials cross-origin, cap body/time, validate schema, and never log raw headers or bodies. |
 | Wrong pairing through suffix collision | Pair only by full-key equality. Suffix matching is override-only and ambiguity fails closed. |
@@ -479,6 +525,14 @@ Unit/property coverage:
 - shutdown cancels and joins every background worker before callback teardown/unload;
 - permissions, atomic replacement, corrupt files, symlinks; and
 - collector status golden JSON plus adversarial strict-schema, RFC JSON, timestamp, integer-age, rejected-reconfiguration, one-line-key, and output-parent substitution probes.
+
+Coordinator/dispatch coverage (`internal/coordinator`):
+
+- registry rejects overlapping/duplicate auth-ID ownership across modules, and a rejected rebuild leaves the previous registry live;
+- zero recognizing modules returns `Handled:false`; more than one recognizing module fails closed with `coordinator_mixed_provider_pick`;
+- usage dispatch resolves strictly through the registry by auth ID, never a self-reported provider field;
+- a recognized-but-unmanaged or all-impaired pick propagates the owning module's own hard error verbatim, never a silent `Handled:false`;
+- manifest write and empty provider stub-dir (`providers/opencode-go`) creation, and idempotence across repeated reconfigures.
 
 ABI/integration coverage:
 

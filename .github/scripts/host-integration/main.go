@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	pluginID       = "zai-coding-plan"
-	statusPath     = "/v0/management/plugins/zai-coding-plan/status"
+	pluginID       = "subscription-pool"
+	statusPath     = "/v0/management/plugins/subscription-pool/status"
 	pluginListPath = "/v0/management/plugins"
 	smokePlanKey   = "release-integration-plan-key-000001"
 	managementKey  = "release-integration-management-key"
@@ -86,14 +86,14 @@ plugins:
   enabled: true
   dir: plugins
   configs:
-    zai-coding-plan:
+    subscription-pool:
       enabled: true
       priority: 1000
 `, filepath.Join(root, "auth"), smokePlanKey, smokePlanKey)
 	if err := os.WriteFile(cpaConfigPath, []byte(cpaConfig), 0o600); err != nil {
 		return err
 	}
-	pluginConfig := fmt.Sprintf("cpa-config-path: %s\ndefault-plan: pro\naccounts:\n  - key-suffix: 000001\n    name: release-capability\n    plan: pro\n", cpaConfigPath)
+	pluginConfig := fmt.Sprintf("cpa-config-path: %s\nproviders:\n  zai:\n    default-plan: pro\n    accounts:\n      - key-suffix: 000001\n        name: release-capability\n        plan: pro\n", cpaConfigPath)
 	request, err := json.Marshal(map[string]any{"config_yaml": []byte(pluginConfig)})
 	if err != nil {
 		return err
@@ -193,17 +193,19 @@ plugins:
   enabled: true
   dir: %q
   configs:
-    zai-coding-plan:
+    subscription-pool:
       enabled: true
       priority: 1000
       cpa-config-path: %q
-      quota-refresh-interval: 1m
-      authoritative-max-age: 3m
-      default-plan: pro
-      accounts:
-        - key-suffix: 000001
-          name: release-integration
-          plan: pro
+      providers:
+        zai:
+          quota-refresh-interval: 1m
+          authoritative-max-age: 3m
+          default-plan: pro
+          accounts:
+            - key-suffix: 000001
+              name: release-integration
+              plan: pro
 `, port, managementKey, authDir, clientKey, smokePlanKey, smokePlanKey, filepath.Join(root, "plugins"), configPath)
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {
 		return err
@@ -305,17 +307,23 @@ func verifyStatusAuthentication(client *http.Client, baseURL string) error {
 		return fmt.Errorf("authenticated status code = %d, want 200", authorized.StatusCode)
 	}
 	var body struct {
-		Plugin   string `json:"plugin"`
-		Status   string `json:"status"`
-		Accounts []struct {
-			KeySuffix string `json:"key_suffix"`
-		} `json:"accounts"`
+		Plugin    string                     `json:"plugin"`
+		Status    string                     `json:"status"`
+		Providers map[string]json.RawMessage `json:"providers"`
 	}
 	if err := json.Unmarshal(authorized.Body, &body); err != nil {
 		return fmt.Errorf("decode authenticated status: %w", err)
 	}
-	if body.Plugin != pluginID || body.Status != "registered" || len(body.Accounts) != 1 || body.Accounts[0].KeySuffix != "redacted" {
-		return fmt.Errorf("authenticated status is not registered and redacted: plugin=%q status=%q accounts=%d suffix=%q", body.Plugin, body.Status, len(body.Accounts), firstSuffix(body.Accounts))
+	var zaiStatus struct {
+		Accounts []struct {
+			KeySuffix string `json:"key_suffix"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(body.Providers["zai"], &zaiStatus); err != nil {
+		return fmt.Errorf("decode zai provider status: %w", err)
+	}
+	if body.Plugin != pluginID || body.Status != "registered" || len(zaiStatus.Accounts) != 1 || zaiStatus.Accounts[0].KeySuffix != "redacted" {
+		return fmt.Errorf("authenticated status is not registered and redacted: plugin=%q status=%q accounts=%d suffix=%q", body.Plugin, body.Status, len(zaiStatus.Accounts), firstSuffix(zaiStatus.Accounts))
 	}
 	return nil
 }

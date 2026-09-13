@@ -102,27 +102,27 @@ func validateReleaseWorkflowShape(raw []byte) error {
 		8: {name: "Resolve immutable host image matrix", workingDirectory: "release-source", command: `set -euo pipefail
 			.github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"`},
 		9: {name: "Package", workingDirectory: "release-source", env: map[string]string{"VERSION": "${{ steps.release.outputs.version }}", "RAW_TAG": "${{ steps.target.outputs.tag }}"}, command: `set -euo pipefail
-			library="dist/zai-coding-plan-v${VERSION}.so"
-			archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+			library="dist/subscription-pool-v${VERSION}.so"
+			archive="dist/subscription-pool_${VERSION}_linux_amd64.zip"
 			make package VERSION="$VERSION" OUT="$library" ARCHIVE="$archive" \
-			  OPERATOR="dist/zai-coding-plan-v${VERSION}-operator.zip" \
+			  OPERATOR="dist/subscription-pool-v${VERSION}-operator.zip" \
 			  RELEASE_SHA="$(git rev-parse "$RAW_TAG^{commit}")" \
 			  COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/host-images.json"`},
 		10: {name: "Verify release artifacts", workingDirectory: "release-source", env: map[string]string{"VERSION": "${{ steps.release.outputs.version }}", "RAW_TAG": "${{ steps.target.outputs.tag }}"}, command: `set -euo pipefail
-			library="dist/zai-coding-plan-v${VERSION}.so"
-			archive="dist/zai-coding-plan_${VERSION}_linux_amd64.zip"
+			library="dist/subscription-pool-v${VERSION}.so"
+			archive="dist/subscription-pool_${VERSION}_linux_amd64.zip"
 			nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
-			test "$(unzip -Z1 "$archive")" = "zai-coding-plan.so"
-			cmp "$library" <(unzip -p "$archive" zai-coding-plan.so)
+			test "$(unzip -Z1 "$archive")" = "subscription-pool.so"
+			cmp "$library" <(unzip -p "$archive" subscription-pool.so)
 			go run -buildvcs=false ./.github/scripts/release-validation \
 			  -mode release -version "$VERSION" -tag "$RAW_TAG"`},
 		11: {name: "Test host compatibility matrix", workingDirectory: "release-source", env: map[string]string{"VERSION": "${{ steps.release.outputs.version }}", "HOST_MATRIX_NAMESPACE": "root"}, command: `set -euo pipefail
-			sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="dist/zai-coding-plan-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"`},
+			sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix VERSION="$VERSION" OUT="dist/subscription-pool-v${VERSION}.so" HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"`},
 		12: {name: "Stage release artifacts", workingDirectory: "release-source", env: map[string]string{"VERSION": "${{ steps.release.outputs.version }}", "RELEASE_SHA": "${{ steps.release.outputs.release_sha }}"}, command: `set -euo pipefail
 			mkdir release-artifacts
-			cp "dist/zai-coding-plan-v${VERSION}.so" \
-			   "dist/zai-coding-plan_${VERSION}_linux_amd64.zip" \
-			   "dist/zai-coding-plan-v${VERSION}-operator.zip" \
+			cp "dist/subscription-pool-v${VERSION}.so" \
+			   "dist/subscription-pool_${VERSION}_linux_amd64.zip" \
+			   "dist/subscription-pool-v${VERSION}-operator.zip" \
 			   dist/checksums.txt \
 			   dist/compatibility-evidence.json \
 			   dist/config.yaml.tmpl \
@@ -266,9 +266,9 @@ func validatePublishJob(raw []byte, node *yaml.Node) error {
 		actual_tag_object=$(gh api "repos/${GH_REPO}/git/ref/tags/${RAW_TAG}" --jq .object.sha)
 		test "$actual_tag_object" = "$EXPECTED_TAG_OBJECT"
 		gh release create "$RAW_TAG" \
-		  "release-artifacts/zai-coding-plan-v${VERSION}.so" \
-		  "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
-		  "release-artifacts/zai-coding-plan-v${VERSION}-operator.zip" \
+		  "release-artifacts/subscription-pool-v${VERSION}.so" \
+		  "release-artifacts/subscription-pool_${VERSION}_linux_amd64.zip" \
+		  "release-artifacts/subscription-pool-v${VERSION}-operator.zip" \
 		  release-artifacts/checksums.txt \
 		  release-artifacts/compatibility-evidence.json \
 		  release-artifacts/config.yaml.tmpl \
