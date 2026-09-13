@@ -56,18 +56,18 @@ jobs:
       - name: Resolve immutable host image matrix
         run: .github/scripts/resolve-host-images.sh > "$RUNNER_TEMP/host-images.json"
       - name: Package plugin
-        run: make package VERSION=0.2.0 COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/host-images.json"
+        run: make package VERSION=0.3.0 COMPATIBILITY_EVIDENCE="$RUNNER_TEMP/host-images.json"
       - name: Verify release artifacts
         run: |
           set -euo pipefail
-          library="dist/subscription-pool-v0.2.0.so"
-          archive="dist/subscription-pool_0.2.0_linux_amd64.zip"
+          library="dist/subscription-pool-v0.3.0.so"
+          archive="dist/subscription-pool_0.3.0_linux_amd64.zip"
           test -s "$library"
           nm -D "$library" | grep -Eq '[[:space:]]cliproxy_plugin_init$'
           test "$(unzip -Z1 "$archive")" = "subscription-pool.so"
           cmp "$library" <(unzip -p "$archive" subscription-pool.so)
-          make validate-release VERSION=0.2.0 TAG=v0.2.0
+          make validate-release VERSION=0.3.0 TAG=v0.3.0
       - name: Test host compatibility matrix
         env:
           HOST_MATRIX_NAMESPACE: root
-        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.2.0 OUT=dist/subscription-pool-v0.2.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
+        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.3.0 OUT=dist/subscription-pool-v0.3.0.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
