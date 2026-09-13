@@ -17,12 +17,16 @@ import (
 const defaultCPAConfigPath = "config.yaml"
 
 // coordinatorConfig is the coordinator's own YAML shape: everything under
-// plugins.configs.subscription-pool except the host-owned enabled/priority
-// fields, which the CPA host strips into PluginInstanceConfig before the
-// plugin ever sees its raw config.
+// plugins.configs.subscription-pool. The host always re-injects its own
+// enabled/priority scalars into this raw node before handing it to the
+// plugin (pluginhost's normalizedConfigNode/ensureMappingScalar, present in
+// both v7.2.67 and v7.2.157) rather than stripping them, so KnownFields(true)
+// must declare and ignore them here or every real reconfigure call fails.
 type coordinatorConfig struct {
 	CPAConfigPath string               `yaml:"cpa-config-path"`
 	Providers     map[string]yaml.Node `yaml:"providers"`
+	Enabled       *bool                `yaml:"enabled"`
+	Priority      *int                 `yaml:"priority"`
 }
 
 func parseCoordinatorConfig(raw []byte) (coordinatorConfig, error) {

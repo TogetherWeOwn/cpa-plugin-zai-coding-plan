@@ -459,9 +459,11 @@ func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
 }
 
 // pluginConfigNode builds the plugin's own config_yaml node: only
-// cpa-config-path and providers.* — enabled/priority are host-owned fields
-// the coordinator's own coordinatorConfig (KnownFields(true)) does not
-// declare and would reject if present here.
+// cpa-config-path and providers.*. The real host always re-injects its own
+// enabled/priority scalars into this node before the plugin sees it
+// (pluginhost's normalizedConfigNode/ensureMappingScalar), so omitting them
+// here exercises the same shape the coordinator must also accept when they
+// are present.
 func pluginConfigNode(t *testing.T, cpaConfigPath string) yaml.Node {
 	t.Helper()
 	var configNode yaml.Node
