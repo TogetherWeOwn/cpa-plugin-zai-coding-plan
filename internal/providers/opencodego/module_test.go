@@ -531,6 +531,133 @@ func TestFresherPollUpdatesStaleInferredExhaustion(t *testing.T) {
 	}
 }
 
+func TestStatusPollsEachAccountWithItsOwnDashboardKey(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	const (
+		go1Key = "test-only-go-1-key"
+		go2Key = "test-only-go-2-key"
+		go3Key = "test-only-go-3-key"
+	)
+	responses := map[string]string{
+		go1Key: usageFixture(
+			usageWindowFixture("ok", 1, now.Add(2*time.Hour)),
+			usageWindowFixture("ok", 1, now.Add(5*24*time.Hour)),
+			usageWindowFixture("ok", 3, now.Add(29*24*time.Hour)),
+		),
+		go2Key: usageFixture(
+			usageWindowFixture("ok", 1, now.Add(2*time.Hour)),
+			usageWindowFixture("ok", 1, now.Add(5*24*time.Hour)),
+			usageWindowFixture("rate-limited", 100, now.Add(10*24*time.Hour)),
+		),
+		go3Key: usageFixture(
+			usageWindowFixture("ok", 1, now.Add(2*time.Hour)),
+			usageWindowFixture("ok", 1, now.Add(5*24*time.Hour)),
+			usageWindowFixture("ok", 90, now.Add(23*24*time.Hour)),
+		),
+	}
+	client := roundTripDoer(func(request *http.Request) (*http.Response, error) {
+		key := strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer ")
+		body, ok := responses[key]
+		if !ok {
+			t.Fatalf("unexpected dashboard key on request: %q", key)
+		}
+		return usageHTTPResponse(http.StatusOK, body), nil
+	})
+	module := NewModule()
+	raw := json.RawMessage(`{
+		"threshold-percent": 97,
+		"accounts": [
+			{"name": "go-1", "auth-ids": ["go-1-1"], "dashboard-api-key": "` + go1Key + `"},
+			{"name": "go-2", "auth-ids": ["go-2-1"], "dashboard-api-key": "` + go2Key + `"},
+			{"name": "go-3", "auth-ids": ["go-3-1"], "dashboard-api-key": "` + go3Key + `"}
+		]
+	}`)
+	host := providermodule.HostConfig{Clock: &fakeModuleClock{now: now}, HTTPClient: client}
+	if err := module.Reconfigure(context.Background(), host, raw); err != nil {
+		t.Fatalf("Reconfigure() error = %v", err)
+	}
+	raw2, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Accounts []struct {
+			Name    string `json:"name"`
+			Windows map[windowKind]struct {
+				Utilization float64 `json:"utilization"`
+				Exhausted   bool    `json:"exhausted"`
+			} `json:"windows"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw2, &parsed); err != nil {
+		t.Fatalf("Status() invalid JSON: %v, raw = %s", err, raw2)
+	}
+	monthly := make(map[string]float64, len(parsed.Accounts))
+	exhausted := make(map[string]bool, len(parsed.Accounts))
+	for _, account := range parsed.Accounts {
+		monthly[account.Name] = account.Windows[windowMonthly].Utilization
+		exhausted[account.Name] = account.Windows[windowMonthly].Exhausted
+	}
+	if monthly["go-1"] != 0.03 || exhausted["go-1"] {
+		t.Fatalf("go-1 monthly = %v exhausted=%v, want 0.03 not exhausted", monthly["go-1"], exhausted["go-1"])
+	}
+	if !exhausted["go-2"] {
+		t.Fatalf("go-2 monthly exhausted = %v, want true (rate-limited)", exhausted["go-2"])
+	}
+	if monthly["go-3"] != 0.90 || exhausted["go-3"] {
+		t.Fatalf("go-3 monthly = %v exhausted=%v, want 0.90 not exhausted", monthly["go-3"], exhausted["go-3"])
+	}
+	if monthly["go-1"] == monthly["go-3"] {
+		t.Fatalf("go-1 and go-3 reported identical monthly utilization: %v", monthly["go-1"])
+	}
+}
+
+func TestAccountDashboardKeyFallsBackToModuleLevelKey(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	var requestedKeys []string
+	var mu sync.Mutex
+	client := roundTripDoer(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		requestedKeys = append(requestedKeys, request.Header.Get("Authorization"))
+		mu.Unlock()
+		return usageHTTPResponse(http.StatusOK, usageFixture(
+			usageWindowFixture("ok", 1, now.Add(2*time.Hour)),
+			usageWindowFixture("ok", 1, now.Add(5*24*time.Hour)),
+			usageWindowFixture("ok", 1, now.Add(20*24*time.Hour)),
+		)), nil
+	})
+	module := NewModule()
+	raw := json.RawMessage(`{
+		"threshold-percent": 97,
+		"dashboard-api-key": "` + dashboardFixtureKey + `",
+		"accounts": [
+			{"name": "go-a", "auth-ids": ["go-a-1"]},
+			{"name": "go-b", "auth-ids": ["go-b-1"], "dashboard-api-key": "test-only-go-b-key"}
+		]
+	}`)
+	host := providermodule.HostConfig{Clock: &fakeModuleClock{now: now}, HTTPClient: client}
+	if err := module.Reconfigure(context.Background(), host, raw); err != nil {
+		t.Fatalf("Reconfigure() error = %v", err)
+	}
+	if _, err := module.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := map[string]bool{"Bearer " + dashboardFixtureKey: false, "Bearer test-only-go-b-key": false}
+	for _, got := range requestedKeys {
+		if _, ok := want[got]; !ok {
+			t.Fatalf("unexpected key polled: %q", got)
+		}
+		want[got] = true
+	}
+	for key, seen := range want {
+		if !seen {
+			t.Fatalf("expected key %q to be polled, requested = %#v", key, requestedKeys)
+		}
+	}
+}
+
 func TestPollNeverLeaksCredentialFromStatusOrError(t *testing.T) {
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
 	client := roundTripDoer(func(*http.Request) (*http.Response, error) {
