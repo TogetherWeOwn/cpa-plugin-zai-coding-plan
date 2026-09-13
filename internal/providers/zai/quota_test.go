@@ -33,6 +33,57 @@ func TestParseQuotaResponseMapsProLimitsIndependentlyOfOrder(t *testing.T) {
 	}
 }
 
+// TestParseQuotaResponseAcceptsFloatFormattedResetTime is a regression test
+// for TOG-2473: Z.ai's quota endpoint has been observed serializing
+// nextResetTime (and other CREDIT_LIMIT numbers) with a trailing ".0" even
+// though the value is a whole-number epoch-millisecond timestamp. A strict
+// int64 parse of "1789347583607.0" fails, which previously rejected a valid
+// weekly quota window and stuck the provider on "estimate".
+func TestParseQuotaResponseAcceptsFloatFormattedResetTime(t *testing.T) {
+	raw := quotaFixture("pro", []string{
+		`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000.0,"currentValue":0.0,"remaining":12000.0,"nextResetTime":` + stringNumber(quotaObservedAt.Add(5*time.Hour).UnixMilli()) + `.0}`,
+		`{"type":"CREDIT_LIMIT","unit":6,"number":1,"usage":60000.0,"currentValue":54728.0,"remaining":5272.0,"nextResetTime":` + stringNumber(quotaObservedAt.Add(7*24*time.Hour).UnixMilli()) + `.0}`,
+	})
+	snapshot, err := parseQuotaResponse([]byte(raw), quotaObservedAt)
+	if err != nil {
+		t.Fatalf("float-formatted numbers rejected: %v", err)
+	}
+	if snapshot.Weekly.ConsumedMicrocredits != 54_728*creditScale || snapshot.Weekly.BucketMicrocredits != 60_000*creditScale {
+		t.Fatalf("weekly window = %#v", snapshot.Weekly)
+	}
+	if !snapshot.Weekly.ResetsAt.Equal(quotaObservedAt.Add(7 * 24 * time.Hour)) {
+		t.Fatalf("weekly reset = %v", snapshot.Weekly.ResetsAt)
+	}
+}
+
+func TestParseQuotaResponseRejectsNonWholeFloatAndOutOfRangeNumbers(t *testing.T) {
+	validWeek := quotaLimitFixture(6, 1, 60_000, 2, 59_998, quotaObservedAt.Add(24*time.Hour).UnixMilli())
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "fractional nextResetTime", raw: quotaFixture("pro", []string{
+			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000,"currentValue":0,"remaining":12000,"nextResetTime":` + stringNumber(quotaObservedAt.Add(time.Hour).UnixMilli()) + `.5}`,
+			validWeek,
+		})},
+		{name: "NaN nextResetTime", raw: quotaFixture("pro", []string{
+			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000,"currentValue":0,"remaining":12000,"nextResetTime":NaN}`,
+			validWeek,
+		})},
+		{name: "float exceeds int64 range", raw: quotaFixture("pro", []string{
+			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000,"currentValue":0,"remaining":12000,"nextResetTime":1e300}`,
+			validWeek,
+		})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := parseQuotaResponse([]byte(tt.raw), quotaObservedAt); err == nil {
+				t.Fatal("invalid quota payload succeeded")
+			}
+		})
+	}
+}
+
 func TestParseQuotaResponseAcceptsPlanName(t *testing.T) {
 	raw := strings.Replace(quotaFixture("", []string{
 		quotaLimitFixture(3, 5, 12_000, 1, 11_999, quotaObservedAt.Add(time.Hour).UnixMilli()),

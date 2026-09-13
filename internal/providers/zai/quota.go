@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -212,11 +213,28 @@ func parseQuotaWindow(limit quotaWireLimit, observedAt time.Time) (quotaWindow, 
 	return quotaWindow{ConsumedMicrocredits: current * creditScale, BucketMicrocredits: usage * creditScale, ResetsAt: reset}, nil
 }
 
+// maxSafeFloatInt bounds the float64 fallback in strictInt64 well below the
+// point where converting to int64 becomes lossy or undefined, leaving ample
+// room for any real quota usage or epoch-millisecond timestamp.
+const maxSafeFloatInt = float64(1 << 62)
+
 func strictInt64(number json.Number) (int64, error) {
 	if number == "" {
 		return 0, fmt.Errorf("missing number")
 	}
-	return number.Int64()
+	if value, err := number.Int64(); err == nil {
+		return value, nil
+	}
+	// Z.ai's quota endpoint sometimes serializes whole numbers with a
+	// trailing ".0" (e.g. nextResetTime); json.Number.Int64() rejects any
+	// literal containing a decimal point, so fall back to a float parse and
+	// accept it only if it is an exact, in-range whole number.
+	value, err := number.Float64()
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) || math.Trunc(value) != value ||
+		value < -maxSafeFloatInt || value > maxSafeFloatInt {
+		return 0, fmt.Errorf("invalid number")
+	}
+	return int64(value), nil
 }
 
 func strictNonnegativeInt64(number json.Number) (int64, error) {
