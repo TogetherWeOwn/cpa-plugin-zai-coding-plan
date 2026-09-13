@@ -129,6 +129,9 @@ func validateReleaseWorkflowShape(raw []byte) error {
 			   dist/registry.json \
 			   dist/router-capacity-source.json \
 			   dist/verify-live.sh \
+			   dist/verify-live-opencodego.sh \
+			   dist/collector-zai.py \
+			   dist/collector-opencodego.py \
 			   dist/prepare-usage-dir.py \
 			   dist/remove-usage-output.py \
 			   dist/rollback.sh \
@@ -275,6 +278,9 @@ func validatePublishJob(raw []byte, node *yaml.Node) error {
 		  release-artifacts/registry.json \
 		  release-artifacts/router-capacity-source.json \
 		  release-artifacts/verify-live.sh \
+		  release-artifacts/verify-live-opencodego.sh \
+		  release-artifacts/collector-zai.py \
+		  release-artifacts/collector-opencodego.py \
 		  release-artifacts/prepare-usage-dir.py \
 		  release-artifacts/remove-usage-output.py \
 		  release-artifacts/rollback.sh \

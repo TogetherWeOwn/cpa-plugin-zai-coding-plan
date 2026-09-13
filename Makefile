@@ -1,4 +1,4 @@
-VERSION ?= 0.3.0
+VERSION ?= 0.4.0
 GO ?= go
 PLUGIN_ID = subscription-pool
 OUT ?= dist/$(PLUGIN_ID)-v$(VERSION).so
@@ -66,6 +66,9 @@ package: build
 	install -m 0644 registry.json "$(dir $(OPERATOR))registry.json"
 	install -m 0644 deploy/router-capacity-source.json "$(dir $(OPERATOR))router-capacity-source.json"
 	install -m 0755 deploy/verify-live.sh "$(dir $(OPERATOR))verify-live.sh"
+	install -m 0755 deploy/verify-live-opencodego.sh "$(dir $(OPERATOR))verify-live-opencodego.sh"
+	install -m 0755 deploy/collector-zai.py "$(dir $(OPERATOR))collector-zai.py"
+	install -m 0755 deploy/collector-opencodego.py "$(dir $(OPERATOR))collector-opencodego.py"
 	install -m 0755 deploy/prepare-usage-dir.py "$(dir $(OPERATOR))prepare-usage-dir.py"
 	install -m 0755 deploy/remove-usage-output.py "$(dir $(OPERATOR))remove-usage-output.py"
 	install -m 0755 deploy/rollback.sh "$(dir $(OPERATOR))rollback.sh"
@@ -77,6 +80,9 @@ package: build
 		"registry.json=$(dir $(OPERATOR))registry.json" \
 		"router-capacity-source.json=$(dir $(OPERATOR))router-capacity-source.json" \
 		"verify-live.sh=$(dir $(OPERATOR))verify-live.sh" \
+		"verify-live-opencodego.sh=$(dir $(OPERATOR))verify-live-opencodego.sh" \
+		"collector-zai.py=$(dir $(OPERATOR))collector-zai.py" \
+		"collector-opencodego.py=$(dir $(OPERATOR))collector-opencodego.py" \
 		"prepare-usage-dir.py=$(dir $(OPERATOR))prepare-usage-dir.py" \
 		"remove-usage-output.py=$(dir $(OPERATOR))remove-usage-output.py" \
 		"rollback.sh=$(dir $(OPERATOR))rollback.sh" \
