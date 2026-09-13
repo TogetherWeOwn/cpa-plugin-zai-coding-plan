@@ -3,6 +3,7 @@ package zai
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -26,7 +27,20 @@ func NewModule() *zaiModule {
 func (m *zaiModule) ID() string { return "zai" }
 
 func (m *zaiModule) Recognize(candidate pluginapi.SchedulerAuthCandidate) bool {
-	return recognizedZAICandidate(candidate)
+	if recognizedZAICandidate(candidate) {
+		return true
+	}
+	// A managed account's candidate does not always carry the attributes
+	// recognizedZAICandidate inspects (e.g. bare {ID: authID} candidates, as
+	// the host constructs for already-known auth records) -- the
+	// pre-coordinator pick() treated snapshot membership as recognition in
+	// its own right, and this module boundary must not narrow that.
+	snapshot, err := m.runtime.current()
+	if err != nil || snapshot == nil {
+		return false
+	}
+	_, managed := snapshot.byAuthID[strings.TrimSpace(candidate.ID)]
+	return managed
 }
 
 func (m *zaiModule) Reconfigure(_ context.Context, host providermodule.HostConfig, providerConfig json.RawMessage) error {
