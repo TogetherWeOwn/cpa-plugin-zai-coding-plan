@@ -47,9 +47,10 @@ type moduleConfig struct {
 }
 
 type accountConfig struct {
-	Name     string
-	AuthIDs  []string
-	Disabled bool
+	Name            string
+	AuthIDs         []string
+	DashboardAPIKey string
+	Disabled        bool
 }
 
 type rawModuleConfig struct {
@@ -60,18 +61,21 @@ type rawModuleConfig struct {
 }
 
 type rawAccountConfig struct {
-	Name         string   `json:"name"`
-	AuthIDs      []string `json:"auth-ids"`
-	ConnectionID string   `json:"connection-id"`
-	Disabled     bool     `json:"disabled"`
+	Name            string   `json:"name"`
+	AuthIDs         []string `json:"auth-ids"`
+	ConnectionID    string   `json:"connection-id"`
+	DashboardAPIKey string   `json:"dashboard-api-key"`
+	Disabled        bool     `json:"disabled"`
 }
 
 type accountState struct {
-	Name     string
-	AuthIDs  []string
-	Disabled bool
-	Windows  map[windowKind]windowState
-	cursor   uint64
+	Name            string
+	AuthIDs         []string
+	Disabled        bool
+	DashboardAPIKey string
+	Windows         map[windowKind]windowState
+	cursor          uint64
+	lastPollAt      time.Time
 }
 
 type windowState struct {
@@ -90,10 +94,9 @@ type windowState struct {
 }
 
 type moduleState struct {
-	Threshold       int
-	DashboardAPIKey string
-	Accounts        map[string]*accountState
-	ByAuthID        map[string]string
+	Threshold int
+	Accounts  map[string]*accountState
+	ByAuthID  map[string]string
 }
 
 type Module struct {
@@ -103,7 +106,6 @@ type Module struct {
 	closed     bool
 	clock      providermodule.Clock
 	httpClient providermodule.HTTPDoer
-	lastPollAt time.Time
 }
 
 type realClock struct{}
@@ -308,7 +310,15 @@ func (m *Module) Status(ctx context.Context) (json.RawMessage, error) {
 		Disabled bool                        `json:"disabled,omitempty"`
 		Windows  map[windowKind]statusWindow `json:"windows"`
 	}
-	credentialBound := m.state != nil && m.state.DashboardAPIKey != ""
+	credentialBound := false
+	if m.state != nil {
+		for _, account := range m.state.Accounts {
+			if account.DashboardAPIKey != "" {
+				credentialBound = true
+				break
+			}
+		}
+	}
 	gaps := []string{"five-hour and weekly enforcement are generalized from the observed monthly 429 shape"}
 	if !credentialBound {
 		gaps = append(gaps, "no dashboard credential is configured -- five_hour/weekly/monthly reset times are unknown until dashboard-api-key is set")
@@ -395,38 +405,73 @@ func (m *Module) runtimeHTTPClient() httpDoer {
 	return newUsageHTTPClient(0)
 }
 
-// pollUsageOnce best-effort refreshes every window from the dashboard usage
-// endpoint. It is throttled by minPollInterval and never returns an error to
-// its caller: a poll failure simply leaves existing window state (429-derived
-// or previously polled) in place rather than failing Status().
+// pollUsageOnce best-effort refreshes every window of every account that has
+// its own dashboard-api-key from that account's own usage endpoint response.
+// Each account is throttled independently by minPollInterval. A poll failure
+// for one account never blocks or corrupts another account's result, and
+// never returns an error to the caller: a failure simply leaves that
+// account's existing window state (429-derived or previously polled) in
+// place rather than failing Status().
 func (m *Module) pollUsageOnce(ctx context.Context) {
 	m.mu.Lock()
-	if m.closed || m.state == nil || m.state.DashboardAPIKey == "" {
+	if m.closed || m.state == nil {
 		m.mu.Unlock()
 		return
 	}
 	now := m.runtimeClock().Now().UTC()
-	if !m.lastPollAt.IsZero() && now.Sub(m.lastPollAt) < minPollInterval {
-		m.mu.Unlock()
-		return
-	}
-	m.lastPollAt = now
-	apiKey := m.state.DashboardAPIKey
 	client := m.runtimeHTTPClient()
+	type pollTarget struct {
+		name   string
+		apiKey string
+	}
+	var targets []pollTarget
+	for name, account := range m.state.Accounts {
+		if account.DashboardAPIKey == "" {
+			continue
+		}
+		if !account.lastPollAt.IsZero() && now.Sub(account.lastPollAt) < minPollInterval {
+			continue
+		}
+		account.lastPollAt = now
+		targets = append(targets, pollTarget{name: name, apiKey: account.DashboardAPIKey})
+	}
 	m.mu.Unlock()
-
-	snapshot, err := fetchUsage(ctx, client, usageEndpoint, apiKey, now)
-	if err != nil {
+	if len(targets) == 0 {
 		return
 	}
+
+	type pollResult struct {
+		name     string
+		snapshot usageSnapshot
+		err      error
+	}
+	results := make(chan pollResult, len(targets))
+	var wg sync.WaitGroup
+	for _, target := range targets {
+		wg.Add(1)
+		go func(target pollTarget) {
+			defer wg.Done()
+			snapshot, err := fetchUsage(ctx, client, usageEndpoint, target.apiKey, now)
+			results <- pollResult{name: target.name, snapshot: snapshot, err: err}
+		}(target)
+	}
+	wg.Wait()
+	close(results)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed || m.state == nil {
 		return
 	}
-	for _, account := range m.state.Accounts {
-		for kind, window := range snapshotWindows(snapshot) {
+	for result := range results {
+		if result.err != nil {
+			continue
+		}
+		account := m.state.Accounts[result.name]
+		if account == nil {
+			continue
+		}
+		for kind, window := range snapshotWindows(result.snapshot) {
 			current := account.Windows[kind]
 			incoming := windowState{
 				Utilization:   float64Pointer(window.Utilization),
@@ -435,7 +480,7 @@ func (m *Module) pollUsageOnce(ctx context.Context) {
 				Source:        "dashboard usage poll",
 				Known:         true,
 				Authoritative: true,
-				ObservedAt:    snapshot.ObservedAt,
+				ObservedAt:    result.snapshot.ObservedAt,
 			}
 			account.Windows[kind] = mergeWindowSignal(current, incoming)
 		}
@@ -486,13 +531,20 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 		if len(ids) == 0 {
 			return moduleConfig{}, fmt.Errorf("opencode_go_invalid_config: accounts[%d] requires auth-ids or connection-id", i)
 		}
-		cfg.Accounts = append(cfg.Accounts, accountConfig{Name: name, AuthIDs: ids, Disabled: rawAccount.Disabled})
+		// Falls back to the module-level key when an account does not set
+		// its own -- accounts sharing one dashboard key still poll correctly
+		// as long as that key actually reports that account's own usage.
+		apiKey := strings.TrimSpace(rawAccount.DashboardAPIKey)
+		if apiKey == "" {
+			apiKey = cfg.DashboardAPIKey
+		}
+		cfg.Accounts = append(cfg.Accounts, accountConfig{Name: name, AuthIDs: ids, DashboardAPIKey: apiKey, Disabled: rawAccount.Disabled})
 	}
 	return cfg, nil
 }
 
 func buildState(cfg moduleConfig) (*moduleState, error) {
-	state := &moduleState{Threshold: cfg.ThresholdPercent, DashboardAPIKey: cfg.DashboardAPIKey, Accounts: make(map[string]*accountState), ByAuthID: make(map[string]string)}
+	state := &moduleState{Threshold: cfg.ThresholdPercent, Accounts: make(map[string]*accountState), ByAuthID: make(map[string]string)}
 	if !cfg.Enabled {
 		return state, nil
 	}
@@ -503,7 +555,7 @@ func buildState(cfg moduleConfig) (*moduleState, error) {
 			return nil, fmt.Errorf("opencode_go_invalid_config: duplicate account name %q", item.Name)
 		}
 		seenNames[key] = struct{}{}
-		account := &accountState{Name: item.Name, AuthIDs: append([]string(nil), item.AuthIDs...), Disabled: item.Disabled, Windows: map[windowKind]windowState{windowFiveHour: {}, windowWeekly: {}, windowMonthly: {}}}
+		account := &accountState{Name: item.Name, AuthIDs: append([]string(nil), item.AuthIDs...), DashboardAPIKey: item.DashboardAPIKey, Disabled: item.Disabled, Windows: map[windowKind]windowState{windowFiveHour: {}, windowWeekly: {}, windowMonthly: {}}}
 		for _, authID := range item.AuthIDs {
 			if owner := state.ByAuthID[authID]; owner != "" {
 				return nil, fmt.Errorf("opencode_go_invalid_config: auth id %q belongs to both %q and %q", authID, owner, item.Name)
@@ -525,6 +577,7 @@ func carryForwardState(staged, previous *moduleState) {
 			continue
 		}
 		account.cursor = old.cursor
+		account.lastPollAt = old.lastPollAt
 		for _, kind := range []windowKind{windowFiveHour, windowWeekly, windowMonthly} {
 			account.Windows[kind] = old.Windows[kind]
 		}

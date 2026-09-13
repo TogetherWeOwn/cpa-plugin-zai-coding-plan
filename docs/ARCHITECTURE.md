@@ -221,13 +221,13 @@ plugins:
               weekly-credits: 60000
         opencode-go:
           threshold-percent: 97
-          dashboard-api-key: ${OPENCODE_GO_DASHBOARD_KEY}
           accounts:
             - name: go-a
               auth-ids: ["managed-auth-id"]
+              dashboard-api-key: ${OPENCODE_GO_A_DASHBOARD_KEY}
 ```
 
-`providers.opencode-go` derives quota state from 429 response bodies (`HandleUsage`) and, when `dashboard-api-key` is configured, from an on-demand poll of the account's real usage/reset endpoint (see `internal/providers/opencodego/PROVENANCE.md`, "Usage poller (TOG-2458)"). An empty/omitted `dashboard-api-key` is valid configuration: every window then reports `known:false` in `Status()` rather than a guessed reset time. Its schema and module logic were developed from scratch; the poller's endpoint, auth flow, and response shape were studied (never copied) from a third-party opencode-go plugin implementation under an explicit, narrow owner carve-out documented in `PROVENANCE.md` -- the module's code, structure, and identifiers must still never be developed from, or informed by, any read of that plugin's source.
+`providers.opencode-go` derives quota state from 429 response bodies (`HandleUsage`) and, when a dashboard key is configured, from an on-demand poll of that account's real usage/reset endpoint (see `internal/providers/opencodego/PROVENANCE.md`, "Usage poller (TOG-2458)"). The dashboard key is `accounts[].dashboard-api-key`, checked per account, falling back to the module-level `dashboard-api-key` only when an account does not set its own -- each account's own key returns only that account's own usage, so every account needing real polling normally needs its own key. Each configured account is polled independently and throttled independently; one account's poll failure never blocks or corrupts another's result. An empty/omitted key (module-level and per-account) is valid configuration: every window then reports `known:false` in `Status()` rather than a guessed reset time. Its schema and module logic were developed from scratch; the poller's endpoint, auth flow, and response shape were studied (never copied) from a third-party opencode-go plugin implementation under an explicit, narrow owner carve-out documented in `PROVENANCE.md` -- the module's code, structure, and identifiers must still never be developed from, or informed by, any read of that plugin's source.
 
 | Field | Default | Rule |
 |---|---:|---|
