@@ -95,8 +95,8 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 	if len(registered.Routes) != 5 {
 		t.Fatalf("management.register routes = %#v, want five (coordinator status + zai's 4)", registered.Routes)
 	}
-	if len(registered.Resources) != 1 || registered.Resources[0].Path != resourceStatusPath || registered.Resources[0].Menu != "Z.ai Quota" {
-		t.Fatalf("management.register resources = %#v, want Z.ai quota menu", registered.Resources)
+	if len(registered.Resources) != 1 || registered.Resources[0].Path != resourceStatusPath || registered.Resources[0].Menu != "Subscription Quota" {
+		t.Fatalf("management.register resources = %#v, want Subscription Quota menu", registered.Resources)
 	}
 	route := registered.Routes[0]
 	if !strings.EqualFold(route.Method, http.MethodGet) || route.Path != managementStatusPath {
@@ -167,7 +167,7 @@ func TestResourceRouteEndToEndAllowsCrossOriginManagementCenterFrame(t *testing.
 		t.Fatalf("management.register resources = %#v, want one", registered.Resources)
 	}
 	resource := registered.Resources[0]
-	if resource.Path != resourceStatusPath || resource.Menu != "Z.ai Quota" {
+	if resource.Path != resourceStatusPath || resource.Menu != "Subscription Quota" {
 		t.Fatalf("resource route = %#v", resource)
 	}
 
@@ -191,7 +191,7 @@ func TestResourceRouteEndToEndAllowsCrossOriginManagementCenterFrame(t *testing.
 		t.Fatalf("management.handle resource: %v", err)
 	}
 	response := decodeEnvelopeResult[pluginapi.ManagementResponse](t, handleRaw, pluginabi.MethodManagementHandle)
-	if response.StatusCode != http.StatusOK || !strings.Contains(string(response.Body), "Z.ai Coding Plan quota") {
+	if response.StatusCode != http.StatusOK || !strings.Contains(string(response.Body), "Subscription Quota") {
 		t.Fatalf("resource response = %d %q", response.StatusCode, response.Body)
 	}
 	if csp := response.Headers.Get("Content-Security-Policy"); strings.Contains(csp, "frame-ancestors") {

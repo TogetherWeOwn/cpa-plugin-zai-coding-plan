@@ -37,7 +37,7 @@ func TestManagementRoutesAggregatesCoordinatorAndModuleRoutes(t *testing.T) {
 		fakeModule: fakeModule{id: "alpha"},
 		routes: providermodule.ManagementRoutes{
 			Routes:    []providermodule.ManagementRoute{{Method: http.MethodGet, Path: "/v0/management/plugins/alpha/status", Description: "alpha status"}},
-			Resources: []providermodule.ManagementResource{{Path: "/status", Menu: "Alpha", Description: "alpha resource"}},
+			Resources: []providermodule.ManagementResource{{Path: "/alpha-status", Menu: "Alpha", Description: "alpha resource"}},
 		},
 	}
 	beta := &fakeModule{id: "beta"}
@@ -61,8 +61,21 @@ func TestManagementRoutesAggregatesCoordinatorAndModuleRoutes(t *testing.T) {
 	if !foundOwn || !foundAlpha {
 		t.Fatalf("Routes = %#v, missing expected entries", body.Routes)
 	}
-	if len(body.Resources) != 1 || body.Resources[0].Path != "/status" {
-		t.Fatalf("Resources = %#v, want alpha's single resource", body.Resources)
+	if len(body.Resources) != 2 {
+		t.Fatalf("Resources = %#v, want coordinator's own resource + alpha's resource (2 total)", body.Resources)
+	}
+	foundOwnResource := false
+	foundAlphaResource := false
+	for _, resource := range body.Resources {
+		if resource.Path == resourceStatusPath {
+			foundOwnResource = true
+		}
+		if resource.Path == "/alpha-status" {
+			foundAlphaResource = true
+		}
+	}
+	if !foundOwnResource || !foundAlphaResource {
+		t.Fatalf("Resources = %#v, missing expected entries", body.Resources)
 	}
 }
 
@@ -105,19 +118,19 @@ func TestHandleManagementRewritesResourcePathToModuleRelativePath(t *testing.T) 
 	alpha := &fakeManagementModule{
 		fakeModule: fakeModule{id: "alpha"},
 		routes: providermodule.ManagementRoutes{
-			Resources: []providermodule.ManagementResource{{Path: "/status", Menu: "Alpha"}},
+			Resources: []providermodule.ManagementResource{{Path: "/alpha-status", Menu: "Alpha"}},
 		},
 		handleResponse: pluginapi.ManagementResponse{StatusCode: http.StatusOK},
 	}
 	c := New(alpha)
 
-	resp := c.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: resourcePluginBasePath + "/status"})
+	resp := c.handleManagement(context.Background(), pluginapi.ManagementRequest{Method: http.MethodGet, Path: resourcePluginBasePath + "/alpha-status"})
 
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("StatusCode = %d, want 200", resp.StatusCode)
 	}
-	if len(alpha.handled) != 1 || alpha.handled[0].Path != "/status" {
-		t.Fatalf("handled = %#v, want req.Path rewritten to module's own relative \"/status\"", alpha.handled)
+	if len(alpha.handled) != 1 || alpha.handled[0].Path != "/alpha-status" {
+		t.Fatalf("handled = %#v, want req.Path rewritten to module's own relative \"/alpha-status\"", alpha.handled)
 	}
 }
 
@@ -135,7 +148,7 @@ func TestManagementRoutesSkipsModulesWithoutManagementCapable(t *testing.T) {
 	if len(body.Routes) != 1 || body.Routes[0].Path != managementStatusPath {
 		t.Fatalf("Routes = %#v, want only the coordinator's own status route", body.Routes)
 	}
-	if len(body.Resources) != 0 {
-		t.Fatalf("Resources = %#v, want none", body.Resources)
+	if len(body.Resources) != 1 || body.Resources[0].Path != resourceStatusPath {
+		t.Fatalf("Resources = %#v, want only the coordinator's own resource", body.Resources)
 	}
 }

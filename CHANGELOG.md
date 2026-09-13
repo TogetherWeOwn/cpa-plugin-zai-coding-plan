@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- The `/v0/resource/plugins/subscription-pool/status` page (Management Center's "Plugins" nav entry) is now a real per-account dashboard instead of a static placeholder: it renders both `zai` and `opencode-go` accounts server-side from the coordinator's own `Status()` aggregation, with per-window utilization bar, percent, absolute UTC reset timestamp, countdown, source (quota_api/estimate for Z.ai; authoritative/429-derived/unknown for OpenCode Go), and health. No management or dashboard key is ever embedded in the page. Resource-page ownership moved from the `zai` module to the coordinator, since only the coordinator can see both providers; the menu entry is renamed from "Z.ai Quota" to "Subscription Quota" and its description now mentions both providers. (TOG-2477)
+
 ## [0.4.1] - 2026-09-13
 
 ### Fixed
