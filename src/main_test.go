@@ -11,6 +11,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
 	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/opencodego"
 	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/zai"
 )
 
@@ -54,6 +55,25 @@ func TestPluginRegistration(t *testing.T) {
 	// capability must also have a handler in pluginCall.
 	if registration.Capabilities != (capabilities{Scheduler: true, UsagePlugin: true, ManagementAPI: true}) {
 		t.Fatalf("capabilities = %#v, want scheduler, usage_plugin, and management_api", registration.Capabilities)
+	}
+}
+
+func TestDefaultRuntimeHostsBothProviderModules(t *testing.T) {
+	previous := runtimeState
+	defer func() { runtimeState = previous }()
+
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeSrcCPAConfigFixture(t, configPath, authDir, "test-only-two-provider-key")
+
+	c := coordinator.New(zai.NewModule(), opencodego.NewModule())
+	rawConfig := []byte("cpa-config-path: " + configPath + "\nproviders:\n  zai:\n    default-plan: pro\n  opencode-go:\n    accounts:\n      - name: go-a\n        auth-ids: [go-a-1]\n")
+	if err := c.Reconfigure(rawConfig); err != nil {
+		t.Fatalf("Reconfigure() error = %v", err)
+	}
+	if got := c.OwnedAuthIDs("opencode-go"); len(got) != 1 || got[0] != "go-a-1" {
+		t.Fatalf("OpenCode Go owned auth IDs = %#v", got)
 	}
 }
 
