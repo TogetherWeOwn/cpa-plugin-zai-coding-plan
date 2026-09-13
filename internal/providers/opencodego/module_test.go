@@ -132,7 +132,7 @@ func TestSuccessfulReconfigureCarriesForwardLiveWindowState(t *testing.T) {
 	}
 }
 
-func TestQuotaWindowWithoutResetUsesConservativeCooldown(t *testing.T) {
+func TestQuotaWindowWithoutResetUsesCooldownButReportsResetUnknown(t *testing.T) {
 	module := configuredModule(t, 97)
 	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
 	record := pluginapi.UsageRecord{
@@ -150,8 +150,24 @@ func TestQuotaWindowWithoutResetUsesConservativeCooldown(t *testing.T) {
 	module.mu.Lock()
 	window := module.state.Accounts["go-a"].Windows[windowMonthly]
 	module.mu.Unlock()
-	if !window.Exhausted || !window.ResetAt.Equal(now.Add(defaultFailureCooldown)) {
-		t.Fatalf("window = %#v, want conservative cooldown", window)
+	if !window.Exhausted || !window.ResetAt.IsZero() || !window.CooldownAt.Equal(now.Add(defaultFailureCooldown)) {
+		t.Fatalf("window = %#v, want cooldown with unknown reset", window)
+	}
+	raw, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Accounts []struct {
+			Windows map[string]json.RawMessage `json:"windows"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatal(err)
+	}
+	monthly := string(status.Accounts[0].Windows[string(windowMonthly)])
+	if strings.Contains(monthly, "resets_at") {
+		t.Fatalf("Status() fabricated reset timestamp: %s", monthly)
 	}
 }
 
@@ -229,7 +245,7 @@ func TestMicrothrottleDoesNotFeedPacingState(t *testing.T) {
 	module.mu.Lock()
 	defer module.mu.Unlock()
 	for kind, window := range module.state.Accounts["go-a"].Windows {
-		if window.Exhausted || window.Utilization != 0 || !window.ResetAt.IsZero() {
+		if window.Exhausted || window.Utilization != nil || !window.ResetAt.IsZero() || !window.CooldownAt.IsZero() {
 			t.Fatalf("microthrottle changed %s state: %#v", kind, window)
 		}
 	}
@@ -265,13 +281,38 @@ func TestStatusDeclaresObservationGaps(t *testing.T) {
 	}
 }
 
+func TestStatusOmitsUnknownUtilizationAndReset(t *testing.T) {
+	module := configuredModule(t, 97)
+	raw, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Accounts []struct {
+			Windows map[string]json.RawMessage `json:"windows"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatal(err)
+	}
+	for _, account := range status.Accounts {
+		for kind, rawWindow := range account.Windows {
+			window := string(rawWindow)
+			if strings.Contains(window, "utilization") || strings.Contains(window, "resets_at") {
+				t.Fatalf("Status() reported unknown %s telemetry as known: %s", kind, window)
+			}
+		}
+	}
+}
+
 func TestStatusClearsExpiredWindows(t *testing.T) {
 	module := configuredModule(t, 97)
 	module.mu.Lock()
 	module.state.Accounts["go-a"].Windows[windowMonthly] = windowState{
-		Utilization: 1,
+		Utilization: float64Pointer(1),
 		Exhausted:   true,
 		ResetAt:     time.Now().UTC().Add(-time.Minute),
+		CooldownAt:  time.Now().UTC().Add(-time.Minute),
 	}
 	module.mu.Unlock()
 	if _, err := module.Status(context.Background()); err != nil {
@@ -280,7 +321,7 @@ func TestStatusClearsExpiredWindows(t *testing.T) {
 	module.mu.Lock()
 	window := module.state.Accounts["go-a"].Windows[windowMonthly]
 	module.mu.Unlock()
-	if window.Exhausted || window.Utilization != 0 || !window.ResetAt.IsZero() {
+	if window.Exhausted || window.Utilization != nil || !window.ResetAt.IsZero() || !window.CooldownAt.IsZero() {
 		t.Fatalf("Status() retained expired window: %#v", window)
 	}
 }
