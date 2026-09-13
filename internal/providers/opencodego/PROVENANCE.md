@@ -17,7 +17,7 @@ Observed behavior used by the implementation:
 - `spec/OBSERVED-BEHAVIOR.md` §4 / Case I02: proxy-visible connection IDs can be grouped as one configured logical account when supplied by the operator;
 - `spec/OBSERVED-BEHAVIOR.md` §1 / Case D01: the module does not depend on an authenticated dashboard payload.
 
-The five-hour and weekly enforcement shapes were not observed. They are deliberately limited to the issue-mandated structural generalization of the observed monthly pattern: a 429 that explicitly names the window plus a bounded reset hint. The module status exposes this limitation.
+The five-hour and weekly enforcement shapes were not observed. They are deliberately limited to the issue-mandated structural generalization of the observed monthly pattern: a 429 that explicitly names the window plus a bounded reset hint. The module status exposes this limitation. When a quota response has no reset evidence, the module keeps `resets_at` unknown and uses a separate conservative impairment cooldown; it does not publish the cooldown as a reset timestamp. Unobserved utilization is likewise omitted rather than reported as zero.
 
 Review gate:
 

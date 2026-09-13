@@ -72,9 +72,10 @@ type accountState struct {
 }
 
 type windowState struct {
-	Utilization float64
+	Utilization *float64
 	Exhausted   bool
 	ResetAt     time.Time
+	CooldownAt  time.Time
 	Source      string
 }
 
@@ -229,19 +230,23 @@ func (m *Module) HandleUsage(_ context.Context, record pluginapi.UsageRecord) er
 	if !ok || record.Failure.StatusCode != http.StatusTooManyRequests {
 		return nil
 	}
-	resetAt, ok := retryAfterReset(record.ResponseHeaders, now)
-	if !ok {
-		resetAt, ok = bodyReset(record.Failure.Body, now)
-	}
-	if !ok {
-		resetAt = now.Add(defaultFailureCooldown)
+	resetAt, resetKnown := retryAfterReset(record.ResponseHeaders, now)
+	if !resetKnown {
+		resetAt, resetKnown = bodyReset(record.Failure.Body, now)
 	}
 	current := account.Windows[window]
-	if resetAt.After(current.ResetAt) {
+	if resetKnown && resetAt.After(current.ResetAt) {
 		current.ResetAt = resetAt
 	}
+	cooldownAt := now.Add(defaultFailureCooldown)
+	if resetKnown {
+		cooldownAt = resetAt
+	}
+	if cooldownAt.After(current.CooldownAt) {
+		current.CooldownAt = cooldownAt
+	}
 	current.Exhausted = true
-	current.Utilization = 1
+	current.Utilization = float64Pointer(1)
 	current.Source = "proxy-observed " + string(window) + " quota response"
 	account.Windows[window] = current
 	return nil
@@ -251,7 +256,7 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	type statusWindow struct {
-		Utilization float64    `json:"utilization"`
+		Utilization *float64   `json:"utilization,omitempty"`
 		Exhausted   bool       `json:"exhausted"`
 		ResetAt     *time.Time `json:"resets_at,omitempty"`
 		Source      string     `json:"source,omitempty"`
@@ -294,7 +299,7 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 					value := window.ResetAt.UTC()
 					resetAt = &value
 				}
-				item.Windows[kind] = statusWindow{Utilization: window.Utilization, Exhausted: window.Exhausted, ResetAt: resetAt, Source: window.Source}
+				item.Windows[kind] = statusWindow{Utilization: copyFloat64Pointer(window.Utilization), Exhausted: window.Exhausted, ResetAt: resetAt, Source: window.Source}
 			}
 			status.Accounts = append(status.Accounts, item)
 		}
@@ -472,7 +477,7 @@ func requestTime(req pluginapi.SchedulerPickRequest) time.Time {
 func refreshWindows(account *accountState, now time.Time) {
 	for _, kind := range []windowKind{windowFiveHour, windowWeekly, windowMonthly} {
 		window := account.Windows[kind]
-		if !window.ResetAt.IsZero() && !window.ResetAt.After(now) {
+		if !window.CooldownAt.IsZero() && !window.CooldownAt.After(now) {
 			window = windowState{}
 			account.Windows[kind] = window
 		}
@@ -485,14 +490,23 @@ func accountHealthy(account *accountState, threshold int, now time.Time) bool {
 	}
 	limit := float64(threshold) / 100
 	for _, window := range account.Windows {
-		if window.Exhausted && (window.ResetAt.IsZero() || window.ResetAt.After(now)) {
+		if window.Exhausted && (window.CooldownAt.IsZero() || window.CooldownAt.After(now)) {
 			return false
 		}
-		if window.Utilization >= limit {
+		if window.Utilization != nil && *window.Utilization >= limit {
 			return false
 		}
 	}
 	return true
+}
+
+func float64Pointer(value float64) *float64 { return &value }
+
+func copyFloat64Pointer(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	return float64Pointer(*value)
 }
 
 func quotaWindow(body string) (windowKind, bool) {
