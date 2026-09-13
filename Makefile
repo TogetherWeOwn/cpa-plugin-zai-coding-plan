@@ -1,4 +1,4 @@
-VERSION ?= 0.2.0
+VERSION ?= 0.3.0
 GO ?= go
 PLUGIN_ID = subscription-pool
 OUT ?= dist/$(PLUGIN_ID)-v$(VERSION).so
