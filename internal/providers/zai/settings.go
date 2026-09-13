@@ -96,16 +96,16 @@ func newSecureStore(authDir string) (*secureStore, error) {
 	return &secureStore{Store: store, dir: dir}, nil
 }
 
-func (s *secureStore) close() error { return s.Store.Close() }
+func (s *secureStore) close() error { return s.Close() }
 
-func (s *secureStore) flush() error { return s.Store.Flush() }
+func (s *secureStore) flush() error { return s.Flush() }
 
-func (s *secureStore) validateDirectory() error { return s.Store.ValidateDirectory() }
+func (s *secureStore) validateDirectory() error { return s.ValidateDirectory() }
 
-func (s *secureStore) writeJSON(name string, value any) error { return s.Store.WriteJSON(name, value) }
+func (s *secureStore) writeJSON(name string, value any) error { return s.WriteJSON(name, value) }
 
 func (s *secureStore) readJSONIfExists(name string, dst any) (bool, error) {
-	return s.Store.ReadJSONIfExists(name, dst)
+	return s.ReadJSONIfExists(name, dst)
 }
 
 func (s *secureStore) loadSettings() (settingsFile, error) {

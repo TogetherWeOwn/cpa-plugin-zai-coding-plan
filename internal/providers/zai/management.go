@@ -59,15 +59,6 @@ func managementRegistration() managementRoutes {
 	}
 }
 
-func managementHandle(request []byte) ([]byte, error) {
-	var req pluginapi.ManagementRequest
-	if err := json.Unmarshal(request, &req); err != nil {
-		return nil, fmt.Errorf("decode management request")
-	}
-	response := runtimeState.handleManagement(context.Background(), req)
-	return okEnvelope(response)
-}
-
 func (r *pluginRuntime) handleManagement(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
 	if req.Method == http.MethodGet && isResourceStatusPath(req.Path) {
 		return r.resourceStatusResponse()

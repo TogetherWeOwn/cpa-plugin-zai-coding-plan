@@ -47,10 +47,6 @@ func (e *envelopeError) Coded() providermodule.WireError {
 	return providermodule.WireError{Code: e.Code, Message: e.Message, Retryable: e.Retryable, HTTPStatus: e.HTTPStatus}
 }
 
-func newSchedulerError(code, message string) error {
-	return &envelopeError{Code: code, Message: message, Retryable: false}
-}
-
 type registration struct {
 	SchemaVersion uint32             `json:"schema_version"`
 	Metadata      pluginapi.Metadata `json:"metadata"`

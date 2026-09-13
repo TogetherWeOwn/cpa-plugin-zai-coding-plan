@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
 	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
@@ -13,15 +12,13 @@ import (
 
 const pluginID = "zai-coding-plan"
 
-// pluginVersion is stamped at build time with -ldflags in the pre-coordinator
-// build path. Once src/ is wired to the coordinator (implementation order
-// step 5), this becomes coordinator-owned and this module reports its own
-// version to the coordinator instead.
+// pluginVersion is stamped at build time via -ldflags -X main.pluginVersion in
+// src/, mirrored here by coordinator.PluginVersion so the registered plugin
+// metadata and this module's own status body never disagree on version.
 var pluginVersion = "0.0.0-dev"
 
-// runtimeState is this package's own runtime instance, used by this
-// package's tests until the coordinator (step 4-5) takes over lifecycle
-// ownership and this module is driven through zaiModule instead.
+// runtimeState is this module's own runtime instance, driven by zaiModule
+// (see module.go) as the coordinator's provider-module boundary.
 var runtimeState = &pluginRuntime{}
 
 type envelope struct {
@@ -49,59 +46,6 @@ func (e *envelopeError) Coded() providermodule.WireError {
 
 func newSchedulerError(code, message string) error {
 	return &envelopeError{Code: code, Message: message, Retryable: false}
-}
-
-type registration struct {
-	SchemaVersion uint32             `json:"schema_version"`
-	Metadata      pluginapi.Metadata `json:"metadata"`
-	Capabilities  capabilities       `json:"capabilities"`
-}
-
-// capabilities mirrors the rpcCapabilities wire schema of CLIProxyAPI's
-// internal/pluginhost. Every true field must be backed by a handler in
-// pluginCall: the host rejects registrations that advertise no capability
-// (internal/pluginhost/host.go validPlugin) and warns on every advertised
-// method that fails to answer.
-type capabilities struct {
-	Scheduler     bool `json:"scheduler"`
-	UsagePlugin   bool `json:"usage_plugin"`
-	ManagementAPI bool `json:"management_api"`
-}
-
-func pluginRegistration() registration {
-	return registration{
-		SchemaVersion: pluginabi.SchemaVersion,
-		Metadata: pluginapi.Metadata{
-			Name:             pluginID,
-			Version:          pluginVersion,
-			Author:           "TogetherWeOwn",
-			GitHubRepository: "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
-		},
-		// Advertised per docs/ARCHITECTURE.md: quota-aware scheduler,
-		// usage accounting feed, and management status endpoints. The
-		// scheduler declines every pick until quota state exists, which
-		// keeps the host's native scheduler in control.
-		Capabilities: capabilities{
-			Scheduler:     true,
-			UsagePlugin:   true,
-			ManagementAPI: true,
-		},
-	}
-}
-
-// schedulerPick explicitly delegates healthy traffic to CPA's built-in
-// round-robin scheduler and takes over only while managed accounts are
-// impaired. A hard scheduler error prevents fallback to known-bad capacity.
-func schedulerPick(request []byte) ([]byte, error) {
-	var pick pluginapi.SchedulerPickRequest
-	if err := json.Unmarshal(request, &pick); err != nil {
-		return nil, fmt.Errorf("decode scheduler request")
-	}
-	response, err := runtimeState.pick(pick)
-	if err != nil {
-		return nil, err
-	}
-	return okEnvelope(response)
 }
 
 // usageHandle consumes a lossy best-effort usage observation. Persistence
@@ -155,33 +99,4 @@ func okEnvelope(value any) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(envelope{OK: true, Result: raw})
-}
-
-func errorEnvelopeFor(err error) []byte {
-	if typed, ok := err.(providermodule.Coded); ok {
-		wire := typed.Coded()
-		raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: wire.Code, Message: wire.Message, Retryable: wire.Retryable, HTTPStatus: wire.HTTPStatus}})
-		return raw
-	}
-	return errorEnvelope("plugin_error", err.Error())
-}
-
-func errorEnvelope(code, message string) []byte {
-	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
-	return raw
-}
-
-type lifecycleRequest struct {
-	ConfigYAML []byte `json:"config_yaml"`
-}
-
-func decodeLifecycle(payload []byte) (lifecycleRequest, error) {
-	var lifecycle lifecycleRequest
-	if len(payload) == 0 {
-		return lifecycle, fmt.Errorf("empty lifecycle request")
-	}
-	if err := json.Unmarshal(payload, &lifecycle); err != nil {
-		return lifecycleRequest{}, err
-	}
-	return lifecycle, nil
 }
