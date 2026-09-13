@@ -39,10 +39,17 @@ plugins:
               disabled: false
         opencode-go:
           threshold-percent: 97
-          # Optional: a dashboard Bearer key for GET /zen/go/v1/usage, enabling
-          # real utilization/reset polling. Omitting it is valid -- the module
-          # fails closed to "unknown" reset times rather than guessing.
+          # Optional module-level default: a dashboard Bearer key for GET
+          # /zen/go/v1/usage. Each account's own /usage response only ever
+          # reports that account's own usage, so this default is only correct
+          # when every account below shares one dashboard key -- most
+          # deployments should instead set accounts[].dashboard-api-key per
+          # account. Omitting both is valid -- the module fails closed to
+          # "unknown" reset times rather than guessing.
           dashboard-api-key: ${OPENCODE_GO_DASHBOARD_KEY}
           accounts:
             - name: go-a
               auth-ids: ["replace-with-managed-auth-id"]
+              # Overrides the module-level dashboard-api-key above for this
+              # account. Required whenever accounts do not share one key.
+              dashboard-api-key: ${OPENCODE_GO_A_DASHBOARD_KEY}
