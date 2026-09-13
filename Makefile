@@ -1,6 +1,6 @@
 VERSION ?= 0.2.0
 GO ?= go
-PLUGIN_ID = zai-coding-plan
+PLUGIN_ID = subscription-pool
 OUT ?= dist/$(PLUGIN_ID)-v$(VERSION).so
 ARCHIVE ?= dist/$(PLUGIN_ID)_$(VERSION)_linux_amd64.zip
 OPERATOR ?= dist/$(PLUGIN_ID)-v$(VERSION)-operator.zip

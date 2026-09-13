@@ -1,0 +1,194 @@
+package coordinator
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	sdkconfig "github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"gopkg.in/yaml.v3"
+
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
+)
+
+const defaultCPAConfigPath = "config.yaml"
+
+// coordinatorConfig is the coordinator's own YAML shape: everything under
+// plugins.configs.subscription-pool except the host-owned enabled/priority
+// fields, which the CPA host strips into PluginInstanceConfig before the
+// plugin ever sees its raw config.
+type coordinatorConfig struct {
+	CPAConfigPath string               `yaml:"cpa-config-path"`
+	Providers     map[string]yaml.Node `yaml:"providers"`
+}
+
+func parseCoordinatorConfig(raw []byte) (coordinatorConfig, error) {
+	decoder := yaml.NewDecoder(bytes.NewReader(raw))
+	decoder.KnownFields(true)
+	var cfg coordinatorConfig
+	if err := decoder.Decode(&cfg); err != nil {
+		return coordinatorConfig{}, fmt.Errorf("decode coordinator config: %w", err)
+	}
+	if strings.TrimSpace(cfg.CPAConfigPath) == "" {
+		cfg.CPAConfigPath = defaultCPAConfigPath
+	}
+	return cfg, nil
+}
+
+// providerConfigRaw re-marshals the providers.<id> YAML node back into JSON
+// so a module's Reconfigure can decode it with its own, independent shape.
+// A provider absent from the config re-marshals its zero yaml.Node, which
+// re-marshals as JSON null; modules must treat that the same as "{}".
+func providerConfigRaw(cfg coordinatorConfig, providerID string) ([]byte, error) {
+	node, ok := cfg.Providers[providerID]
+	if !ok {
+		return []byte("{}"), nil
+	}
+	var value any
+	if err := node.Decode(&value); err != nil {
+		return nil, fmt.Errorf("decode providers.%s: %w", providerID, err)
+	}
+	if value == nil {
+		return []byte("{}"), nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("re-encode providers.%s: %w", providerID, err)
+	}
+	return raw, nil
+}
+
+func resolveCPAConfigPath(pluginConfigPath string) (string, error) {
+	clean := filepath.Clean(strings.TrimSpace(pluginConfigPath))
+	if clean == "." || clean == "" {
+		return "", fmt.Errorf("cpa-config-path is required")
+	}
+	if filepath.IsAbs(clean) {
+		return clean, nil
+	}
+	absolute, err := filepath.Abs(clean)
+	if err != nil {
+		return "", fmt.Errorf("resolve cpa-config-path: %w", err)
+	}
+	return absolute, nil
+}
+
+func resolveAuthDir(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		value = "~/.cli-proxy-api"
+	}
+	if value == "~" || strings.HasPrefix(value, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolve auth-dir: %w", err)
+		}
+		if value == "~" {
+			value = home
+		} else {
+			value = filepath.Join(home, strings.TrimPrefix(value, "~/"))
+		}
+	}
+	absolute, err := filepath.Abs(filepath.Clean(value))
+	if err != nil {
+		return "", fmt.Errorf("resolve auth-dir: %w", err)
+	}
+	return absolute, nil
+}
+
+// hostCPAConfig is the coordinator's own projection of the fields it (not
+// any individual module) needs from the host CLIProxyAPI config: the raw
+// plugins block for the scheduler-slot-exclusivity check, plus the account
+// discovery inputs every module's HostConfig gets a copy of.
+type hostCPAConfig struct {
+	AuthDir             string
+	ClaudeKeys          []providermodule.ClaudeKey
+	OpenAICompatibility []providermodule.OpenAICompatibility
+	Plugins             pluginsProjection
+}
+
+type pluginsProjection struct {
+	Enabled bool
+	Configs map[string]pluginProjection
+}
+
+type pluginProjection struct {
+	Enabled  *bool
+	Priority int
+}
+
+func loadHostCPAConfig(path string) (hostCPAConfig, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return hostCPAConfig{}, fmt.Errorf("read CPA config: %w", err)
+	}
+	cfg, err := sdkconfig.ParseConfigBytes(data)
+	if err != nil {
+		return hostCPAConfig{}, fmt.Errorf("load CPA config: invalid configuration")
+	}
+	plugins := pluginsProjection{Enabled: cfg.Plugins.Enabled, Configs: make(map[string]pluginProjection, len(cfg.Plugins.Configs))}
+	for id, item := range cfg.Plugins.Configs {
+		plugins.Configs[id] = pluginProjection{Enabled: item.Enabled, Priority: item.Priority}
+	}
+	claudeKeys := make([]providermodule.ClaudeKey, 0, len(cfg.ClaudeKey))
+	for _, key := range cfg.ClaudeKey {
+		claudeKeys = append(claudeKeys, providermodule.ClaudeKey{
+			APIKey:   key.APIKey,
+			BaseURL:  key.BaseURL,
+			ProxyURL: key.ProxyURL,
+			Prefix:   key.Prefix,
+			Headers:  key.Headers,
+		})
+	}
+	compats := make([]providermodule.OpenAICompatibility, 0, len(cfg.OpenAICompatibility))
+	for _, compat := range cfg.OpenAICompatibility {
+		entries := make([]providermodule.OpenAICompatibilityAPIKey, 0, len(compat.APIKeyEntries))
+		for _, entry := range compat.APIKeyEntries {
+			entries = append(entries, providermodule.OpenAICompatibilityAPIKey{
+				APIKey:   entry.APIKey,
+				ProxyURL: entry.ProxyURL,
+			})
+		}
+		compats = append(compats, providermodule.OpenAICompatibility{
+			Name:          compat.Name,
+			BaseURL:       compat.BaseURL,
+			Disabled:      compat.Disabled,
+			Headers:       compat.Headers,
+			APIKeyEntries: entries,
+		})
+	}
+	return hostCPAConfig{
+		AuthDir:             cfg.AuthDir,
+		ClaudeKeys:          claudeKeys,
+		OpenAICompatibility: compats,
+		Plugins:             plugins,
+	}, nil
+}
+
+// validateSchedulerDeployment enforces the host-level rule that this plugin
+// must be the sole enabled scheduler plugin: CLIProxyAPI's scheduler slot
+// runs only the first active scheduler plugin by priority desc, ID asc, and
+// silently ignores the rest, so a second enabled scheduler plugin would
+// blend or lose quota domains without any error ever surfacing.
+func validateSchedulerDeployment(plugins pluginsProjection) error {
+	if !plugins.Enabled {
+		return fmt.Errorf("plugins must be enabled")
+	}
+	item, exists := plugins.Configs[PluginID]
+	if !exists || item.Enabled == nil || !*item.Enabled {
+		return fmt.Errorf("%s must be enabled", PluginID)
+	}
+	if item.Priority != requiredPluginPriority {
+		return fmt.Errorf("%s priority must be %d", PluginID, requiredPluginPriority)
+	}
+	for id, configured := range plugins.Configs {
+		if id == PluginID || configured.Enabled == nil || !*configured.Enabled {
+			continue
+		}
+		return fmt.Errorf("%s must be the sole enabled scheduler plugin; disable %s", PluginID, id)
+	}
+	return nil
+}

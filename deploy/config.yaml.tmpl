@@ -18,19 +18,21 @@ plugins:
   store-sources:
     - https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/download/v0.2.0/registry.json
   configs:
-    zai-coding-plan:
+    subscription-pool:
       enabled: true
       priority: 1000
       cpa-config-path: /app/config.yaml
-      quota-refresh-interval: 2m
-      authoritative-max-age: 5m
-      threshold-percent: 97
-      suspend-duration: 30m
-      fallback-cooldown: 10m
-      state-retention: 192h
-      default-plan: pro
-      accounts:
-        - key-suffix: ${ZAI_CODING_PLAN_KEY_SUFFIX}
-          name: zai-pro-1
-          plan: pro
-          disabled: false
+      providers:
+        zai:
+          quota-refresh-interval: 2m
+          authoritative-max-age: 5m
+          threshold-percent: 97
+          suspend-duration: 30m
+          fallback-cooldown: 10m
+          state-retention: 192h
+          default-plan: pro
+          accounts:
+            - key-suffix: ${ZAI_CODING_PLAN_KEY_SUFFIX}
+              name: zai-pro-1
+              plan: pro
+              disabled: false

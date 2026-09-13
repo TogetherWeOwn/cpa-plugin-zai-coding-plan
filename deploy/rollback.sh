@@ -8,7 +8,7 @@ set -euo pipefail
 : "${CLIPROXY_USAGE_DIR:=/srv/cliproxy-usage}"
 
 umask 077
-management_url="${CLIPROXY_MANAGEMENT_URL%/}/v0/management/plugins/zai-coding-plan"
+management_url="${CLIPROXY_MANAGEMENT_URL%/}/v0/management/plugins/subscription-pool"
 python3 - "$CLIPROXY_MANAGEMENT_URL" "$management_url" <<'PY'
 import sys, urllib.parse
 allowed={"http://127.0.0.1:8317", "http://[::1]:8317", "http://localhost:8317"}
@@ -29,7 +29,7 @@ base, removal=sys.argv[1:]
 if origin(base) not in {origin(value) for value in allowed}:
     raise SystemExit("management URL origin is not approved")
 parsed=urllib.parse.urlsplit(removal)
-if parsed.path != "/v0/management/plugins/zai-coding-plan" or origin(removal) != origin(base):
+if parsed.path != "/v0/management/plugins/subscription-pool" or origin(removal) != origin(base):
     raise SystemExit("management plugin removal URL is not approved")
 PY
 

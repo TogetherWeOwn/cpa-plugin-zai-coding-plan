@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	pluginID                     = "zai-coding-plan"
+	pluginID                     = "subscription-pool"
 	libraryName                  = pluginID + ".so"
 	hostImageRepository          = "eceasy/cli-proxy-api"
 	baselineHostImageTag         = "v7.2.67"

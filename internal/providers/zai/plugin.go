@@ -1,28 +1,28 @@
-package main
+package zai
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 
-	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
 	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
 )
 
-const pluginID = coordinator.PluginID
+const pluginID = "zai-coding-plan"
 
-// pluginVersion is stamped at build time with -ldflags -X main.pluginVersion.
-// It is mirrored into coordinator.PluginVersion so the registered plugin
-// metadata (pluginRegistration) and the coordinator's own aggregated
-// management status body never disagree on version.
+// pluginVersion is stamped at build time with -ldflags in the pre-coordinator
+// build path. Once src/ is wired to the coordinator (implementation order
+// step 5), this becomes coordinator-owned and this module reports its own
+// version to the coordinator instead.
 var pluginVersion = "0.0.0-dev"
 
-func init() {
-	coordinator.PluginVersion = pluginVersion
-}
+// runtimeState is this package's own runtime instance, used by this
+// package's tests until the coordinator (step 4-5) takes over lifecycle
+// ownership and this module is driven through zaiModule instead.
+var runtimeState = &pluginRuntime{}
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -39,10 +39,10 @@ type envelopeError struct {
 
 func (e *envelopeError) Error() string { return e.Code + ": " + e.Message }
 
-// Coded implements providermodule.Coded, the shared wire-error contract also
-// implemented by internal/providers/zai's own envelopeError, so an error
-// raised inside a provider module and propagated verbatim by the coordinator
-// still carries its code/message/HTTP status here.
+// Coded implements providermodule.Coded so errors raised inside this package
+// (e.g. by newSchedulerError) carry their wire code, message, and HTTP status
+// across the coordinator boundary unchanged, rather than being downgraded to
+// a generic error by a package-local type assertion on the other side.
 func (e *envelopeError) Coded() providermodule.WireError {
 	return providermodule.WireError{Code: e.Code, Message: e.Message, Retryable: e.Retryable, HTTPStatus: e.HTTPStatus}
 }
@@ -97,7 +97,7 @@ func schedulerPick(request []byte) ([]byte, error) {
 	if err := json.Unmarshal(request, &pick); err != nil {
 		return nil, fmt.Errorf("decode scheduler request")
 	}
-	response, err := runtimeState.Pick(pick)
+	response, err := runtimeState.pick(pick)
 	if err != nil {
 		return nil, err
 	}
@@ -112,18 +112,41 @@ func usageHandle(request []byte) ([]byte, error) {
 	if err := json.Unmarshal(request, &record); err != nil {
 		return nil, fmt.Errorf("decode usage record")
 	}
-	_ = runtimeState.HandleUsage(record)
+	_ = runtimeState.handleUsage(record)
 	return okEnvelope(struct{}{})
 }
 
-// managementHandle answers a management.handle RPC.
-func managementHandle(request []byte) ([]byte, error) {
-	var req pluginapi.ManagementRequest
-	if err := json.Unmarshal(request, &req); err != nil {
-		return nil, fmt.Errorf("decode management request")
-	}
-	response := runtimeState.HandleManagement(context.Background(), req)
-	return okEnvelope(response)
+// managementStatusBody is the redacted JSON served at the status route.
+type managementStatusBody struct {
+	Plugin          string                    `json:"plugin"`
+	Status          string                    `json:"status"`
+	Version         string                    `json:"version"`
+	GeneratedAt     time.Time                 `json:"generated_at"`
+	ValidationError string                    `json:"validation_error,omitempty"`
+	Accounts        []managementAccountStatus `json:"accounts,omitempty"`
+}
+
+type managementAccountStatus struct {
+	Name                   string     `json:"name"`
+	KeySuffix              string     `json:"key_suffix"`
+	Plan                   string     `json:"plan"`
+	FiveHourUtilization    float64    `json:"five_hour_utilization"`
+	WeeklyUtilization      float64    `json:"weekly_utilization"`
+	FiveHourResetsAt       *time.Time `json:"five_hour_resets_at"`
+	WeeklyResetsAt         *time.Time `json:"weekly_resets_at"`
+	QuotaSource            string     `json:"quota_source"`
+	QuotaObservedAt        time.Time  `json:"quota_observed_at,omitempty"`
+	QuotaAgeSeconds        int64      `json:"quota_age_seconds"`
+	QuotaStale             bool       `json:"quota_stale"`
+	QuotaError             string     `json:"quota_error,omitempty"`
+	Offpeak                bool       `json:"offpeak"`
+	Health                 string     `json:"health"`
+	EstimatorCompleteSince time.Time  `json:"estimator_complete_since,omitempty"`
+	DeliveryWarning        bool       `json:"delivery_warning"`
+	PersistenceWarning     bool       `json:"persistence_warning"`
+	UnknownModelWarning    bool       `json:"unknown_model_warning"`
+	HeuristicDedupWarning  bool       `json:"heuristic_dedup_warning"`
+	DedupMode              string     `json:"dedup_mode"`
 }
 
 func okEnvelope(value any) ([]byte, error) {
@@ -146,4 +169,19 @@ func errorEnvelopeFor(err error) []byte {
 func errorEnvelope(code, message string) []byte {
 	raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: code, Message: message}})
 	return raw
+}
+
+type lifecycleRequest struct {
+	ConfigYAML []byte `json:"config_yaml"`
+}
+
+func decodeLifecycle(payload []byte) (lifecycleRequest, error) {
+	var lifecycle lifecycleRequest
+	if len(payload) == 0 {
+		return lifecycle, fmt.Errorf("empty lifecycle request")
+	}
+	if err := json.Unmarshal(payload, &lifecycle); err != nil {
+		return lifecycleRequest{}, err
+	}
+	return lifecycle, nil
 }

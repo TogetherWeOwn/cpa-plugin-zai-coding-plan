@@ -19,7 +19,43 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/abiclient"
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providers/zai"
 )
+
+const fixtureKey = "test-only-host-integration-key"
+
+// resourceStatusPath and managementStatusPath mirror the coordinator's own
+// aggregated status route and the zai module's declared (relative) resource
+// path -- see internal/coordinator/management.go and
+// internal/providers/zai/management.go. The coordinator does no path
+// rewriting on module-declared routes in this slice; only the resource
+// prefix (the registered plugin ID) changed with the rename.
+const (
+	managementStatusPath = "/v0/management/plugins/" + pluginID + "/status"
+	resourceStatusPath   = "/status"
+)
+
+// ownedZaiAuthIDs computes the exact auth IDs the zai module will assign for
+// the account(s) described by cpaConfigPath, by driving a throwaway
+// in-process coordinator+zai module through the identical Reconfigure inputs
+// the compiled plugin under test also receives. Account discovery is a pure
+// function of the CPA config content, so this yields byte-identical auth IDs
+// to whatever the separately-compiled .so computes, without this package
+// (package main) needing to call any of zai's now-unexported internals.
+func ownedZaiAuthIDs(t *testing.T, cpaConfigPath string) []string {
+	t.Helper()
+	c := coordinator.New(zai.NewModule())
+	rawConfig := []byte("cpa-config-path: " + cpaConfigPath + "\nproviders:\n  zai:\n    default-plan: pro\n")
+	if err := c.Reconfigure(rawConfig); err != nil {
+		t.Fatalf("reference coordinator Reconfigure() error = %v", err)
+	}
+	ids := c.OwnedAuthIDs("zai")
+	if len(ids) == 0 {
+		t.Fatal("zai module reported no owned auth ids")
+	}
+	return ids
+}
 
 // TestManagementRouteEndToEnd pins the full management dispatch contract the
 // review flagged: the route declared by management.register must resolve to
@@ -30,7 +66,7 @@ import (
 // The SDK host does not expose ServeManagementHTTP, so this test loads the
 // compiled c-shared library through internal/abiclient (the host loader's C
 // ABI) and replays the host's wire behavior byte-for-byte: the declared route
-// normalizes to "/v0/management/plugins/zai-coding-plan/status",
+// normalizes to the coordinator's own aggregated status path,
 // ServeManagementHTTP forwards that exact path in ManagementRequest, and the
 // response is decoded as pluginapi.ManagementResponse.
 func TestManagementRouteEndToEnd(t *testing.T) {
@@ -54,8 +90,10 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 		Routes    []pluginapi.ManagementRoute `json:"routes"`
 		Resources []pluginapi.ResourceRoute   `json:"resources"`
 	}](t, registerRaw, pluginabi.MethodManagementRegister)
-	if len(registered.Routes) != 4 {
-		t.Fatalf("management.register routes = %#v, want four", registered.Routes)
+	// The coordinator's own aggregated status route, plus the zai module's 4
+	// declared routes (status/refresh/unblock/account-config) = 5 total.
+	if len(registered.Routes) != 5 {
+		t.Fatalf("management.register routes = %#v, want five (coordinator status + zai's 4)", registered.Routes)
 	}
 	if len(registered.Resources) != 1 || registered.Resources[0].Path != resourceStatusPath || registered.Resources[0].Menu != "Z.ai Quota" {
 		t.Fatalf("management.register resources = %#v, want Z.ai quota menu", registered.Resources)
@@ -94,7 +132,11 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 	if status != http.StatusOK {
 		t.Fatalf("management status = %d, want 200", status)
 	}
-	var body managementStatusBody
+	var body struct {
+		Plugin  string `json:"plugin"`
+		Status  string `json:"status"`
+		Version string `json:"version"`
+	}
 	if err := json.Unmarshal(resp.Body, &body); err != nil {
 		t.Fatalf("management body is not the status JSON: %v (raw %q)", err, resp.Body)
 	}
@@ -129,6 +171,10 @@ func TestResourceRouteEndToEndAllowsCrossOriginManagementCenterFrame(t *testing.
 		t.Fatalf("resource route = %#v", resource)
 	}
 
+	// The host prefixes a module's own relative resource path by the
+	// *registered* plugin ID (the coordinator's), not the owning module's own
+	// internal ID -- see internal/coordinator/management.go
+	// resourcePluginBasePath.
 	requestBody, err := json.Marshal(map[string]any{
 		"method": http.MethodGet,
 		"path":   "/v0/resource/plugins/" + pluginID + resource.Path,
@@ -229,19 +275,16 @@ func TestHostRegistersPlugin(t *testing.T) {
 
 	authDir := filepath.Join(root, "auth")
 	cpaConfigPath := filepath.Join(root, "config.yaml")
-	writeCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
+	writeSrcCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
 	enabled := true
-	var configNode yaml.Node
-	if err := yaml.Unmarshal([]byte("enabled: true\npriority: 0\ncpa-config-path: "+cpaConfigPath+"\ndefault-plan: pro\n"), &configNode); err != nil {
-		t.Fatal(err)
-	}
+	configNode := pluginConfigNode(t, cpaConfigPath)
 	host := pluginhost.New()
 	host.ApplyConfig(context.Background(), pluginhost.RuntimeConfig{
 		Enabled: true,
 		Dir:     filepath.Join(root, "plugins"),
 		AuthDir: authDir,
 		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: *configNode.Content[0]},
+			pluginID: {Enabled: &enabled, Priority: 1000, Raw: configNode},
 		},
 	})
 	defer host.ShutdownAll()
@@ -266,15 +309,8 @@ func TestHostRegistersPlugin(t *testing.T) {
 
 	// Healthy managed traffic explicitly delegates to the native round-robin
 	// scheduler; returning unhandled would permit an accidental fallback path.
-	cpa, err := loadCPAConfig(cpaConfigPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts, err := discoverAccounts(cpa, pluginConfig{DefaultPlan: "pro"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp, handled, errPick := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: accounts[0].ClaudeAuthID}}})
+	authIDs := ownedZaiAuthIDs(t, cpaConfigPath)
+	resp, handled, errPick := host.PickAuth(context.Background(), pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: authIDs[0]}}})
 	if errPick != nil {
 		t.Fatalf("PickAuth() error = %v", errPick)
 	}
@@ -329,30 +365,23 @@ func TestHostPropagatesAllImpairedSchedulerError(t *testing.T) {
 
 	root := t.TempDir()
 	cpaConfigPath := filepath.Join(root, "config.yaml")
-	writeCPAConfigFixture(t, cpaConfigPath, filepath.Join(root, "auth"), fixtureKey)
-	registerRequest, err := json.Marshal(map[string]any{"config_yaml": []byte("cpa-config-path: " + cpaConfigPath + "\ndefault-plan: pro\n")})
+	writeSrcCPAConfigFixture(t, cpaConfigPath, filepath.Join(root, "auth"), fixtureKey)
+	registerRequest, err := json.Marshal(map[string]any{"config_yaml": []byte("cpa-config-path: " + cpaConfigPath + "\nproviders:\n  zai:\n    default-plan: pro\n")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = client.Call(pluginabi.MethodPluginRegister, registerRequest); err != nil {
 		t.Fatal(err)
 	}
-	cpa, err := loadCPAConfig(cpaConfigPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	accounts, err := discoverAccounts(cpa, pluginConfig{DefaultPlan: "pro"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	usage, err := json.Marshal(pluginapi.UsageRecord{AuthID: accounts[0].OpenAIAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
+	authIDs := ownedZaiAuthIDs(t, cpaConfigPath)
+	usage, err := json.Marshal(pluginapi.UsageRecord{AuthID: authIDs[0], Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusUnauthorized}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err = client.Call(pluginabi.MethodUsageHandle, usage); err != nil {
 		t.Fatal(err)
 	}
-	pick, err := json.Marshal(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: accounts[0].ClaudeAuthID}}})
+	pick, err := json.Marshal(pluginapi.SchedulerPickRequest{Candidates: []pluginapi.SchedulerAuthCandidate{{ID: authIDs[0]}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,7 +416,7 @@ func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
 
 	authDir := filepath.Join(root, "auth")
 	cpaConfigPath := filepath.Join(root, "config.yaml")
-	writeCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
+	writeSrcCPAConfigFixture(t, cpaConfigPath, authDir, fixtureKey)
 	enabled := true
 	configNode := pluginConfigNode(t, cpaConfigPath)
 	host := pluginhost.New()
@@ -396,7 +425,7 @@ func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
 		Dir:     filepath.Join(root, "plugins"),
 		AuthDir: authDir,
 		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: configNode},
+			pluginID: {Enabled: &enabled, Priority: 1000, Raw: configNode},
 		},
 	})
 	defer host.ShutdownAll()
@@ -417,7 +446,7 @@ func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
 		Dir:     filepath.Join(root, "plugins"),
 		AuthDir: authDir,
 		Configs: map[string]pluginhost.PluginInstanceConfig{
-			pluginID: {Enabled: &enabled, Priority: requiredPluginPriority, Raw: configNode},
+			pluginID: {Enabled: &enabled, Priority: 1000, Raw: configNode},
 		},
 	})
 
@@ -429,10 +458,14 @@ func TestInvalidReconfigureWithdrawsHostRegistration(t *testing.T) {
 	}
 }
 
+// pluginConfigNode builds the plugin's own config_yaml node: only
+// cpa-config-path and providers.* — enabled/priority are host-owned fields
+// the coordinator's own coordinatorConfig (KnownFields(true)) does not
+// declare and would reject if present here.
 func pluginConfigNode(t *testing.T, cpaConfigPath string) yaml.Node {
 	t.Helper()
 	var configNode yaml.Node
-	if err := yaml.Unmarshal([]byte("enabled: true\npriority: 1000\ncpa-config-path: "+cpaConfigPath+"\ndefault-plan: pro\n"), &configNode); err != nil {
+	if err := yaml.Unmarshal([]byte("cpa-config-path: "+cpaConfigPath+"\nproviders:\n  zai:\n    default-plan: pro\n"), &configNode); err != nil {
 		t.Fatal(err)
 	}
 	return *configNode.Content[0]
