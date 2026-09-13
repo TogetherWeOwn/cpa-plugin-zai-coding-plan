@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -276,7 +277,7 @@ func TestStatusDeclaresObservationGaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(raw)
-	if !strings.Contains(text, "five-hour and weekly enforcement") || !strings.Contains(text, "dashboard payload was unavailable") {
+	if !strings.Contains(text, "five-hour and weekly enforcement") || !strings.Contains(text, "no dashboard credential is configured") || !strings.Contains(text, `"credential_bound":false`) {
 		t.Fatalf("Status() omitted clean-room observation gaps: %s", raw)
 	}
 }
@@ -323,6 +324,239 @@ func TestStatusClearsExpiredWindows(t *testing.T) {
 	module.mu.Unlock()
 	if window.Exhausted || window.Utilization != nil || !window.ResetAt.IsZero() || !window.CooldownAt.IsZero() {
 		t.Fatalf("Status() retained expired window: %#v", window)
+	}
+}
+
+const dashboardFixtureKey = "test-only-e2e-dashboard-key"
+
+type fakeModuleClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeModuleClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeModuleClock) Sleep(context.Context, time.Duration) error { return nil }
+
+func (c *fakeModuleClock) set(now time.Time) {
+	c.mu.Lock()
+	c.now = now
+	c.mu.Unlock()
+}
+
+func configuredModuleWithCredential(t *testing.T, threshold int, apiKey string, client providermodule.HTTPDoer, clock providermodule.Clock) *Module {
+	t.Helper()
+	module := NewModule()
+	raw := json.RawMessage(`{"threshold-percent":` + jsonNumber(threshold) + `,"dashboard-api-key":"` + apiKey + `","accounts":[{"name":"go-a","auth-ids":["go-a-1"]},{"name":"go-b","auth-ids":["go-b-1"]}]}`)
+	host := providermodule.HostConfig{Clock: clock, HTTPClient: client}
+	if err := module.Reconfigure(context.Background(), host, raw); err != nil {
+		t.Fatalf("Reconfigure() error = %v", err)
+	}
+	return module
+}
+
+func TestStatusWithoutCredentialReportsUnknownNotGuessed(t *testing.T) {
+	module := configuredModule(t, 97)
+	raw, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"credential_bound":false`) {
+		t.Fatalf("Status() = %s, want credential_bound:false", text)
+	}
+	if strings.Contains(text, "resets_at") {
+		t.Fatalf("Status() fabricated a reset time without a credential: %s", text)
+	}
+	if !strings.Contains(text, `"known":false`) {
+		t.Fatalf("Status() did not report unknown windows: %s", text)
+	}
+}
+
+func TestStatusPollsAndSurfacesRealResetTimes(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	fiveHourReset := now.Add(2 * time.Hour)
+	weeklyReset := now.Add(5 * 24 * time.Hour)
+	monthlyReset := now.Add(20 * 24 * time.Hour)
+	client := roundTripDoer(func(request *http.Request) (*http.Response, error) {
+		if got := request.Header.Get("Authorization"); got != "Bearer "+dashboardFixtureKey {
+			t.Fatalf("authorization = %q", got)
+		}
+		return usageHTTPResponse(http.StatusOK, usageFixture(
+			usageWindowFixture("ok", 30, fiveHourReset),
+			usageWindowFixture("ok", 60, weeklyReset),
+			usageWindowFixture("ok", 90, monthlyReset),
+		)), nil
+	})
+	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	raw, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		CredentialBound bool `json:"credential_bound"`
+		Accounts        []struct {
+			Windows map[windowKind]struct {
+				Known         bool       `json:"known"`
+				Utilization   float64    `json:"utilization"`
+				ResetAt       *time.Time `json:"resets_at"`
+				Authoritative bool       `json:"authoritative"`
+			} `json:"windows"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		t.Fatalf("Status() invalid JSON: %v, raw = %s", err, raw)
+	}
+	if !parsed.CredentialBound {
+		t.Fatalf("Status() = %s, want credential_bound:true", raw)
+	}
+	for _, account := range parsed.Accounts {
+		fiveHour := account.Windows[windowFiveHour]
+		if !fiveHour.Known || !fiveHour.Authoritative || fiveHour.Utilization != 0.30 || fiveHour.ResetAt == nil || !fiveHour.ResetAt.Equal(fiveHourReset) {
+			t.Fatalf("five_hour window = %#v, want real polled reset", fiveHour)
+		}
+		weekly := account.Windows[windowWeekly]
+		if weekly.ResetAt == nil || !weekly.ResetAt.Equal(weeklyReset) {
+			t.Fatalf("weekly window = %#v, want real polled reset", weekly)
+		}
+		monthly := account.Windows[windowMonthly]
+		if monthly.ResetAt == nil || !monthly.ResetAt.Equal(monthlyReset) {
+			t.Fatalf("monthly window = %#v, want real polled reset", monthly)
+		}
+	}
+	if strings.Contains(string(raw), "no dashboard credential is configured") {
+		t.Fatalf("Status() kept the no-credential gap after a credential was bound: %s", raw)
+	}
+}
+
+func TestStatusFailsClosedOnUnauthorizedPoll(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	client := roundTripDoer(func(*http.Request) (*http.Response, error) {
+		return usageHTTPResponse(http.StatusUnauthorized, `{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`), nil
+	})
+	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	raw, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"credential_bound":true`) {
+		t.Fatalf("Status() = %s, want credential_bound:true even though the poll failed", text)
+	}
+	if strings.Contains(text, "resets_at") {
+		t.Fatalf("Status() fabricated a reset time from a failed poll: %s", text)
+	}
+	if !strings.Contains(text, `"known":false`) {
+		t.Fatalf("Status() did not stay unknown after a failed poll: %s", text)
+	}
+}
+
+func TestStatusFailsClosedOnMalformedPollResponse(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	client := roundTripDoer(func(*http.Request) (*http.Response, error) {
+		return usageHTTPResponse(http.StatusOK, `{not json`), nil
+	})
+	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	raw, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "resets_at") {
+		t.Fatalf("Status() fabricated a reset time from a malformed poll: %s", raw)
+	}
+}
+
+// TestStalePollNeverOverwritesFresherInferredExhaustion and its sibling
+// prove the mergeWindowSignal precedence rule end to end: a poll observed
+// strictly before an existing 429-inferred exhaustion can never clobber it,
+// but a genuinely fresher poll does update the lane (rules 2 and 4 of
+// mergeWindowSignal's doc comment).
+func TestStalePollNeverOverwritesFresherInferredExhaustion(t *testing.T) {
+	later := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	earlier := later.Add(-time.Hour)
+	farFutureReset := later.Add(20 * 24 * time.Hour)
+	clock := &fakeModuleClock{now: later}
+	client := roundTripDoer(func(*http.Request) (*http.Response, error) {
+		return usageHTTPResponse(http.StatusOK, usageFixture(
+			usageWindowFixture("ok", 1, later.Add(time.Hour)),
+			usageWindowFixture("ok", 1, later.Add(7*24*time.Hour)),
+			usageWindowFixture("ok", 1, later.Add(30*24*time.Hour)),
+		)), nil
+	})
+	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, clock)
+	if err := module.HandleUsage(context.Background(), monthlyLimitRecordAt("go-a-1", later, farFutureReset)); err != nil {
+		t.Fatal(err)
+	}
+	// Roll the clock backward before polling, simulating a poll response
+	// whose observation time is older than the 429 already recorded --
+	// e.g. a delayed/retried fetch racing the live event.
+	clock.set(earlier)
+	if _, err := module.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	module.mu.Lock()
+	window := module.state.Accounts["go-a"].Windows[windowMonthly]
+	module.mu.Unlock()
+	if !window.Exhausted || !window.ResetAt.Equal(farFutureReset) {
+		t.Fatalf("window = %#v, want the fresher 429 exhaustion preserved over the stale poll", window)
+	}
+}
+
+func TestFresherPollUpdatesStaleInferredExhaustion(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	clock := &fakeModuleClock{now: now}
+	client := roundTripDoer(func(*http.Request) (*http.Response, error) {
+		return usageHTTPResponse(http.StatusOK, usageFixture(
+			usageWindowFixture("ok", 1, now.Add(time.Hour)),
+			usageWindowFixture("ok", 1, now.Add(7*24*time.Hour)),
+			usageWindowFixture("ok", 1, now.Add(30*24*time.Hour)),
+		)), nil
+	})
+	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, clock)
+	if err := module.HandleUsage(context.Background(), monthlyLimitRecordAt("go-a-1", now.Add(-time.Hour), now.Add(30*time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := module.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	module.mu.Lock()
+	window := module.state.Accounts["go-a"].Windows[windowMonthly]
+	module.mu.Unlock()
+	if window.Exhausted || !window.Authoritative || !window.ResetAt.Equal(now.Add(30*24*time.Hour)) {
+		t.Fatalf("window = %#v, want the fresher poll to override the stale, already-expiring 429 signal", window)
+	}
+}
+
+func TestPollNeverLeaksCredentialFromStatusOrError(t *testing.T) {
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	client := roundTripDoer(func(*http.Request) (*http.Response, error) {
+		return usageHTTPResponse(http.StatusUnauthorized, `{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`), nil
+	})
+	module := configuredModuleWithCredential(t, 97, dashboardFixtureKey, client, &fakeModuleClock{now: now})
+	raw, err := module.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	module.mu.Lock()
+	lastErr := module.lastErr
+	module.mu.Unlock()
+	if strings.Contains(string(raw), dashboardFixtureKey) || strings.Contains(lastErr, dashboardFixtureKey) {
+		t.Fatalf("credential leaked: status = %s, lastErr = %q", raw, lastErr)
+	}
+}
+
+func monthlyLimitRecordAt(authID string, requestedAt, resetAt time.Time) pluginapi.UsageRecord {
+	seconds := int(resetAt.Sub(requestedAt) / time.Second)
+	return pluginapi.UsageRecord{
+		AuthID:          authID,
+		RequestedAt:     requestedAt,
+		Failed:          true,
+		Failure:         pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `[opencode-go/qwen] [429]: Monthly usage limit reached. Resets in 1hr. To continue using this model now, enable us (reset after 1h)`},
+		ResponseHeaders: http.Header{"Retry-After": []string{strconv.Itoa(seconds)}},
 	}
 }
 
