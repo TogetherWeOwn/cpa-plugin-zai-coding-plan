@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-13
+
+### Added
+
+- Operator bundle now packages the OpenCode Go telemetry path alongside the existing Z.ai lane: `collector-opencodego.py` and `deploy/verify-live-opencodego.sh` are installed into the release bundle, checksummed, and enforced by strict bundle-manifest validation.
+- Release workflow artifact staging and the published GitHub release now include both provider collectors and both live verifiers, so the installed bundle proves both `zai` and `opencode-go` provider modules are present and their telemetry files are valid.
+
+### Changed
+
+- Versioned release metadata (`Makefile`, `registry.json`, CI/package expectations, deploy runbook text) bumped to `0.4.0` to reflect the dual-provider `subscription-pool` coordinator baseline merged in `0.3.0`.
+
 ## [0.3.0] - 2026-09-13
 
 ### Added
@@ -51,7 +62,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.0
 [0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.3.0
 [0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0
 [0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0

@@ -14,6 +14,9 @@ var operatorModes = map[string]os.FileMode{
 	"registry.json":               0o644,
 	"router-capacity-source.json": 0o644,
 	"verify-live.sh":              0o755,
+	"verify-live-opencodego.sh":   0o755,
+	"collector-zai.py":            0o755,
+	"collector-opencodego.py":     0o755,
 	"prepare-usage-dir.py":        0o755,
 	"remove-usage-output.py":      0o755,
 	"rollback.sh":                 0o755,
@@ -44,7 +47,7 @@ func TestValidateOperatorBundleRejectsHostileArchives(t *testing.T) {
 			*entries = append(*entries, operatorTestEntry{name: "extra.txt", body: "extra", mode: 0o644})
 		}, message: "unexpected entry"},
 		{name: "duplicate", mutate: func(entries *[]operatorTestEntry) { *entries = append(*entries, (*entries)[0]) }, message: "duplicate entry"},
-		{name: "missing", mutate: func(entries *[]operatorTestEntry) { *entries = (*entries)[1:] }, message: "want 10"},
+		{name: "missing", mutate: func(entries *[]operatorTestEntry) { *entries = (*entries)[1:] }, message: "want 13"},
 		{name: "wrong mode", mutate: func(entries *[]operatorTestEntry) { (*entries)[0].mode = 0o600 }, message: "has mode"},
 		{name: "changed bytes", mutate: func(entries *[]operatorTestEntry) {
 			for index := range *entries {

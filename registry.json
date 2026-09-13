@@ -4,16 +4,16 @@
     {
       "id": "subscription-pool",
       "name": "Subscription Pool",
-      "description": "Neutral multi-provider subscription-pool coordinator for CLIProxyAPI, currently hosting quota-aware Z.AI Coding Plan account pooling.",
+      "description": "Neutral multi-provider subscription-pool coordinator for CLIProxyAPI, currently hosting quota-aware Z.AI Coding Plan and OpenCode Go account pooling.",
       "author": "TogetherWeOwn",
-      "version": "0.3.0",
+      "version": "0.4.0",
       "repository": "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
       "homepage": "https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan",
       "license": "MIT",
       "platforms": ["linux-amd64"],
       "capabilities": ["scheduler", "usage", "management"],
       "release": {
-        "archive": "subscription-pool_0.3.0_linux_amd64.zip",
+        "archive": "subscription-pool_0.4.0_linux_amd64.zip",
         "checksums": "checksums.txt"
       },
       "tags": ["Z.AI", "GLM", "Coding Plan", "quota", "pool"]

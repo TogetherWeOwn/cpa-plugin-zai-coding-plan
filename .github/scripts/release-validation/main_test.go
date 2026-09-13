@@ -79,7 +79,7 @@ func TestValidateReleaseRequiresChecksumsForBothArtifacts(t *testing.T) {
 	writeReleaseFixture(t, root, "0.2.0")
 	archive := filepath.Join(root, "dist", pluginID+"_0.2.0_linux_amd64.zip")
 	writeChecksums(t, filepath.Join(root, "dist", "checksums.txt"), []string{archive})
-	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "want 13") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "want 16") {
 		t.Fatalf("validateRelease() error = %v, want missing artifact checksum error", err)
 	}
 }

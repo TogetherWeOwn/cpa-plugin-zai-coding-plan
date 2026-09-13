@@ -197,6 +197,92 @@ PY
   --secret-marker-file "$ZAI_CODING_PLAN_KEY_FILE" \
   --url "$status_url"
 
+# Prove both provider modules are hosted by the coordinator, not just that the
+# zai module's own sub-route answers. This queries the coordinator's own
+# aggregate status route (distinct from status_url above) and asserts every
+# expected provider ID is present, independent of and in addition to the
+# opencode-go lane's own deep field validation in verify-live-opencodego.sh.
+coordinator_status_file="$work_dir/coordinator-status.json"
+coordinator_status_url="${CLIPROXY_MANAGEMENT_URL%/}/v0/management/plugins/subscription-pool/status"
+
+python3 - "$CLIPROXY_MANAGEMENT_URL" "$coordinator_status_url" <<'PY'
+import sys, urllib.parse
+allowed={"http://127.0.0.1:8317", "http://[::1]:8317", "http://localhost:8317"}
+def origin(value):
+    parsed=urllib.parse.urlsplit(value)
+    if parsed.scheme not in {"http","https"} or not parsed.hostname or parsed.username or parsed.password:
+        raise SystemExit("management URL must be an absolute HTTP(S) URL without userinfo")
+    if parsed.query or parsed.fragment:
+        raise SystemExit("management URL must not contain a query or fragment")
+    try:
+        port=parsed.port
+    except ValueError:
+        raise SystemExit("management URL has an invalid port")
+    host=parsed.hostname.lower()
+    rendered=f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{rendered}:{port or (80 if parsed.scheme == 'http' else 443)}"
+base, status=sys.argv[1:]
+if origin(base) not in {origin(value) for value in allowed}:
+    raise SystemExit("management URL origin is not approved")
+parsed=urllib.parse.urlsplit(status)
+if parsed.path != "/v0/management/plugins/subscription-pool/status" or origin(status) != origin(base):
+    raise SystemExit("coordinator status URL is not approved")
+PY
+
+curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+  --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' \
+  --config "$curl_config" \
+  "$coordinator_status_url" >"$coordinator_status_file"
+
+python3 - "$coordinator_status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
+import json, pathlib, sys
+expected_providers={"zai", "opencode-go"}
+def fail(message):
+    raise SystemExit(message)
+def read_secret(path):
+    raw=pathlib.Path(path).read_bytes()
+    lines=raw.splitlines()
+    if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
+        fail("secret input file must contain exactly one non-empty line")
+    try:
+        return lines[0].decode("utf-8")
+    except UnicodeDecodeError:
+        fail("secret input file must contain valid UTF-8")
+def scan_decoded(value, markers):
+    if isinstance(value, str):
+        if any(marker and marker in value for marker in markers):
+            fail("coordinator status response failed decoded confidential-value scan")
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            scan_decoded(key, markers)
+            scan_decoded(child, markers)
+    elif isinstance(value, list):
+        for child in value:
+            scan_decoded(child, markers)
+raw=pathlib.Path(sys.argv[1]).read_bytes()
+if len(raw) > 1_048_576:
+    fail("coordinator status response exceeds bounded scan size")
+management=read_secret(sys.argv[2])
+plan=read_secret(sys.argv[3])
+markers=[management, plan]
+if len(plan) > 6:
+    markers.append(plan[-6:])
+if any(marker.encode() in raw for marker in markers):
+    fail("coordinator status response failed confidential-value scan")
+def reject_constant(_):
+    raise ValueError("non-RFC JSON value")
+try:
+    status=json.loads(raw, parse_constant=reject_constant)
+except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+    fail("coordinator status response is not strict JSON")
+scan_decoded(status, markers)
+if not isinstance(status, dict) or status.get("plugin") != "subscription-pool":
+    fail("coordinator status response is not the subscription-pool aggregate")
+providers=status.get("providers")
+if not isinstance(providers, dict) or not expected_providers.issubset(providers):
+    fail("coordinator status response does not list both zai and opencode-go provider modules")
+PY
+
 curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --max-time 5 --max-filesize 1048576 \
   "$CLIPROXY_DASHBOARD_URL" >"$dashboard_file"

@@ -25,6 +25,7 @@ class VerifyLiveTest(unittest.TestCase):
         status_plan="pro",
         status_plan_json=None,
         dashboard_json=None,
+        coordinator_status_json=None,
         journal_stalls=False,
         journal_timeout="1",
         router_dry_run=None,
@@ -59,6 +60,18 @@ class VerifyLiveTest(unittest.TestCase):
                         print(dashboard_json)
                     else:
                         print(json.dumps({{"status": {dashboard!r}}}))
+                elif {"subscription-pool/status"!r} in " ".join(args):
+                    coordinator_json={coordinator_status_json!r}
+                    if coordinator_json is not None:
+                        print(coordinator_json)
+                    else:
+                        print(json.dumps({{
+                            "plugin":"subscription-pool",
+                            "status":"registered",
+                            "version":"0.0.0-dev",
+                            "generated_at":"2026-09-10T15:00:00Z",
+                            "providers":{{"zai":{{"provider":"zai"}},"opencode-go":{{"provider":"opencode-go"}}}}
+                        }}))
                 else:
                     status_json={status_plan_json!r}
                     if status_json is not None:
@@ -155,14 +168,15 @@ class VerifyLiveTest(unittest.TestCase):
         completed, curl_argv = self.run_verify()
         self.assertEqual(completed.returncode, 0, completed.stderr)
         invocations = [part for part in curl_argv.split("---\n") if "management.curl" in part]
-        self.assertEqual(len(invocations), 1)
-        args = invocations[0].splitlines()
-        self.assertEqual(args[0], "-q")
-        self.assertIn("--max-time\n5", invocations[0])
-        self.assertIn("--max-filesize\n1048576", invocations[0])
-        self.assertIn("--max-redirs\n0", invocations[0])
-        self.assertIn("--noproxy\n*", invocations[0])
-        self.assertIn("--proxy\n", invocations[0])
+        self.assertEqual(len(invocations), 2)
+        for invocation in invocations:
+            args = invocation.splitlines()
+            self.assertEqual(args[0], "-q")
+            self.assertIn("--max-time\n5", invocation)
+            self.assertIn("--max-filesize\n1048576", invocation)
+            self.assertIn("--max-redirs\n0", invocation)
+            self.assertIn("--noproxy\n*", invocation)
+            self.assertIn("--proxy\n", invocation)
 
     def test_unauthenticated_loopback_curl_disables_ambient_config_and_proxy(self):
         completed, curl_argv = self.run_verify()
@@ -278,6 +292,20 @@ class VerifyLiveTest(unittest.TestCase):
                 self.assertNotIn("fixture-management-marker", completed.stdout + completed.stderr)
                 self.assertNotIn("fixture-plan-marker", completed.stdout + completed.stderr)
                 self.assertIn("authenticated status response failed confidential-value scan", completed.stderr)
+
+    def test_coordinator_status_proves_both_provider_modules_present(self):
+        completed, curl_argv = self.run_verify()
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("subscription-pool/status", curl_argv)
+
+    def test_missing_provider_in_coordinator_status_fails_closed(self):
+        coordinator_json = (
+            '{"plugin":"subscription-pool","status":"registered","version":"0.0.0-dev",'
+            '"generated_at":"2026-09-10T15:00:00Z","providers":{"zai":{"provider":"zai"}}}'
+        )
+        completed, _ = self.run_verify(coordinator_status_json=coordinator_json)
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("does not list both zai and opencode-go", completed.stderr)
 
     def test_bounded_scans_reject_full_or_suffix_markers_without_printing_them(self):
         for source, value in (
