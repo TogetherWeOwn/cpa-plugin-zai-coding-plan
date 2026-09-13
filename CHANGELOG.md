@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-13
+
+### Added
+
+- Neutral `subscription-pool` coordinator plugin ID replacing the single-provider `zai-coding-plan` registration; Z.ai support is now a `providerModule` extraction (`internal/providers/zai`) behind a coordinator-owned dispatch registry.
+- `providerModule` interface and per-`authID`/`providerID`/`logicalAccountID` dispatch registry: zero recognized families yields `Handled:false`, more than one recognized family or a recognized-but-unmanaged/all-impaired family fails closed instead of silently passing traffic through.
+- Config YAML reshaped to a `providers.<name>` root shape (`providers.zai`, with `providers.opencode-go` reserved for the sibling module) with strict unknown-field rejection.
+
+### Changed
+
+- Z.ai account/quota/health/polling/management behavior is unchanged; existing tests were relocated to `internal/providers/zai` and continue to pass without modification.
+
 ## [0.2.0] - 2026-09-11
 
 ### Added
@@ -39,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.3.0
 [0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0
 [0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0
