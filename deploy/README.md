@@ -165,6 +165,28 @@ The plugin-store response must report `id=subscription-pool`, `version=0.3.0`, `
 
 `router-capacity-source.json` is the exact Model Router capacity-source shape for one opaque Z.ai model ID. Repeat it per model ID and retain `unknownTelemetry: fail-open` during dogfood. The operator dispatcher already maps `zai/*`, `zai-openai/*`, and `glm*` to lane `zai`; the live check is a dry-run selection with the Z.ai model enabled, followed by one bounded canary issue. Do not re-pin an issue mid-run.
 
+## OpenCode Go lane collector and live check
+
+The OpenCode Go provider module has no dedicated management route of its own; it is aggregated under the coordinator's own status route, keyed by the module's `ID()` (`opencode-go`):
+
+```
+GET /v0/management/plugins/subscription-pool/status
+-> {"plugin":"subscription-pool", ..., "providers": {"opencode-go": {...}, "zai": {...}}}
+```
+
+`deploy/collector-opencodego.py` polls that same aggregate route, extracts the `providers["opencode-go"]` entry, validates it against the module's actual `Status()` field shape (`provider`, `status`, `credential_bound`, `observation_gaps`, `accounts[].name/disabled/windows{five_hour,weekly,monthly}.known/utilization/exhausted/resets_at/source/authoritative`), and writes sanitized `/srv/cliproxy-usage/opencode-go.json`. It fails closed if the `opencode-go` entry is absent from `providers` (a transient module error inside the coordinator's own aggregation loop silently drops the key rather than propagating an error).
+
+```sh
+usage_dir=/srv/cliproxy-usage
+CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
+OPENCODE_GO_DASHBOARD_API_KEY_FILE=/home/ubuntu/secure-drop/opencode-go-dashboard.key \
+CLIPROXY_USAGE_DIR="$usage_dir" \
+CLIPROXY_SERVICE_UNIT=cliproxy.service \
+  "$repo/deploy/verify-live-opencodego.sh"
+```
+
+`deploy/verify-live-opencodego.sh` is the near-direct adaptation of `deploy/verify-live.sh` for this lane: it proves the same unauthenticated-401/authenticated-200 shape against the coordinator's aggregate route, validates the outer coordinator envelope loosely and the inner `providers["opencode-go"]` object strictly, invokes the collector, and performs bounded projected-output and service-log confidential-value scans for both the management key and the OpenCode Go dashboard API key markers without printing matches. It has no dashboard-fetch step, since this lane has no separate telemetry dashboard endpoint analogous to `CLIPROXY_DASHBOARD_URL`.
+
 ## Rollback
 
 ```sh

@@ -1,0 +1,28 @@
+{
+  "plugin": "subscription-pool",
+  "status": "registered",
+  "version": "0.0.0-dev",
+  "generated_at": "2026-09-08T08:00:00Z",
+  "providers": {
+    "opencode-go": {
+      "provider": "opencode-go",
+      "status": "registered",
+      "credential_bound": false,
+      "observation_gaps": [
+        "five-hour and weekly enforcement are generalized from the observed monthly 429 shape",
+        "no dashboard credential is configured -- five_hour/weekly/monthly reset times are unknown until dashboard-api-key is set"
+      ],
+      "accounts": [
+        {
+          "name": "opencodego-1",
+          "disabled": false,
+          "windows": {
+            "five_hour": {"known": false, "exhausted": false, "source": "unknown"},
+            "weekly": {"known": false, "exhausted": false, "source": "unknown"},
+            "monthly": {"known": false, "exhausted": false, "source": "unknown"}
+          }
+        }
+      ]
+    }
+  }
+}
