@@ -37,3 +37,12 @@ plugins:
               name: zai-pro-1
               plan: pro
               disabled: false
+        opencode-go:
+          threshold-percent: 97
+          # Optional: a dashboard Bearer key for GET /zen/go/v1/usage, enabling
+          # real utilization/reset polling. Omitting it is valid -- the module
+          # fails closed to "unknown" reset times rather than guessing.
+          dashboard-api-key: ${OPENCODE_GO_DASHBOARD_KEY}
+          accounts:
+            - name: go-a
+              auth-ids: ["replace-with-managed-auth-id"]

@@ -28,6 +28,7 @@ const (
 	defaultFailureCooldown = 10 * time.Minute
 	maxFailureBody         = 16 << 10
 	maxResetFuture         = 35 * 24 * time.Hour
+	minPollInterval        = 30 * time.Second
 )
 
 type windowKind string
@@ -41,6 +42,7 @@ const (
 type moduleConfig struct {
 	Enabled          bool
 	ThresholdPercent int
+	DashboardAPIKey  string
 	Accounts         []accountConfig
 }
 
@@ -53,6 +55,7 @@ type accountConfig struct {
 type rawModuleConfig struct {
 	Enabled          *bool              `json:"enabled"`
 	ThresholdPercent *int               `json:"threshold-percent"`
+	DashboardAPIKey  string             `json:"dashboard-api-key"`
 	Accounts         []rawAccountConfig `json:"accounts"`
 }
 
@@ -77,19 +80,44 @@ type windowState struct {
 	ResetAt     time.Time
 	CooldownAt  time.Time
 	Source      string
+
+	// Known distinguishes "no signal has ever arrived" from a confirmed
+	// healthy 0%-utilization reading -- the zero value of this struct must
+	// never be mistaken for a validated observation.
+	Known         bool
+	Authoritative bool
+	ObservedAt    time.Time
 }
 
 type moduleState struct {
-	Threshold int
-	Accounts  map[string]*accountState
-	ByAuthID  map[string]string
+	Threshold       int
+	DashboardAPIKey string
+	Accounts        map[string]*accountState
+	ByAuthID        map[string]string
 }
 
 type Module struct {
-	mu      sync.Mutex
-	state   *moduleState
-	lastErr string
-	closed  bool
+	mu         sync.Mutex
+	state      *moduleState
+	lastErr    string
+	closed     bool
+	clock      providermodule.Clock
+	httpClient providermodule.HTTPDoer
+	lastPollAt time.Time
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now().UTC() }
+func (realClock) Sleep(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 var _ providermodule.Module = (*Module)(nil)
@@ -109,7 +137,7 @@ func (m *Module) Recognize(candidate pluginapi.SchedulerAuthCandidate) bool {
 	return candidateClaimsOpenCodeGo(candidate)
 }
 
-func (m *Module) Reconfigure(_ context.Context, _ providermodule.HostConfig, providerConfig json.RawMessage) error {
+func (m *Module) Reconfigure(_ context.Context, host providermodule.HostConfig, providerConfig json.RawMessage) error {
 	cfg, err := parseConfig(providerConfig)
 	if err != nil {
 		m.recordError(err)
@@ -129,6 +157,8 @@ func (m *Module) Reconfigure(_ context.Context, _ providermodule.HostConfig, pro
 	carryForwardState(staged, m.state)
 	m.state = staged
 	m.lastErr = ""
+	m.clock = host.Clock
+	m.httpClient = host.HTTPClient
 	return nil
 }
 
@@ -235,54 +265,73 @@ func (m *Module) HandleUsage(_ context.Context, record pluginapi.UsageRecord) er
 		resetAt, resetKnown = bodyReset(record.Failure.Body, now)
 	}
 	current := account.Windows[window]
-	if resetKnown && resetAt.After(current.ResetAt) {
-		current.ResetAt = resetAt
+	var incomingResetAt time.Time
+	if resetKnown {
+		incomingResetAt = resetAt
 	}
 	cooldownAt := now.Add(defaultFailureCooldown)
 	if resetKnown {
 		cooldownAt = resetAt
 	}
-	if cooldownAt.After(current.CooldownAt) {
-		current.CooldownAt = cooldownAt
+	incoming := windowState{
+		Utilization: float64Pointer(1),
+		Exhausted:   true,
+		ResetAt:     incomingResetAt,
+		CooldownAt:  cooldownAt,
+		Source:      "proxy-observed " + string(window) + " quota response",
+		Known:       true,
+		ObservedAt:  now,
 	}
-	current.Exhausted = true
-	current.Utilization = float64Pointer(1)
-	current.Source = "proxy-observed " + string(window) + " quota response"
-	account.Windows[window] = current
+	merged := mergeWindowSignal(current, incoming)
+	if cooldownAt.After(merged.CooldownAt) {
+		merged.CooldownAt = cooldownAt
+	}
+	account.Windows[window] = merged
 	return nil
 }
 
-func (m *Module) Status(context.Context) (json.RawMessage, error) {
+func (m *Module) Status(ctx context.Context) (json.RawMessage, error) {
+	m.pollUsageOnce(ctx)
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	type statusWindow struct {
-		Utilization *float64   `json:"utilization,omitempty"`
-		Exhausted   bool       `json:"exhausted"`
-		ResetAt     *time.Time `json:"resets_at,omitempty"`
-		Source      string     `json:"source,omitempty"`
+		Known         bool       `json:"known"`
+		Utilization   *float64   `json:"utilization,omitempty"`
+		Exhausted     bool       `json:"exhausted"`
+		ResetAt       *time.Time `json:"resets_at,omitempty"`
+		Source        string     `json:"source,omitempty"`
+		Authoritative bool       `json:"authoritative,omitempty"`
 	}
 	type statusAccount struct {
 		Name     string                      `json:"name"`
 		Disabled bool                        `json:"disabled,omitempty"`
 		Windows  map[windowKind]statusWindow `json:"windows"`
 	}
+	credentialBound := m.state != nil && m.state.DashboardAPIKey != ""
+	gaps := []string{"five-hour and weekly enforcement are generalized from the observed monthly 429 shape"}
+	if !credentialBound {
+		gaps = append(gaps, "no dashboard credential is configured -- five_hour/weekly/monthly reset times are unknown until dashboard-api-key is set")
+	}
 	status := struct {
 		Provider        string          `json:"provider"`
 		Status          string          `json:"status"`
 		ValidationError string          `json:"validation_error,omitempty"`
+		CredentialBound bool            `json:"credential_bound"`
 		Accounts        []statusAccount `json:"accounts,omitempty"`
 		ObservationGaps []string        `json:"observation_gaps"`
 	}{
 		Provider:        providerID,
 		Status:          "registered",
 		ValidationError: m.lastErr,
-		ObservationGaps: []string{"five-hour and weekly enforcement are generalized from the observed monthly 429 shape", "authenticated per-account dashboard payload was unavailable"},
+		CredentialBound: credentialBound,
+		ObservationGaps: gaps,
 	}
 	if m.lastErr != "" {
 		status.Status = "reconfigure_rejected"
 	}
 	if m.state != nil {
-		now := time.Now().UTC()
+		now := m.runtimeClock().Now().UTC()
 		names := make([]string, 0, len(m.state.Accounts))
 		for name := range m.state.Accounts {
 			names = append(names, name)
@@ -294,12 +343,23 @@ func (m *Module) Status(context.Context) (json.RawMessage, error) {
 			item := statusAccount{Name: account.Name, Disabled: account.Disabled, Windows: make(map[windowKind]statusWindow, 3)}
 			for _, kind := range []windowKind{windowFiveHour, windowWeekly, windowMonthly} {
 				window := account.Windows[kind]
+				if !window.Known {
+					item.Windows[kind] = statusWindow{Known: false, Source: "unknown"}
+					continue
+				}
 				var resetAt *time.Time
 				if !window.ResetAt.IsZero() {
 					value := window.ResetAt.UTC()
 					resetAt = &value
 				}
-				item.Windows[kind] = statusWindow{Utilization: copyFloat64Pointer(window.Utilization), Exhausted: window.Exhausted, ResetAt: resetAt, Source: window.Source}
+				item.Windows[kind] = statusWindow{
+					Known:         true,
+					Utilization:   copyFloat64Pointer(window.Utilization),
+					Exhausted:     window.Exhausted,
+					ResetAt:       resetAt,
+					Source:        window.Source,
+					Authoritative: window.Authoritative,
+				}
 			}
 			status.Accounts = append(status.Accounts, item)
 		}
@@ -319,6 +379,75 @@ func (m *Module) recordError(err error) {
 	m.mu.Lock()
 	m.lastErr = bounded(err.Error(), 256)
 	m.mu.Unlock()
+}
+
+func (m *Module) runtimeClock() providermodule.Clock {
+	if m.clock != nil {
+		return m.clock
+	}
+	return realClock{}
+}
+
+func (m *Module) runtimeHTTPClient() httpDoer {
+	if m.httpClient != nil {
+		return m.httpClient
+	}
+	return newUsageHTTPClient(0)
+}
+
+// pollUsageOnce best-effort refreshes every window from the dashboard usage
+// endpoint. It is throttled by minPollInterval and never returns an error to
+// its caller: a poll failure simply leaves existing window state (429-derived
+// or previously polled) in place rather than failing Status().
+func (m *Module) pollUsageOnce(ctx context.Context) {
+	m.mu.Lock()
+	if m.closed || m.state == nil || m.state.DashboardAPIKey == "" {
+		m.mu.Unlock()
+		return
+	}
+	now := m.runtimeClock().Now().UTC()
+	if !m.lastPollAt.IsZero() && now.Sub(m.lastPollAt) < minPollInterval {
+		m.mu.Unlock()
+		return
+	}
+	m.lastPollAt = now
+	apiKey := m.state.DashboardAPIKey
+	client := m.runtimeHTTPClient()
+	m.mu.Unlock()
+
+	snapshot, err := fetchUsage(ctx, client, usageEndpoint, apiKey, now)
+	if err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed || m.state == nil {
+		return
+	}
+	for _, account := range m.state.Accounts {
+		for kind, window := range snapshotWindows(snapshot) {
+			current := account.Windows[kind]
+			incoming := windowState{
+				Utilization:   float64Pointer(window.Utilization),
+				Exhausted:     window.LimitReached,
+				ResetAt:       window.ResetAt,
+				Source:        "dashboard usage poll",
+				Known:         true,
+				Authoritative: true,
+				ObservedAt:    snapshot.ObservedAt,
+			}
+			account.Windows[kind] = mergeWindowSignal(current, incoming)
+		}
+	}
+}
+
+func snapshotWindows(snapshot usageSnapshot) map[windowKind]usageWindow {
+	return map[windowKind]usageWindow{
+		windowFiveHour: snapshot.FiveHour,
+		windowWeekly:   snapshot.Weekly,
+		windowMonthly:  snapshot.Monthly,
+	}
 }
 
 func parseConfig(raw json.RawMessage) (moduleConfig, error) {
@@ -341,6 +470,9 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 	if cfg.ThresholdPercent < 1 || cfg.ThresholdPercent > 100 {
 		return moduleConfig{}, fmt.Errorf("opencode_go_invalid_config: threshold-percent must be between 1 and 100")
 	}
+	// An empty dashboard-api-key is valid: it means no credential is bound
+	// and the module must fail closed to "unknown" rather than error.
+	cfg.DashboardAPIKey = strings.TrimSpace(input.DashboardAPIKey)
 	for i, rawAccount := range input.Accounts {
 		name := strings.TrimSpace(rawAccount.Name)
 		if name == "" {
@@ -360,7 +492,7 @@ func parseConfig(raw json.RawMessage) (moduleConfig, error) {
 }
 
 func buildState(cfg moduleConfig) (*moduleState, error) {
-	state := &moduleState{Threshold: cfg.ThresholdPercent, Accounts: make(map[string]*accountState), ByAuthID: make(map[string]string)}
+	state := &moduleState{Threshold: cfg.ThresholdPercent, DashboardAPIKey: cfg.DashboardAPIKey, Accounts: make(map[string]*accountState), ByAuthID: make(map[string]string)}
 	if !cfg.Enabled {
 		return state, nil
 	}
@@ -482,6 +614,34 @@ func refreshWindows(account *accountState, now time.Time) {
 			account.Windows[kind] = window
 		}
 	}
+}
+
+// mergeWindowSignal decides whether incoming should replace current.
+// Precedence:
+//  1. current windowState.Known == false means there is nothing to
+//     reconcile against -- incoming always wins.
+//  2. A newer authoritative (poll) observation is direct account ground
+//     truth and always wins, whatever it reports.
+//  3. An inferred (429) signal only overrides current state if current is
+//     not itself a still-live, later-resetting exhaustion -- an older or
+//     weaker 429 can never clobber a fresher, more urgent block from
+//     either source.
+//  4. A stale authoritative poll (older ObservedAt than current) never
+//     overwrites fresher state of either kind.
+func mergeWindowSignal(current, incoming windowState) windowState {
+	if !current.Known {
+		return incoming
+	}
+	if incoming.Authoritative && !incoming.ObservedAt.Before(current.ObservedAt) {
+		return incoming
+	}
+	if !incoming.Authoritative {
+		if current.Exhausted && current.ResetAt.After(incoming.ObservedAt) && current.ResetAt.After(incoming.ResetAt) {
+			return current
+		}
+		return incoming
+	}
+	return current
 }
 
 func accountHealthy(account *accountState, threshold int, now time.Time) bool {

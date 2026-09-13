@@ -25,4 +25,21 @@ Review gate:
 git grep -iE '<prohibited-author>|<prohibited-upstream-repository>' -- internal/providers/opencodego
 ```
 
-The reviewer substitutes the prohibited names from the issue's binding clean-room gate. The command must return no matches.
+The reviewer substitutes the prohibited names from the issue's binding clean-room gate. The command must return no matches. This gate covers `quota.go` and `quota_test.go`, added below, the same as every other file in this module.
+
+## 2026-09-13 — Usage poller (TOG-2458)
+
+The owner directed (verbatim): *"FOR THE OPENCODE GO CAN YOU NOT USE THE COOKIE AUTH TOKEN TO GET THE USAGE AND RESET TIMES? YOU SHOULD BE ABLE TO. LOOK AT HOW THE OLD OPENCODE-GO CLIPROXY PLUGIN DID IT AND IMPLEMENT OUR OWN VERSION OF THAT IN OUR PLUGIN."* This is a narrow, explicit carve-out on top of the standing 2026-09-10 clean-room rule ("do not reuse code from the other opencode-go plugin... we create this from scratch"): it authorizes *studying* the old plugin's endpoint, auth flow, and response shape for this slice only. It does not authorize opening, reading, or transcribing any of that plugin's source, structure, or identifiers, and no such source was opened, cloned, read, adapted, or transcribed while implementing this poller.
+
+Instead, the endpoint, auth mechanism, and response envelope were established from two first-party, unrestricted sources:
+
+- our own production OmniRoute TypeScript source `open-sse/services/opencodeQuotaFetcher.ts`, which already implements and validates a Bearer-token-authenticated `GET https://opencode.ai/zen/go/v1/usage` fetcher for this exact provider;
+- the first-party fixture corpus's TOG-2288 Case D01, which independently captured a live 401 at that exact URL with a Bearer-shaped error body (`{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`), confirming the endpoint and auth mechanism empirically.
+
+The response envelope's field names (`usage.rolling/weekly/monthly`, each `{status, percent, resetsAt}`) come from `opencodeQuotaFetcher.ts` alone -- they were never independently fixture-observed for this module. This is a narrow, owner-approved exception to the general fixture-only evidentiary bar: the *shape* is taken from our own first-party TS source, not the restricted third-party plugin.
+
+Window mapping: `rolling` -> `five_hour`, `weekly` -> `weekly`, `monthly` -> `monthly`.
+
+The poller is on-demand (triggered from `Status()`, throttled to once per 30s) rather than a background goroutine: the endpoint is account-agnostic (one Bearer key returns all three windows for the whole credential, not per-account), and `Pick`/`HandleUsage` never need synchronous access to live poll data -- both already operate off cached `windowState`, exactly as they did before this poller existed. Freshness is therefore bounded by how often something calls `Status()`; in production that is the (separate, follow-on) collector script that polls the coordinator's management endpoint on an interval, the same way it already does for `zai`.
+
+No credential is bound in any current sandbox. The module fails closed: an empty `dashboard-api-key` is valid configuration, not an error, and every window reports `known:false` until either a 429 is observed or a poll succeeds.
