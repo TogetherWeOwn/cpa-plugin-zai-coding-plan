@@ -6,9 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-13
+
 ### Fixed
 
 - `providers.opencode-go`: the dashboard usage poller fetched `/zen/go/v1/usage` once with a single module-level key and broadcast that one snapshot to every configured account, so all accounts reported identical utilization/reset regardless of their real usage. `dashboard-api-key` now lives on `accounts[]` (falling back to the module-level key only when an account omits its own), and each account is polled independently with its own key. (TOG-2472)
+- `providers.zai`: the quota poller rejected upstream CREDIT_LIMIT/`nextResetTime` values serialized with a trailing `.0` (e.g. `1789347583607.0`), falling back to a stuck-at-0% estimate. `strictInt64` now also accepts an exact, finite, in-range whole-number float. (TOG-2473)
 
 ## [0.4.0] - 2026-09-13
 
@@ -66,7 +69,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.1
 [0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.0
 [0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.3.0
 [0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0
