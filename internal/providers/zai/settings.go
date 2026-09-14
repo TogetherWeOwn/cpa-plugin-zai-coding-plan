@@ -326,7 +326,12 @@ func validateAccountQuotaState(state accountQuotaState, now time.Time) error {
 			return fmt.Errorf("invalid authoritative observation time")
 		}
 		for _, window := range []quotaWindow{state.Authoritative.FiveHour, state.Authoritative.Weekly} {
-			if window.ConsumedMicrocredits < 0 || window.BucketMicrocredits <= 0 || window.ConsumedMicrocredits > window.BucketMicrocredits || !window.ResetsAt.After(state.Authoritative.ObservedAt) {
+			if window.ConsumedMicrocredits < 0 || window.BucketMicrocredits <= 0 || window.ConsumedMicrocredits > window.BucketMicrocredits {
+				return fmt.Errorf("invalid authoritative quota")
+			}
+			// A zero ResetsAt means "unused window, no reset pending"
+			// (TOG-2490); only a present-but-stale reset is invalid.
+			if !window.ResetsAt.IsZero() && !window.ResetsAt.After(state.Authoritative.ObservedAt) {
 				return fmt.Errorf("invalid authoritative quota")
 			}
 		}

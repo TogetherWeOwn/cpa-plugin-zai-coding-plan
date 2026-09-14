@@ -198,6 +198,21 @@ func TestPersistedStateRejectsAuthoritativeResetAtOrBeforeObservation(t *testing
 	}
 }
 
+// TestPersistedStateAcceptsZeroResetOnUnusedWindow is a regression test for
+// TOG-2490: a null nextResetTime parses to a zero ResetsAt on an unused
+// window, and that shape must round-trip through persisted state validation
+// rather than being rejected as if it were a stale/invalid reset.
+func TestPersistedStateAcceptsZeroResetOnUnusedWindow(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	identity := accountIdentity(fixtureKey)
+	unused := quotaWindow{ConsumedMicrocredits: 0, BucketMicrocredits: 2 * creditScale}
+	weekly := quotaWindow{ConsumedMicrocredits: creditScale, BucketMicrocredits: 2 * creditScale, ResetsAt: now.Add(time.Hour)}
+	state := accountQuotaState{Authoritative: &quotaSnapshot{ObservedAt: now, FiveHour: unused, Weekly: weekly}}
+	if err := validatePersistedStateAt(persistedState{Version: 1, Accounts: map[string]accountQuotaState{identity: state}}, now); err != nil {
+		t.Fatalf("zero ResetsAt on unused window was rejected: %v", err)
+	}
+}
+
 func TestPersistedStateValidation(t *testing.T) {
 	identity := accountIdentity(fixtureKey)
 	tests := []struct {

@@ -56,6 +56,45 @@ func TestParseQuotaResponseAcceptsFloatFormattedResetTime(t *testing.T) {
 	}
 }
 
+// TestParseQuotaResponseAcceptsNullResetOnUnusedWindow is a regression test
+// for TOG-2490: Z.ai reports nextResetTime: null on a CREDIT_LIMIT window
+// with zero usage (no reset scheduled yet), most commonly right after a
+// rollover with no traffic since. That must parse as utilization 0 with no
+// pending reset rather than discarding the whole response — including the
+// unrelated, valid weekly window — as it did when treated as a hard error.
+func TestParseQuotaResponseAcceptsNullResetOnUnusedWindow(t *testing.T) {
+	raw := quotaFixture("max", []string{
+		`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":28000,"currentValue":0,"remaining":28000,"nextResetTime":null}`,
+		quotaLimitFixture(6, 1, 140_000, 127_400, 12_600, quotaObservedAt.Add(38*time.Hour+9*time.Minute+5*time.Second).UnixMilli()),
+	})
+	snapshot, err := parseQuotaResponse([]byte(raw), quotaObservedAt)
+	if err != nil {
+		t.Fatalf("null nextResetTime on unused window rejected: %v", err)
+	}
+	if snapshot.FiveHour.ConsumedMicrocredits != 0 || !snapshot.FiveHour.ResetsAt.IsZero() {
+		t.Fatalf("five-hour window = %#v", snapshot.FiveHour)
+	}
+	if snapshot.Weekly.ConsumedMicrocredits != 127_400*creditScale || snapshot.Weekly.BucketMicrocredits != 140_000*creditScale {
+		t.Fatalf("weekly window = %#v", snapshot.Weekly)
+	}
+	if !snapshot.Weekly.ResetsAt.Equal(quotaObservedAt.Add(38*time.Hour + 9*time.Minute + 5*time.Second)) {
+		t.Fatalf("weekly reset = %v", snapshot.Weekly.ResetsAt)
+	}
+}
+
+// TestParseQuotaResponseRejectsNullResetOnConsumedWindow ensures the
+// null-nextResetTime allowance from TOG-2490 is narrowly scoped: a window
+// that has actually been consumed must still carry a valid reset time.
+func TestParseQuotaResponseRejectsNullResetOnConsumedWindow(t *testing.T) {
+	raw := quotaFixture("max", []string{
+		`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":28000,"currentValue":1,"remaining":27999,"nextResetTime":null}`,
+		quotaLimitFixture(6, 1, 140_000, 127_400, 12_600, quotaObservedAt.Add(24*time.Hour).UnixMilli()),
+	})
+	if _, err := parseQuotaResponse([]byte(raw), quotaObservedAt); err == nil {
+		t.Fatal("consumed window with null nextResetTime was accepted")
+	}
+}
+
 func TestParseQuotaResponseRejectsNonWholeFloatAndOutOfRangeNumbers(t *testing.T) {
 	validWeek := quotaLimitFixture(6, 1, 60_000, 2, 59_998, quotaObservedAt.Add(24*time.Hour).UnixMilli())
 	tests := []struct {

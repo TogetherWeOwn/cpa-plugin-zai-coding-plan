@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-14
+
+### Fixed
+
+- `providers.zai`: the quota poller rejected a CREDIT_LIMIT window with `nextResetTime: null` — which Z.ai sends on a window with zero usage and no reset scheduled (e.g. right after a rollover with no traffic since) — and discarded the entire response, including the unrelated, valid weekly window. `nextResetTime: null` on an unused (`currentValue == 0`) window now parses as utilization 0 with no pending reset; a consumed window still requires a valid reset time. (TOG-2490)
+
 ## [0.4.2] - 2026-09-14
 
 ### Changed
@@ -75,7 +81,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.3
 [0.4.2]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.2
 [0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.1
 [0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.0
