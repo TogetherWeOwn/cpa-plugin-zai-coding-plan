@@ -1,10 +1,10 @@
-# v0.4.3 subscription-pool deployment
+# v0.4.4 subscription-pool deployment
 
 This directory records the exact non-secret inputs and checks for the Z.ai lane deployment of the neutral `subscription-pool` coordinator. It does not contain a plan key, management key, host token, or populated config.
 
 ## Preconditions proved before host changes
 
-- The tagged v0.4.3 commit, registry bytes, and release checksums are recorded by the release artifact manifest; do not substitute a working-tree or untagged artifact.
+- The tagged v0.4.4 commit, registry bytes, and release checksums are recorded by the release artifact manifest; do not substitute a working-tree or untagged artifact.
 - The compatibility evidence records deployed, latest, and v7.2.67 baseline image digests and successful host checks.
 - `config.yaml.tmpl` follows `docs/ARCHITECTURE.md`: full-key pairing is rendered only on the host; `subscription-pool` is the sole enabled scheduler at priority `1000`.
 
@@ -13,7 +13,7 @@ The release operator bundle is the source of truth for the exact commit, registr
 ### Release preflight
 
 ```sh
-bundle=/path/to/subscription-pool-v0.4.3-operator.zip
+bundle=/path/to/subscription-pool-v0.4.4-operator.zip
 checksums=/path/to/checksums.txt
 sha256sum --check "$checksums"
 unzip -Z1 "$bundle" | sort
@@ -35,7 +35,7 @@ Verify the exact registry bytes before merging the template into the host config
 ```sh
 registry=$(mktemp)
 trap 'rm -f "$registry"' EXIT
-release_dir=/path/to/downloaded-v0.4.3-release-assets
+release_dir=/path/to/downloaded-v0.4.4-release-assets
 cp "$release_dir/registry.json" "$registry"
 grep -F "  registry.json" "$release_dir/checksums.txt" \
   | sed "s#  registry.json#  $registry#" \
@@ -118,7 +118,7 @@ if curl --fail --fail-early --max-redirs 0 --silent --show-error \
   --output "$install_response" --stderr "$install_error" \
   -X POST \
   -H 'Content-Type: application/json' \
-  --data '{"version":"0.4.3"}' \
+  --data '{"version":"0.4.4"}' \
   'http://127.0.0.1:8317/v0/management/plugin-store/subscription-pool/install'
 then
   :
@@ -140,11 +140,11 @@ try:
     response=json.loads(path.read_text())
 except (OSError, UnicodeError, json.JSONDecodeError):
     raise SystemExit("plugin install response was not valid JSON")
-expected={"id":"subscription-pool","version":"0.4.3","install_type":"github-release"}
+expected={"id":"subscription-pool","version":"0.4.4","install_type":"github-release"}
 if any(response.get(key) != value for key, value in expected.items()):
     raise SystemExit("plugin install response did not confirm the expected release")
 path_value=response.get("path")
-if not isinstance(path_value, str) or "/linux/amd64/" not in path_value or "0.4.3" not in path_value:
+if not isinstance(path_value, str) or "/linux/amd64/" not in path_value or "0.4.4" not in path_value:
     raise SystemExit("plugin install response did not report the expected versioned linux/amd64 path")
 PY
 
@@ -161,7 +161,7 @@ CLIPROXY_SERVICE_UNIT=cliproxy.service \
   "$repo/deploy/verify-live.sh"
 ```
 
-The plugin-store response must report `id=subscription-pool`, `version=0.4.3`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
+The plugin-store response must report `id=subscription-pool`, `version=0.4.4`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
 
 `router-capacity-source.json` is the exact Model Router capacity-source shape for one opaque Z.ai model ID. Repeat it per model ID and retain `unknownTelemetry: fail-open` during dogfood. The operator dispatcher already maps `zai/*`, `zai-openai/*`, and `glm*` to lane `zai`; the live check is a dry-run selection with the Z.ai model enabled, followed by one bounded canary issue. Do not re-pin an issue mid-run.
 
