@@ -199,16 +199,28 @@ func parseQuotaWindow(limit quotaWireLimit, observedAt time.Time) (quotaWindow, 
 			return quotaWindow{}, fmt.Errorf("quota limit has invalid remaining")
 		}
 	}
-	resetMilliseconds, err := strictNonnegativeInt64(limit.NextResetTime)
-	if err != nil || resetMilliseconds <= 0 {
-		return quotaWindow{}, fmt.Errorf("quota limit has invalid nextResetTime")
-	}
-	reset := time.UnixMilli(resetMilliseconds).UTC()
-	if reset.Year() < 2000 || reset.Year() > 2200 || !reset.After(observedAt.UTC()) {
-		return quotaWindow{}, fmt.Errorf("quota limit has invalid nextResetTime")
-	}
 	if usage > int64(^uint64(0)>>1)/creditScale || current > int64(^uint64(0)>>1)/creditScale {
 		return quotaWindow{}, fmt.Errorf("quota credits exceed supported range")
+	}
+	// Z.ai reports nextResetTime: null on a window with no consumption yet
+	// (e.g. right after a rollover with no traffic since) — that means
+	// "unused, no reset pending", not a malformed response. A reset time
+	// that is present but invalid, or absent on a window that has actually
+	// been consumed, is still rejected.
+	var reset time.Time
+	if limit.NextResetTime == "" {
+		if current != 0 {
+			return quotaWindow{}, fmt.Errorf("quota limit has invalid nextResetTime")
+		}
+	} else {
+		resetMilliseconds, errReset := strictNonnegativeInt64(limit.NextResetTime)
+		if errReset != nil || resetMilliseconds <= 0 {
+			return quotaWindow{}, fmt.Errorf("quota limit has invalid nextResetTime")
+		}
+		reset = time.UnixMilli(resetMilliseconds).UTC()
+		if reset.Year() < 2000 || reset.Year() > 2200 || !reset.After(observedAt.UTC()) {
+			return quotaWindow{}, fmt.Errorf("quota limit has invalid nextResetTime")
+		}
 	}
 	return quotaWindow{ConsumedMicrocredits: current * creditScale, BucketMicrocredits: usage * creditScale, ResetsAt: reset}, nil
 }

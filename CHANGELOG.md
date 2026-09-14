@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-14
+
+### Fixed
+
+- `providers.zai`: the quota poller rejected a CREDIT_LIMIT window with `nextResetTime: null` — which Z.ai sends on a window with zero usage and no reset scheduled (e.g. right after a rollover with no traffic since) — and discarded the entire response, including the unrelated, valid weekly window. `nextResetTime: null` on an unused (`currentValue == 0`) window now parses as utilization 0 with no pending reset; a consumed window still requires a valid reset time. (TOG-2490)
+
 ## [0.4.2] - 2026-09-14
 
 ### Changed
