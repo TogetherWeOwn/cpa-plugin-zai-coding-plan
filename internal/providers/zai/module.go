@@ -96,11 +96,7 @@ func (m *zaiModule) ManagementRoutes(context.Context) providermodule.ManagementR
 	for _, route := range registration.Routes {
 		routes = append(routes, providermodule.ManagementRoute{Method: route.Method, Path: route.Path, Description: route.Description})
 	}
-	resources := make([]providermodule.ManagementResource, 0, len(registration.Resources))
-	for _, resource := range registration.Resources {
-		resources = append(resources, providermodule.ManagementResource{Path: resource.Path, Menu: resource.Menu, Description: resource.Description})
-	}
-	return providermodule.ManagementRoutes{Routes: routes, Resources: resources}
+	return providermodule.ManagementRoutes{Routes: routes}
 }
 
 func (m *zaiModule) HandleManagement(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse {

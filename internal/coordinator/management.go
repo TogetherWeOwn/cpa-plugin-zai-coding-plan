@@ -13,6 +13,8 @@ import (
 const (
 	managementStatusPath  = "/v0/management/plugins/" + PluginID + "/status"
 	managementContentType = "application/json"
+	resourceStatusPath    = "/status"
+	resourceContentType   = "text/html; charset=utf-8"
 )
 
 // ManagementRegistration is the exported entry point src/'s CGo ABI glue
@@ -28,6 +30,9 @@ func (c *Coordinator) managementRoutes() managementRoutesBody {
 	body := managementRoutesBody{
 		Routes: []managementRoute{
 			{Method: http.MethodGet, Path: managementStatusPath, Description: "Reports aggregated subscription-pool status across every provider."},
+		},
+		Resources: []managementResource{
+			{Path: resourceStatusPath, Menu: "Subscription Quota", Description: "Shows Z.ai and OpenCode Go quota and account health."},
 		},
 	}
 	for _, entry := range c.modules {
@@ -89,6 +94,9 @@ func (c *Coordinator) HandleManagement(ctx context.Context, req pluginapi.Manage
 func (c *Coordinator) handleManagement(ctx context.Context, req pluginapi.ManagementRequest) pluginapi.ManagementResponse {
 	if req.Method == http.MethodGet && req.Path == managementStatusPath {
 		return managementJSON(http.StatusOK, c.managementStatus())
+	}
+	if req.Method == http.MethodGet && isResourceStatusPath(req.Path) {
+		return c.resourceStatusResponse()
 	}
 	for _, entry := range c.modules {
 		capable, ok := entry.module.(providermodule.ManagementCapable)
