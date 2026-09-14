@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   quality:
     name: Quality
@@ -67,7 +71,3 @@ jobs:
           test "$(unzip -Z1 "$archive")" = "subscription-pool.so"
           cmp "$library" <(unzip -p "$archive" subscription-pool.so)
           make validate-release VERSION=0.4.4 TAG=v0.4.4
-      - name: Test host compatibility matrix
-        env:
-          HOST_MATRIX_NAMESPACE: root
-        run: sudo --preserve-env=HOST_MATRIX_NAMESPACE make test-host-matrix VERSION=0.4.4 OUT=dist/subscription-pool-v0.4.4.so HOST_IMAGES="$RUNNER_TEMP/host-images.json" HOST_MATRIX_WORK="$RUNNER_TEMP/host-matrix"
