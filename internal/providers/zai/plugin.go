@@ -83,6 +83,7 @@ type managementAccountStatus struct {
 	QuotaAgeSeconds        int64      `json:"quota_age_seconds"`
 	QuotaStale             bool       `json:"quota_stale"`
 	QuotaError             string     `json:"quota_error,omitempty"`
+	FiveHourError          string     `json:"five_hour_error,omitempty"`
 	Offpeak                bool       `json:"offpeak"`
 	Health                 string     `json:"health"`
 	EstimatorCompleteSince time.Time  `json:"estimator_complete_since,omitempty"`

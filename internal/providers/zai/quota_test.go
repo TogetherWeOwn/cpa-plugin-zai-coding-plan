@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"testing"
@@ -84,17 +85,33 @@ func TestParseQuotaResponseAcceptsNullResetOnUnusedWindow(t *testing.T) {
 
 // TestParseQuotaResponseRejectsNullResetOnConsumedWindow ensures the
 // null-nextResetTime allowance from TOG-2490 is narrowly scoped: a window
-// that has actually been consumed must still carry a valid reset time.
+// that has actually been consumed must still carry a valid reset time. This
+// is a five-hour-window failure, so per TOG-2497 it no longer discards the
+// response outright — it surfaces as FiveHourError alongside a good weekly.
 func TestParseQuotaResponseRejectsNullResetOnConsumedWindow(t *testing.T) {
 	raw := quotaFixture("max", []string{
 		`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":28000,"currentValue":1,"remaining":27999,"nextResetTime":null}`,
 		quotaLimitFixture(6, 1, 140_000, 127_400, 12_600, quotaObservedAt.Add(24*time.Hour).UnixMilli()),
 	})
-	if _, err := parseQuotaResponse([]byte(raw), quotaObservedAt); err == nil {
-		t.Fatal("consumed window with null nextResetTime was accepted")
+	snapshot, err := parseQuotaResponse([]byte(raw), quotaObservedAt)
+	if err != nil {
+		t.Fatalf("weekly-governed response rejected: %v", err)
+	}
+	if snapshot.FiveHourError == "" || snapshot.FiveHour != (quotaWindow{}) {
+		t.Fatalf("five-hour failure not isolated: %#v", snapshot)
+	}
+	if snapshot.Weekly.ConsumedMicrocredits != 127_400*creditScale {
+		t.Fatalf("weekly window discarded: %#v", snapshot.Weekly)
 	}
 }
 
+// TestParseQuotaResponseRejectsNonWholeFloatAndOutOfRangeNumbers covers two
+// distinct ways a five-hour nextResetTime can fail to parse. Per TOG-2497
+// neither is fatal to the response as a whole: the weekly (governing) window
+// still parses and the failure is recorded on FiveHourError instead. (A
+// literal "NaN" is not valid JSON syntax at all, so that case belongs with
+// the whole-document malformed-JSON failures instead — see
+// TestParseQuotaResponseRejectsWhenWeeklyUnusable.)
 func TestParseQuotaResponseRejectsNonWholeFloatAndOutOfRangeNumbers(t *testing.T) {
 	validWeek := quotaLimitFixture(6, 1, 60_000, 2, 59_998, quotaObservedAt.Add(24*time.Hour).UnixMilli())
 	tests := []struct {
@@ -105,10 +122,6 @@ func TestParseQuotaResponseRejectsNonWholeFloatAndOutOfRangeNumbers(t *testing.T
 			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000,"currentValue":0,"remaining":12000,"nextResetTime":` + stringNumber(quotaObservedAt.Add(time.Hour).UnixMilli()) + `.5}`,
 			validWeek,
 		})},
-		{name: "NaN nextResetTime", raw: quotaFixture("pro", []string{
-			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000,"currentValue":0,"remaining":12000,"nextResetTime":NaN}`,
-			validWeek,
-		})},
 		{name: "float exceeds int64 range", raw: quotaFixture("pro", []string{
 			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000,"currentValue":0,"remaining":12000,"nextResetTime":1e300}`,
 			validWeek,
@@ -116,8 +129,15 @@ func TestParseQuotaResponseRejectsNonWholeFloatAndOutOfRangeNumbers(t *testing.T
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if _, err := parseQuotaResponse([]byte(tt.raw), quotaObservedAt); err == nil {
-				t.Fatal("invalid quota payload succeeded")
+			snapshot, err := parseQuotaResponse([]byte(tt.raw), quotaObservedAt)
+			if err != nil {
+				t.Fatalf("weekly-governed response rejected: %v", err)
+			}
+			if snapshot.FiveHourError == "" || snapshot.FiveHour != (quotaWindow{}) {
+				t.Fatalf("five-hour failure not isolated: %#v", snapshot)
+			}
+			if snapshot.Weekly.ConsumedMicrocredits != 2*creditScale {
+				t.Fatalf("weekly window discarded: %#v", snapshot.Weekly)
 			}
 		})
 	}
@@ -134,7 +154,11 @@ func TestParseQuotaResponseAcceptsPlanName(t *testing.T) {
 	}
 }
 
-func TestParseQuotaResponseRejectsIncompleteDuplicateAndInvalidNumbers(t *testing.T) {
+// TestParseQuotaResponseRejectsWhenWeeklyUnusable covers failures on the
+// governing weekly window (TOG-2497): these remain fatal to the whole
+// response — the caller falls back to "estimate" exactly as before this fix,
+// since there is no good weekly number to report as authoritative.
+func TestParseQuotaResponseRejectsWhenWeeklyUnusable(t *testing.T) {
 	validFive := quotaLimitFixture(3, 5, 12_000, 1, 11_999, quotaObservedAt.Add(time.Hour).UnixMilli())
 	validWeek := quotaLimitFixture(6, 1, 60_000, 2, 59_998, quotaObservedAt.Add(24*time.Hour).UnixMilli())
 	tests := []struct {
@@ -142,15 +166,14 @@ func TestParseQuotaResponseRejectsIncompleteDuplicateAndInvalidNumbers(t *testin
 		raw  string
 	}{
 		{name: "missing weekly", raw: quotaFixture("pro", []string{validFive})},
-		{name: "duplicate five hour", raw: quotaFixture("pro", []string{validFive, validFive, validWeek})},
-		{name: "fractional current value", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"currentValue":1`, `"currentValue":1.5`, 1), validWeek})},
-		{name: "negative usage", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"usage":12000`, `"usage":-1`, 1), validWeek})},
-		{name: "current exceeds usage", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"currentValue":1`, `"currentValue":12001`, 1), validWeek})},
+		{name: "duplicate weekly", raw: quotaFixture("pro", []string{validFive, validWeek, validWeek})},
 		{name: "invalid reset", raw: quotaFixture("pro", []string{validFive, strings.Replace(validWeek, stringNumber(quotaObservedAt.Add(24*time.Hour).UnixMilli()), "1", 1)})},
-		{name: "reset at observation", raw: quotaFixture("pro", []string{strings.Replace(validFive, stringNumber(quotaObservedAt.Add(time.Hour).UnixMilli()), stringNumber(quotaObservedAt.UnixMilli()), 1), validWeek})},
 		{name: "reset before observation", raw: quotaFixture("pro", []string{validFive, strings.Replace(validWeek, stringNumber(quotaObservedAt.Add(24*time.Hour).UnixMilli()), stringNumber(quotaObservedAt.Add(-time.Millisecond).UnixMilli()), 1)})},
-		{name: "unknown plan", raw: quotaFixture("enterprise", []string{validFive, validWeek})},
 		{name: "malformed", raw: `{`},
+		{name: "NaN literal is invalid JSON", raw: quotaFixture("pro", []string{
+			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":12000,"currentValue":0,"remaining":12000,"nextResetTime":NaN}`,
+			validWeek,
+		})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -158,6 +181,91 @@ func TestParseQuotaResponseRejectsIncompleteDuplicateAndInvalidNumbers(t *testin
 				t.Fatal("invalid quota payload succeeded")
 			}
 		})
+	}
+}
+
+// TestParseQuotaResponseIsolatesFiveHourFailures is the TOG-2497 regression:
+// a bad five-hour window must never discard a good weekly window. Each case
+// asserts the weekly window survives intact and the five-hour failure is
+// reported via FiveHourError rather than silently zero-filled.
+func TestParseQuotaResponseIsolatesFiveHourFailures(t *testing.T) {
+	validFive := quotaLimitFixture(3, 5, 12_000, 1, 11_999, quotaObservedAt.Add(time.Hour).UnixMilli())
+	validWeek := quotaLimitFixture(6, 1, 60_000, 2, 59_998, quotaObservedAt.Add(24*time.Hour).UnixMilli())
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "duplicate five hour", raw: quotaFixture("pro", []string{validFive, validFive, validWeek})},
+		{name: "fractional current value", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"currentValue":1`, `"currentValue":1.5`, 1), validWeek})},
+		{name: "negative usage", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"usage":12000`, `"usage":-1`, 1), validWeek})},
+		{name: "current exceeds usage", raw: quotaFixture("pro", []string{strings.Replace(validFive, `"currentValue":1`, `"currentValue":12001`, 1), validWeek})},
+		{name: "reset at observation", raw: quotaFixture("pro", []string{strings.Replace(validFive, stringNumber(quotaObservedAt.Add(time.Hour).UnixMilli()), stringNumber(quotaObservedAt.UnixMilli()), 1), validWeek})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			snapshot, err := parseQuotaResponse([]byte(tt.raw), quotaObservedAt)
+			if err != nil {
+				t.Fatalf("weekly-governed response rejected: %v", err)
+			}
+			if snapshot.FiveHourError == "" || snapshot.FiveHour != (quotaWindow{}) {
+				t.Fatalf("five-hour failure not isolated: %#v", snapshot)
+			}
+			if snapshot.Weekly.ConsumedMicrocredits != 2*creditScale || snapshot.Weekly.BucketMicrocredits != 60_000*creditScale {
+				t.Fatalf("weekly window discarded: %#v", snapshot.Weekly)
+			}
+		})
+	}
+}
+
+// TestParseQuotaResponseToleratesUnknownPlanWithGoodWindows: an unrecognized
+// plan label is account metadata, not part of either window's data, and must
+// not discard a response whose windows both parsed fine (TOG-2497).
+func TestParseQuotaResponseToleratesUnknownPlanWithGoodWindows(t *testing.T) {
+	validFive := quotaLimitFixture(3, 5, 12_000, 1, 11_999, quotaObservedAt.Add(time.Hour).UnixMilli())
+	validWeek := quotaLimitFixture(6, 1, 60_000, 2, 59_998, quotaObservedAt.Add(24*time.Hour).UnixMilli())
+	raw := quotaFixture("enterprise", []string{validFive, validWeek})
+	snapshot, err := parseQuotaResponse([]byte(raw), quotaObservedAt)
+	if err != nil {
+		t.Fatalf("unknown plan rejected: %v", err)
+	}
+	if snapshot.Plan != "" {
+		t.Fatalf("plan = %q, want empty for unrecognized label", snapshot.Plan)
+	}
+	if snapshot.FiveHourError != "" || snapshot.Weekly.ConsumedMicrocredits != 2*creditScale {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+}
+
+// TestParseQuotaResponseTOG2490PayloadShapeGovernsOnWeeklyAlone is the
+// TOG-2497 acceptance test: the exact TOG-2490 payload shape (unit 3
+// five-hour window reporting 0% usage with nextResetTime: null, unit 6
+// weekly window at 91% with a concrete nextResetTime) must, once the
+// five-hour side is made unparseable by any means, still surface the weekly
+// number as quota_api-eligible with a named five-hour diagnostic — not
+// silently zero-filled, and not discarded wholesale.
+func TestParseQuotaResponseTOG2490PayloadShapeGovernsOnWeeklyAlone(t *testing.T) {
+	const weeklyResetMillis = 1789445345983
+	raw := quotaFixture("max", []string{
+		`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":28000,"currentValue":1,"remaining":27999,"nextResetTime":null}`,
+		`{"type":"CREDIT_LIMIT","unit":6,"number":1,"usage":100000,"currentValue":91000,"remaining":9000,"nextResetTime":` + stringNumber(weeklyResetMillis) + `}`,
+	})
+	snapshot, err := parseQuotaResponse([]byte(raw), quotaObservedAt)
+	if err != nil {
+		t.Fatalf("weekly-governed response rejected: %v", err)
+	}
+	if snapshot.FiveHourError == "" {
+		t.Fatalf("expected a named five-hour diagnostic, got none: %#v", snapshot)
+	}
+	if snapshot.FiveHour != (quotaWindow{}) {
+		t.Fatalf("five-hour window was zero-filled instead of left absent: %#v", snapshot.FiveHour)
+	}
+	weeklyUtilization := utilization(snapshot.Weekly)
+	if math.Abs(weeklyUtilization-0.91) > 0.0001 {
+		t.Fatalf("weekly_utilization = %v, want ~0.91", weeklyUtilization)
+	}
+	wantResetsAt := time.Date(2026, time.September, 15, 4, 9, 5, 983_000_000, time.UTC)
+	if !snapshot.Weekly.ResetsAt.Equal(wantResetsAt) {
+		t.Fatalf("weekly_resets_at = %v, want %v", snapshot.Weekly.ResetsAt, wantResetsAt)
 	}
 }
 

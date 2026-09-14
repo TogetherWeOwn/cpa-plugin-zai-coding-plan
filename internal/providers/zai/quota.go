@@ -32,11 +32,20 @@ type quotaWindow struct {
 	ResetsAt             time.Time
 }
 
+// quotaSnapshot's windows are parsed independently. Weekly is the governing
+// number (TOG-2497): parseQuotaResponse still returns a hard error when
+// Weekly fails to parse, so a Weekly failure keeps today's all-or-nothing
+// fallback to "estimate" and never needs its own error field here. A
+// FiveHour failure is not fatal — FiveHourError is non-empty exactly when
+// FiveHour could not be parsed, in which case FiveHour stays zero-valued
+// rather than being filled with a number that would read as "unused" or
+// "full capacity available."
 type quotaSnapshot struct {
-	Plan       string
-	FiveHour   quotaWindow
-	Weekly     quotaWindow
-	ObservedAt time.Time
+	Plan          string
+	FiveHour      quotaWindow
+	FiveHourError string
+	Weekly        quotaWindow
+	ObservedAt    time.Time
 }
 
 type quotaWireResponse struct {
@@ -144,6 +153,8 @@ func parseQuotaResponse(raw []byte, observedAt time.Time) (quotaSnapshot, error)
 	}
 
 	var fiveHour, weekly *quotaWindow
+	var fiveHourErr, weeklyErr string
+	var unmatchedErrs []string
 	for i := range response.Data.Limits {
 		limit := response.Data.Limits[i]
 		if strings.ToUpper(strings.TrimSpace(limit.Type)) != "CREDIT_LIMIT" {
@@ -152,37 +163,68 @@ func parseQuotaResponse(raw []byte, observedAt time.Time) (quotaSnapshot, error)
 		unit, errUnit := strictInt64(limit.Unit)
 		number, errNumber := strictInt64(limit.Number)
 		if errUnit != nil || errNumber != nil {
-			return quotaSnapshot{}, fmt.Errorf("limit has invalid unit or number")
+			// We cannot tell which window this limit was meant for, so the
+			// failure cannot be attributed to either one specifically.
+			unmatchedErrs = append(unmatchedErrs, "limit has invalid unit or number")
+			continue
 		}
 		var target **quotaWindow
+		var targetErr *string
 		switch {
 		case unit == 3 && number == 5:
-			target = &fiveHour
+			target, targetErr = &fiveHour, &fiveHourErr
 		case unit == 6 && number == 1:
-			target = &weekly
+			target, targetErr = &weekly, &weeklyErr
 		default:
 			continue
 		}
 		if *target != nil {
-			return quotaSnapshot{}, fmt.Errorf("duplicate quota limit")
+			// Ambiguous which of the duplicates is correct: fail closed on
+			// this window rather than trusting either value.
+			*target = nil
+			*targetErr = "duplicate quota limit"
+			continue
 		}
 		window, err := parseQuotaWindow(limit, observedAt)
 		if err != nil {
-			return quotaSnapshot{}, err
+			*targetErr = err.Error()
+			continue
 		}
 		*target = &window
 	}
-	if fiveHour == nil || weekly == nil {
-		return quotaSnapshot{}, fmt.Errorf("missing required quota limit")
+	// The weekly window is governing (TOG-2497): if it never parsed, the
+	// whole response is unusable and the caller falls back to estimate, same
+	// as before this fix. A five-hour failure alone must not do the same —
+	// it is recorded on the snapshot instead of discarding a good weekly.
+	if weekly == nil {
+		reason := weeklyErr
+		if reason == "" {
+			reason = "missing required weekly quota limit"
+		}
+		return quotaSnapshot{}, fmt.Errorf("%s", reason)
 	}
+	// An unrecognized plan label no longer discards a good weekly window: it
+	// is metadata about the account, not part of either window's own data,
+	// and downstream plan-sync (syncPlanFromUpstream) already tolerates an
+	// empty Plan by leaving the configured plan/buckets untouched.
 	plan := normalizeUpstreamPlan(response.Data.Level)
 	if plan == "" {
 		plan = normalizeUpstreamPlan(response.Data.PlanName)
 	}
-	if plan == "" {
-		return quotaSnapshot{}, fmt.Errorf("invalid plan level")
+	snapshot := quotaSnapshot{Plan: plan, Weekly: *weekly, ObservedAt: observedAt.UTC()}
+	if fiveHour != nil {
+		snapshot.FiveHour = *fiveHour
+	} else {
+		reason := fiveHourErr
+		if reason == "" && len(unmatchedErrs) > 0 {
+			reason = strings.Join(unmatchedErrs, "; ")
+		}
+		if reason == "" {
+			reason = "missing required five-hour quota limit"
+		}
+		snapshot.FiveHourError = reason
 	}
-	return quotaSnapshot{Plan: plan, FiveHour: *fiveHour, Weekly: *weekly, ObservedAt: observedAt.UTC()}, nil
+	return snapshot, nil
 }
 
 func parseQuotaWindow(limit quotaWireLimit, observedAt time.Time) (quotaWindow, error) {

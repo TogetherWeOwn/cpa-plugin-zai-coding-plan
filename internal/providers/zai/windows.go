@@ -36,6 +36,7 @@ type accountQuotaState struct {
 type accountQuotaView struct {
 	Source              string
 	FiveHour            quotaWindow
+	FiveHourError       string
 	Weekly              quotaWindow
 	ObservedAt          time.Time
 	Stale               bool
@@ -94,9 +95,21 @@ func (state accountQuotaState) view(now time.Time, item account, cfg pluginConfi
 	// A future timestamp must never manufacture authoritative freshness.
 	fresh := state.Authoritative != nil && !state.Authoritative.ObservedAt.After(now) && now.Sub(state.Authoritative.ObservedAt) <= cfg.AuthoritativeMaxAge
 	if fresh {
+		fiveHour := state.Authoritative.FiveHour
+		fiveHourErr := ""
+		if state.Authoritative.FiveHourError != "" {
+			// The weekly (governing) window is authoritative; a five-hour
+			// window that failed to parse falls back to the estimator for
+			// that window alone rather than being zero-filled — a zero would
+			// read as "unused, full capacity available" to the pacer, which
+			// is worse than an estimate (TOG-2497).
+			fiveHour = estimatedWindow(state.Events, now, fiveHourWindow, item.FiveHourCredits*creditScale, cfg.ThresholdPercent)
+			fiveHourErr = boundedStatus(state.Authoritative.FiveHourError)
+		}
 		return accountQuotaView{
 			Source:              "authoritative",
-			FiveHour:            state.Authoritative.FiveHour,
+			FiveHour:            fiveHour,
+			FiveHourError:       fiveHourErr,
 			Weekly:              state.Authoritative.Weekly,
 			ObservedAt:          state.Authoritative.ObservedAt,
 			Warning:             boundedStatus(state.LastPollError),

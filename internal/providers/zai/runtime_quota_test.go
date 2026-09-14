@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -126,6 +127,47 @@ func TestAuthoritativeQuotaReplacesEstimateAndFailureRetainsLastGood(t *testing.
 	view, _ = runtime.quotaView(item.Identity)
 	if view.Source != "estimated" || !view.Stale || view.FiveHour.ConsumedMicrocredits != 3_450_000 {
 		t.Fatalf("fallback view = %#v", view)
+	}
+}
+
+// TestManagementStatusReportsQuotaAPIOnWeeklyAloneWithFiveHourDiagnostic is
+// the TOG-2497 end-to-end acceptance test: a poll whose five-hour window is
+// unparseable but whose weekly window matches the TOG-2490 payload shape
+// (unit 6, 91% used, a concrete nextResetTime) must still report
+// quota_source "quota_api" with the correct weekly_utilization and
+// weekly_resets_at, plus a named five_hour_error diagnostic rather than a
+// silent fallback to "estimate".
+func TestManagementStatusReportsQuotaAPIOnWeeklyAloneWithFiveHourDiagnostic(t *testing.T) {
+	now := time.Date(2026, time.September, 8, 12, 0, 0, 0, time.UTC)
+	item := account{Identity: accountIdentity("account"), Name: "account", Plan: "pro", FiveHourCredits: 12_000, WeeklyCredits: 100_000, ClaudeAuthID: "auth", key: quotaFixtureKey}
+	runtime := quotaTestRuntime(t, now, []account{item})
+	const weeklyResetMillis = 1789445345983
+	runtime.httpClient = roundTripDoer(func(*http.Request) (*http.Response, error) {
+		return quotaHTTPResponse(200, quotaFixture("max", []string{
+			`{"type":"CREDIT_LIMIT","unit":3,"number":5,"usage":28000,"currentValue":1,"remaining":27999,"nextResetTime":null}`,
+			`{"type":"CREDIT_LIMIT","unit":6,"number":1,"usage":100000,"currentValue":91000,"remaining":9000,"nextResetTime":` + stringNumber(weeklyResetMillis) + `}`,
+		})), nil
+	})
+	if err := runtime.pollOnce(context.Background(), item.Identity, item.key, runtime.snapshot.Generation, 0); err != nil {
+		t.Fatal(err)
+	}
+	status := runtime.managementStatus("ok")
+	if len(status.Accounts) != 1 {
+		t.Fatalf("accounts = %#v", status.Accounts)
+	}
+	accountStatus := status.Accounts[0]
+	if accountStatus.QuotaSource != "quota_api" {
+		t.Fatalf("quota_source = %q, want quota_api", accountStatus.QuotaSource)
+	}
+	if math.Abs(accountStatus.WeeklyUtilization-0.91) > 0.0001 {
+		t.Fatalf("weekly_utilization = %v, want ~0.91", accountStatus.WeeklyUtilization)
+	}
+	wantResetsAt := time.Date(2026, time.September, 15, 4, 9, 5, 983_000_000, time.UTC)
+	if accountStatus.WeeklyResetsAt == nil || !accountStatus.WeeklyResetsAt.Equal(wantResetsAt) {
+		t.Fatalf("weekly_resets_at = %v, want %v", accountStatus.WeeklyResetsAt, wantResetsAt)
+	}
+	if accountStatus.FiveHourError == "" {
+		t.Fatal("expected a named five_hour_error diagnostic")
 	}
 }
 

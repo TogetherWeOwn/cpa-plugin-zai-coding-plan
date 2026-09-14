@@ -325,7 +325,20 @@ func validateAccountQuotaState(state accountQuotaState, now time.Time) error {
 		if state.Authoritative.ObservedAt.IsZero() || state.Authoritative.ObservedAt.Year() < 2000 || state.Authoritative.ObservedAt.After(futureLimit) {
 			return fmt.Errorf("invalid authoritative observation time")
 		}
-		for _, window := range []quotaWindow{state.Authoritative.FiveHour, state.Authoritative.Weekly} {
+		if len(state.Authoritative.FiveHourError) > 240 {
+			return fmt.Errorf("invalid authoritative quota")
+		}
+		windows := []quotaWindow{state.Authoritative.Weekly}
+		// A FiveHour window that failed to parse (TOG-2497) is left
+		// zero-valued on purpose and must not be validated as if it were a
+		// real, unused window — that's the "known absent" case, distinct
+		// from a genuinely unused window with BucketMicrocredits > 0.
+		if state.Authoritative.FiveHourError == "" {
+			windows = append(windows, state.Authoritative.FiveHour)
+		} else if state.Authoritative.FiveHour != (quotaWindow{}) {
+			return fmt.Errorf("invalid authoritative quota")
+		}
+		for _, window := range windows {
 			if window.ConsumedMicrocredits < 0 || window.BucketMicrocredits <= 0 || window.ConsumedMicrocredits > window.BucketMicrocredits {
 				return fmt.Errorf("invalid authoritative quota")
 			}

@@ -750,6 +750,7 @@ func (r *pluginRuntime) managementStatus(status string) managementStatusBody {
 			QuotaObservedAt:        view.ObservedAt,
 			QuotaStale:             view.Stale,
 			QuotaError:             view.Warning,
+			FiveHourError:          view.FiveHourError,
 			Offpeak:                isOffpeak(now),
 			Health:                 health.assess(item, now).Status,
 			EstimatorCompleteSince: view.CompleteSince,
@@ -954,6 +955,11 @@ func accountByIdentity(accounts []account, identity string) account {
 }
 
 func formatQuotaDivergence(view accountQuotaView, authoritative quotaSnapshot) string {
+	if authoritative.FiveHourError != "" {
+		// The new poll's five-hour window is known-absent, not zero usage —
+		// comparing it against the prior view would report a bogus swing.
+		return boundedStatus(fmt.Sprintf("weekly_microcredits=%d five_hour_error=%s", authoritative.Weekly.ConsumedMicrocredits-view.Weekly.ConsumedMicrocredits, authoritative.FiveHourError))
+	}
 	return boundedStatus(fmt.Sprintf("five_hour_microcredits=%d weekly_microcredits=%d", authoritative.FiveHour.ConsumedMicrocredits-view.FiveHour.ConsumedMicrocredits, authoritative.Weekly.ConsumedMicrocredits-view.Weekly.ConsumedMicrocredits))
 }
 

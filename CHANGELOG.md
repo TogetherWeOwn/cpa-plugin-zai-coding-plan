@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-14
+
+### Fixed
+
+- `providers.zai`: `parseQuotaResponse` was still all-or-nothing on the two CREDIT_LIMIT windows — any unparseable five-hour window (invalid usage, currentValue, remaining, nextResetTime, duplicate, or a credits-out-of-range value) discarded the whole response, including a perfectly valid weekly window, and fell back to "estimate". The five-hour and weekly windows now parse independently; the weekly window remains governing (a weekly failure still falls back to estimate, unchanged), but a five-hour failure is recorded as a named diagnostic (`five_hour_error` in the status response) instead of voiding the response. A window that fails to parse is left absent, never zero-filled, so it cannot be misread as "unused, full capacity available". (TOG-2497, completing TOG-2490 fix item 2)
+
 ## [0.4.3] - 2026-09-14
 
 ### Fixed
@@ -81,7 +87,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.4
 [0.4.3]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.3
 [0.4.2]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.2
 [0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.1
