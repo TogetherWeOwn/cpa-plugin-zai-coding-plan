@@ -29,6 +29,8 @@ func TestResourceStatusResponseRendersAccountsWithoutSecrets(t *testing.T) {
 	zaiStatus, err := json.Marshal(map[string]any{
 		"accounts": []map[string]any{
 			{
+				"identity":              "test-only-private-account-pseudonym",
+				"cooldown":              map[string]any{"active": true, "until": fiveHourReset, "reason": "retry_after", "source": "zai_runtime_health_v1"},
 				"name":                  "zai-pro-1",
 				"five_hour_utilization": 0.42,
 				"weekly_utilization":    0.10,
@@ -90,7 +92,7 @@ func TestResourceStatusResponseRendersAccountsWithoutSecrets(t *testing.T) {
 			t.Fatalf("resource page missing %q; body = %s", required, body)
 		}
 	}
-	for _, forbidden := range []string{"management", "Bearer", "Authorization", "dashboard-api-key", "key\"", "secret"} {
+	for _, forbidden := range []string{"management", "Bearer", "Authorization", "dashboard-api-key", "key\"", "secret", "test-only-private-account-pseudonym", "retry_after", "zai_runtime_health_v1"} {
 		if strings.Contains(strings.ToLower(body), strings.ToLower(forbidden)) {
 			t.Fatalf("resource page contains forbidden %q", forbidden)
 		}

@@ -70,28 +70,64 @@ type managementStatusBody struct {
 	Accounts        []managementAccountStatus `json:"accounts,omitempty"`
 }
 
+// managementCooldownStatus describes only the runtime's transient 429 cooldown,
+// not quota exhaustion, suspension, or overall scheduler eligibility.
+type managementCooldownStatus struct {
+	Active bool       `json:"active"`
+	Until  *time.Time `json:"until"`
+	Reason string     `json:"reason"`
+	Source string     `json:"source"`
+}
+
 type managementAccountStatus struct {
-	Name                   string     `json:"name"`
-	KeySuffix              string     `json:"key_suffix"`
-	Plan                   string     `json:"plan"`
-	FiveHourUtilization    float64    `json:"five_hour_utilization"`
-	WeeklyUtilization      float64    `json:"weekly_utilization"`
-	FiveHourResetsAt       *time.Time `json:"five_hour_resets_at"`
-	WeeklyResetsAt         *time.Time `json:"weekly_resets_at"`
-	QuotaSource            string     `json:"quota_source"`
-	QuotaObservedAt        time.Time  `json:"quota_observed_at,omitempty"`
-	QuotaAgeSeconds        int64      `json:"quota_age_seconds"`
-	QuotaStale             bool       `json:"quota_stale"`
-	QuotaError             string     `json:"quota_error,omitempty"`
-	FiveHourError          string     `json:"five_hour_error,omitempty"`
-	Offpeak                bool       `json:"offpeak"`
-	Health                 string     `json:"health"`
-	EstimatorCompleteSince time.Time  `json:"estimator_complete_since,omitempty"`
-	DeliveryWarning        bool       `json:"delivery_warning"`
-	PersistenceWarning     bool       `json:"persistence_warning"`
-	UnknownModelWarning    bool       `json:"unknown_model_warning"`
-	HeuristicDedupWarning  bool       `json:"heuristic_dedup_warning"`
-	DedupMode              string     `json:"dedup_mode"`
+	Identity               string                   `json:"identity"`
+	Cooldown               managementCooldownStatus `json:"cooldown"`
+	Name                   string                   `json:"name"`
+	KeySuffix              string                   `json:"key_suffix"`
+	Plan                   string                   `json:"plan"`
+	FiveHourUtilization    float64                  `json:"five_hour_utilization"`
+	WeeklyUtilization      float64                  `json:"weekly_utilization"`
+	FiveHourResetsAt       *time.Time               `json:"five_hour_resets_at"`
+	WeeklyResetsAt         *time.Time               `json:"weekly_resets_at"`
+	QuotaSource            string                   `json:"quota_source"`
+	QuotaObservedAt        time.Time                `json:"quota_observed_at,omitempty"`
+	QuotaAgeSeconds        int64                    `json:"quota_age_seconds"`
+	QuotaStale             bool                     `json:"quota_stale"`
+	QuotaError             string                   `json:"quota_error,omitempty"`
+	FiveHourError          string                   `json:"five_hour_error,omitempty"`
+	Offpeak                bool                     `json:"offpeak"`
+	Health                 string                   `json:"health"`
+	EstimatorCompleteSince time.Time                `json:"estimator_complete_since,omitempty"`
+	DeliveryWarning        bool                     `json:"delivery_warning"`
+	PersistenceWarning     bool                     `json:"persistence_warning"`
+	UnknownModelWarning    bool                     `json:"unknown_model_warning"`
+	HeuristicDedupWarning  bool                     `json:"heuristic_dedup_warning"`
+	DedupMode              string                   `json:"dedup_mode"`
+}
+
+func managementCooldown(health accountHealthState, now time.Time) managementCooldownStatus {
+	result := managementCooldownStatus{Source: "zai_runtime_health_v1"}
+	if !health.ExhaustedUntil.After(now) {
+		return result
+	}
+	result.Active = true
+	result.Until = nullableTime(health.ExhaustedUntil)
+	// Export a closed vocabulary, never arbitrary persisted text or upstream data.
+	switch health.ExhaustedReason {
+	case "retry-after header":
+		result.Reason = "retry_after"
+	case "x-ratelimit-reset header", "x-rate-limit-reset header", "ratelimit-reset header":
+		result.Reason = "reset_header"
+	case "rate-limit response body":
+		result.Reason = "reset_body"
+	case "authoritative quota reset":
+		result.Reason = "quota_reset_fallback"
+	case "conservative rate-limit cooldown":
+		result.Reason = "configured_fallback"
+	default:
+		result.Reason = "upstream_rate_limit"
+	}
+	return result
 }
 
 func okEnvelope(value any) ([]byte, error) {
