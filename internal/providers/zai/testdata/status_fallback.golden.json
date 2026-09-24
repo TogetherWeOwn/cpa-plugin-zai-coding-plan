@@ -5,6 +5,13 @@
   "generated_at": "2026-09-08T08:00:00Z",
   "accounts": [
     {
+      "identity": "fe3d9bc956ba39662155a8e315ef12d050880e9f62832292bbf62170d574ceaa",
+      "cooldown": {
+        "active": false,
+        "until": null,
+        "reason": "",
+        "source": "zai_runtime_health_v1"
+      },
       "name": "zai-pro-1",
       "key_suffix": "redacted",
       "plan": "pro",
