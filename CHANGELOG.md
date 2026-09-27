@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Z.ai authenticated management status now exports the existing account pseudonym and a redacted transient-429 cooldown projection through the actual status DTO. The consumer contract defines explicit inactive state, generation freshness, closed reason provenance, and identity-only joins. OpenCode Go quota resets remain unsupported as cooldown evidence; no collector, routing, or deployment changes are included.
+
 ## [0.4.4] - 2026-09-14
 
 ### Fixed

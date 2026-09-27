@@ -739,6 +739,8 @@ func (r *pluginRuntime) managementStatus(status string) managementStatusBody {
 		view := r.snapshot.Quota[item.Identity].view(now, item, r.snapshot.Config)
 		health := r.refreshCapacityLocked(item.Identity, now)
 		accountStatus := managementAccountStatus{
+			Identity:               item.Identity,
+			Cooldown:               managementCooldown(health, now),
 			Name:                   item.Name,
 			KeySuffix:              "redacted",
 			Plan:                   item.Plan,
