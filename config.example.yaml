@@ -17,21 +17,39 @@ plugins:
   enabled: true
   dir: plugins
   configs:
-    zai-coding-plan:
+    subscription-pool:
       enabled: true
       priority: 1000
       cpa-config-path: /app/config.yaml
-      quota-refresh-interval: 2m
-      authoritative-max-age: 5m
-      threshold-percent: 97
-      suspend-duration: 30m
-      fallback-cooldown: 10m
-      state-retention: 8d
-      default-plan: pro
-      accounts:
-        # The suffix is only a redacted display/override selector. Credential
-        # pairing always compares the complete key in memory.
-        - key-suffix: replace-with-unique-suffix
-          name: zai-pro-1
-          plan: pro
-          disabled: false
+      providers:
+        zai:
+          quota-refresh-interval: 2m
+          authoritative-max-age: 5m
+          threshold-percent: 97
+          suspend-duration: 30m
+          fallback-cooldown: 10m
+          state-retention: 192h
+          default-plan: pro
+          accounts:
+            # The suffix is only a redacted display/override selector. Credential
+            # pairing always compares the complete key in memory.
+            - key-suffix: replace-with-unique-suffix
+              name: zai-pro-1
+              plan: pro
+              disabled: false
+        opencode-go:
+          threshold-percent: 97
+          # Optional module-level default: a dashboard Bearer key for GET
+          # /zen/go/v1/usage. Each account's own /usage response only ever
+          # reports that account's own usage, so this default is only correct
+          # when every account below shares one dashboard key -- most
+          # deployments should instead set accounts[].dashboard-api-key per
+          # account. Omitting both is valid -- the module fails closed to
+          # "unknown" reset times rather than guessing.
+          dashboard-api-key: ${OPENCODE_GO_DASHBOARD_KEY}
+          accounts:
+            - name: go-a
+              auth-ids: ["replace-with-managed-auth-id"]
+              # Overrides the module-level dashboard-api-key above for this
+              # account. Required whenever accounts do not share one key.
+              dashboard-api-key: ${OPENCODE_GO_A_DASHBOARD_KEY}

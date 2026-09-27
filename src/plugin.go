@@ -1,18 +1,28 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/coordinator"
+	"github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/internal/providermodule"
 )
 
-const pluginID = "zai-coding-plan"
+const pluginID = coordinator.PluginID
 
-// pluginVersion is stamped at build time with -ldflags.
+// pluginVersion is stamped at build time with -ldflags -X main.pluginVersion.
+// It is mirrored into coordinator.PluginVersion so the registered plugin
+// metadata (pluginRegistration) and the coordinator's own aggregated
+// management status body never disagree on version.
 var pluginVersion = "0.0.0-dev"
+
+func init() {
+	coordinator.PluginVersion = pluginVersion
+}
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -27,11 +37,14 @@ type envelopeError struct {
 	HTTPStatus int    `json:"http_status,omitempty"`
 }
 
-func (e *envelopeError) Error() string            { return e.Code + ": " + e.Message }
-func (e *envelopeError) WireError() envelopeError { return *e }
+func (e *envelopeError) Error() string { return e.Code + ": " + e.Message }
 
-func newSchedulerError(code, message string) error {
-	return &envelopeError{Code: code, Message: message, Retryable: false}
+// Coded implements providermodule.Coded, the shared wire-error contract also
+// implemented by internal/providers/zai's own envelopeError, so an error
+// raised inside a provider module and propagated verbatim by the coordinator
+// still carries its code/message/HTTP status here.
+func (e *envelopeError) Coded() providermodule.WireError {
+	return providermodule.WireError{Code: e.Code, Message: e.Message, Retryable: e.Retryable, HTTPStatus: e.HTTPStatus}
 }
 
 type registration struct {
@@ -80,7 +93,7 @@ func schedulerPick(request []byte) ([]byte, error) {
 	if err := json.Unmarshal(request, &pick); err != nil {
 		return nil, fmt.Errorf("decode scheduler request")
 	}
-	response, err := runtimeState.pick(pick)
+	response, err := runtimeState.Pick(pick)
 	if err != nil {
 		return nil, err
 	}
@@ -95,41 +108,18 @@ func usageHandle(request []byte) ([]byte, error) {
 	if err := json.Unmarshal(request, &record); err != nil {
 		return nil, fmt.Errorf("decode usage record")
 	}
-	_ = runtimeState.handleUsage(record)
+	_ = runtimeState.HandleUsage(record)
 	return okEnvelope(struct{}{})
 }
 
-// managementStatusBody is the redacted JSON served at the status route.
-type managementStatusBody struct {
-	Plugin          string                    `json:"plugin"`
-	Status          string                    `json:"status"`
-	Version         string                    `json:"version"`
-	GeneratedAt     time.Time                 `json:"generated_at"`
-	ValidationError string                    `json:"validation_error,omitempty"`
-	Accounts        []managementAccountStatus `json:"accounts,omitempty"`
-}
-
-type managementAccountStatus struct {
-	Name                   string     `json:"name"`
-	KeySuffix              string     `json:"key_suffix"`
-	Plan                   string     `json:"plan"`
-	FiveHourUtilization    float64    `json:"five_hour_utilization"`
-	WeeklyUtilization      float64    `json:"weekly_utilization"`
-	FiveHourResetsAt       *time.Time `json:"five_hour_resets_at"`
-	WeeklyResetsAt         *time.Time `json:"weekly_resets_at"`
-	QuotaSource            string     `json:"quota_source"`
-	QuotaObservedAt        time.Time  `json:"quota_observed_at,omitempty"`
-	QuotaAgeSeconds        int64      `json:"quota_age_seconds"`
-	QuotaStale             bool       `json:"quota_stale"`
-	QuotaError             string     `json:"quota_error,omitempty"`
-	Offpeak                bool       `json:"offpeak"`
-	Health                 string     `json:"health"`
-	EstimatorCompleteSince time.Time  `json:"estimator_complete_since,omitempty"`
-	DeliveryWarning        bool       `json:"delivery_warning"`
-	PersistenceWarning     bool       `json:"persistence_warning"`
-	UnknownModelWarning    bool       `json:"unknown_model_warning"`
-	HeuristicDedupWarning  bool       `json:"heuristic_dedup_warning"`
-	DedupMode              string     `json:"dedup_mode"`
+// managementHandle answers a management.handle RPC.
+func managementHandle(request []byte) ([]byte, error) {
+	var req pluginapi.ManagementRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return nil, fmt.Errorf("decode management request")
+	}
+	response := runtimeState.HandleManagement(context.Background(), req)
+	return okEnvelope(response)
 }
 
 func okEnvelope(value any) ([]byte, error) {
@@ -140,15 +130,10 @@ func okEnvelope(value any) ([]byte, error) {
 	return json.Marshal(envelope{OK: true, Result: raw})
 }
 
-type wireError interface {
-	error
-	WireError() envelopeError
-}
-
 func errorEnvelopeFor(err error) []byte {
-	if typed, ok := err.(wireError); ok {
-		wire := typed.WireError()
-		raw, _ := json.Marshal(envelope{OK: false, Error: &wire})
+	if typed, ok := err.(providermodule.Coded); ok {
+		wire := typed.Coded()
+		raw, _ := json.Marshal(envelope{OK: false, Error: &envelopeError{Code: wire.Code, Message: wire.Message, Retryable: wire.Retryable, HTTPStatus: wire.HTTPStatus}})
 		return raw
 	}
 	return errorEnvelope("plugin_error", err.Error())

@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"flag"
@@ -10,61 +11,110 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
+
+type artifact struct {
+	name string
+	path string
+}
 
 func main() {
 	libraryPath := flag.String("library", "", "path to the compiled plugin library")
 	entryName := flag.String("entry", "", "dynamic library name inside the zip")
 	archivePath := flag.String("archive", "", "path to the output zip archive")
+	operatorPath := flag.String("operator", "", "path to the output operator zip archive")
+	operatorManifestPath := flag.String("operator-manifest", "", "path to a newline-delimited name=path operator manifest")
 	checksumPath := flag.String("checksum", "", "path to the output checksum file")
+	checksumManifestPath := flag.String("checksum-manifest", "", "path to a newline-delimited name=path artifact manifest")
 	flag.Parse()
 
-	if *libraryPath == "" || *entryName == "" || *archivePath == "" || *checksumPath == "" {
-		fatalf("library, entry, archive, and checksum are required")
+	if *libraryPath == "" || *entryName == "" || *archivePath == "" || *operatorPath == "" || *operatorManifestPath == "" || *checksumPath == "" || *checksumManifestPath == "" {
+		fatalf("library, entry, archive, operator, operator-manifest, checksum, and checksum-manifest are required")
 	}
 	if filepath.Base(*entryName) != *entryName {
 		fatalf("entry must be a root-level filename")
 	}
-	archiveData, errPackage := packageLibrary(*libraryPath, *entryName, *archivePath)
-	if errPackage != nil {
-		fatalf("%v", errPackage)
+	if _, err := packageLibrary(*libraryPath, *entryName, *archivePath); err != nil {
+		fatalf("%v", err)
 	}
-	libraryData, errRead := os.ReadFile(*libraryPath)
-	if errRead != nil {
-		fatalf("read library: %v", errRead)
+	operatorEntries, err := readManifest(*operatorManifestPath)
+	if err != nil {
+		fatalf("read operator manifest: %v", err)
 	}
-	artifacts := map[string][]byte{
-		filepath.Base(*archivePath): archiveData,
-		filepath.Base(*libraryPath): libraryData,
+	if err := packageOperator(operatorEntries, *operatorPath); err != nil {
+		fatalf("%v", err)
 	}
-	names := make([]string, 0, len(artifacts))
-	for name := range artifacts {
-		names = append(names, name)
+	checksumEntries, err := readManifest(*checksumManifestPath)
+	if err != nil {
+		fatalf("read checksum manifest: %v", err)
 	}
-	sort.Strings(names)
-	var checksums string
-	for _, name := range names {
-		checksum := sha256.Sum256(artifacts[name])
-		checksums += fmt.Sprintf("%s  %s\n", hex.EncodeToString(checksum[:]), name)
-	}
-	if errWrite := os.WriteFile(*checksumPath, []byte(checksums), 0o644); errWrite != nil {
-		fatalf("write checksum: %v", errWrite)
+	checksumEntries = append(checksumEntries,
+		artifact{name: filepath.Base(*libraryPath), path: *libraryPath},
+		artifact{name: filepath.Base(*archivePath), path: *archivePath},
+		artifact{name: filepath.Base(*operatorPath), path: *operatorPath},
+	)
+	if err := writeChecksums(*checksumPath, checksumEntries); err != nil {
+		fatalf("%v", err)
 	}
 }
 
-func packageLibrary(libraryPath, entryName, archivePath string) ([]byte, error) {
-	library, errOpen := os.Open(libraryPath)
-	if errOpen != nil {
-		return nil, fmt.Errorf("open library: %w", errOpen)
+func readManifest(path string) ([]artifact, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
 	}
-	defer library.Close()
+	defer file.Close()
 
-	if errMkdir := os.MkdirAll(filepath.Dir(archivePath), 0o755); errMkdir != nil {
-		return nil, fmt.Errorf("create archive directory: %w", errMkdir)
+	var artifacts []artifact
+	seen := make(map[string]struct{})
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" || strings.TrimSpace(line) != line || strings.HasPrefix(line, "#") {
+			return nil, fmt.Errorf("invalid manifest line %q", line)
+		}
+		name, path, ok := strings.Cut(line, "=")
+		if !ok || name == "" || path == "" || filepath.Base(name) != name {
+			return nil, fmt.Errorf("invalid manifest line %q", line)
+		}
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("duplicate manifest entry %q", name)
+		}
+		seen[name] = struct{}{}
+		artifacts = append(artifacts, artifact{name: name, path: path})
 	}
-	archive, errCreate := os.Create(archivePath)
-	if errCreate != nil {
-		return nil, fmt.Errorf("create archive: %w", errCreate)
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(artifacts) == 0 {
+		return nil, fmt.Errorf("manifest is empty")
+	}
+	return artifacts, nil
+}
+
+func packageLibrary(libraryPath, entryName, archivePath string) ([]byte, error) {
+	if err := writeZip(archivePath, []artifact{{name: entryName, path: libraryPath}}); err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(archivePath)
+	if err != nil {
+		return nil, fmt.Errorf("read archive: %w", err)
+	}
+	return data, nil
+}
+
+func packageOperator(entries []artifact, archivePath string) error {
+	return writeZip(archivePath, entries)
+}
+
+func writeZip(archivePath string, entries []artifact) error {
+	if err := os.MkdirAll(filepath.Dir(archivePath), 0o755); err != nil {
+		return fmt.Errorf("create archive directory: %w", err)
+	}
+	archive, err := os.Create(archivePath)
+	if err != nil {
+		return fmt.Errorf("create archive: %w", err)
 	}
 	archiveClosed := false
 	defer func() {
@@ -74,28 +124,82 @@ func packageLibrary(libraryPath, entryName, archivePath string) ([]byte, error) 
 	}()
 
 	writer := zip.NewWriter(archive)
-	header := &zip.FileHeader{Name: entryName, Method: zip.Deflate}
-	header.SetMode(0o755)
-	entry, errEntry := writer.CreateHeader(header)
-	if errEntry != nil {
-		return nil, fmt.Errorf("create zip entry: %w", errEntry)
+	for _, item := range entries {
+		if filepath.Base(item.name) != item.name {
+			return fmt.Errorf("zip entry %q must be a root-level filename", item.name)
+		}
+		info, err := os.Stat(item.path)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", item.name, err)
+		}
+		if !info.Mode().IsRegular() || info.Size() == 0 {
+			return fmt.Errorf("zip entry %s is empty or not a regular file", item.name)
+		}
+		source, err := os.Open(item.path)
+		if err != nil {
+			return fmt.Errorf("open %s: %w", item.name, err)
+		}
+		header := &zip.FileHeader{Name: item.name, Method: zip.Deflate}
+		header.SetMode(info.Mode().Perm())
+		entry, err := writer.CreateHeader(header)
+		if err != nil {
+			_ = source.Close()
+			return fmt.Errorf("create zip entry %s: %w", item.name, err)
+		}
+		if _, err := io.Copy(entry, source); err != nil {
+			_ = source.Close()
+			return fmt.Errorf("copy %s: %w", item.name, err)
+		}
+		if err := source.Close(); err != nil {
+			return fmt.Errorf("close %s: %w", item.name, err)
+		}
 	}
-	if _, errCopy := io.Copy(entry, library); errCopy != nil {
-		return nil, fmt.Errorf("copy library: %w", errCopy)
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close zip writer: %w", err)
 	}
-	if errClose := writer.Close(); errClose != nil {
-		return nil, fmt.Errorf("close zip writer: %w", errClose)
-	}
-	if errClose := archive.Close(); errClose != nil {
-		return nil, fmt.Errorf("close archive: %w", errClose)
+	if err := archive.Close(); err != nil {
+		return fmt.Errorf("close archive: %w", err)
 	}
 	archiveClosed = true
+	return nil
+}
 
-	data, errRead := os.ReadFile(archivePath)
-	if errRead != nil {
-		return nil, fmt.Errorf("read archive: %w", errRead)
+func writeChecksums(path string, artifacts []artifact) error {
+	seen := make(map[string]struct{}, len(artifacts))
+	for _, item := range artifacts {
+		if filepath.Base(item.name) != item.name {
+			return fmt.Errorf("checksum name %q must be a base filename", item.name)
+		}
+		if _, exists := seen[item.name]; exists {
+			return fmt.Errorf("duplicate checksum artifact %q", item.name)
+		}
+		seen[item.name] = struct{}{}
 	}
-	return data, nil
+	sort.Slice(artifacts, func(left, right int) bool { return artifacts[left].name < artifacts[right].name })
+	var checksums strings.Builder
+	for _, item := range artifacts {
+		file, err := os.Open(item.path)
+		if err != nil {
+			return fmt.Errorf("open %s for checksum: %w", item.name, err)
+		}
+		hash := sha256.New()
+		_, errCopy := io.Copy(hash, file)
+		errClose := file.Close()
+		if errCopy != nil {
+			return fmt.Errorf("checksum %s: %w", item.name, errCopy)
+		}
+		if errClose != nil {
+			return fmt.Errorf("close %s: %w", item.name, errClose)
+		}
+		checksums.WriteString(hex.EncodeToString(hash.Sum(nil)))
+		checksums.WriteString("  ")
+		checksums.WriteString(item.name)
+		checksums.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, []byte(checksums.String()), 0o644); err != nil {
+		return fmt.Errorf("write checksum: %w", err)
+	}
+	return nil
 }
 
 func fatalf(format string, args ...any) {

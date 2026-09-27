@@ -1,5 +1,6 @@
 # Build output
 dist/
+.github/scripts/host-integration/host-integration
 *.so
 *.h
 
@@ -12,3 +13,6 @@ config.yaml
 .idea/
 .vscode/
 .DS_Store
+# Python verification artifacts
+__pycache__/
+*.py[cod]

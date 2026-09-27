@@ -6,6 +6,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Z.ai authenticated management status now exports the existing account pseudonym and a redacted transient-429 cooldown projection through the actual status DTO. The consumer contract defines explicit inactive state, generation freshness, closed reason provenance, and identity-only joins. OpenCode Go quota resets remain unsupported as cooldown evidence; no collector, routing, or deployment changes are included.
+
+## [0.4.4] - 2026-09-14
+
+### Fixed
+
+- `providers.zai`: `parseQuotaResponse` was still all-or-nothing on the two CREDIT_LIMIT windows — any unparseable five-hour window (invalid usage, currentValue, remaining, nextResetTime, duplicate, or a credits-out-of-range value) discarded the whole response, including a perfectly valid weekly window, and fell back to "estimate". The five-hour and weekly windows now parse independently; the weekly window remains governing (a weekly failure still falls back to estimate, unchanged), but a five-hour failure is recorded as a named diagnostic (`five_hour_error` in the status response) instead of voiding the response. A window that fails to parse is left absent, never zero-filled, so it cannot be misread as "unused, full capacity available". (TOG-2497, completing TOG-2490 fix item 2)
+
+## [0.4.3] - 2026-09-14
+
+### Fixed
+
+- `providers.zai`: the quota poller rejected a CREDIT_LIMIT window with `nextResetTime: null` — which Z.ai sends on a window with zero usage and no reset scheduled (e.g. right after a rollover with no traffic since) — and discarded the entire response, including the unrelated, valid weekly window. `nextResetTime: null` on an unused (`currentValue == 0`) window now parses as utilization 0 with no pending reset; a consumed window still requires a valid reset time. (TOG-2490)
+
+## [0.4.2] - 2026-09-14
+
+### Changed
+
+- The `/v0/resource/plugins/subscription-pool/status` page (Management Center's "Plugins" nav entry) is now a real per-account dashboard instead of a static placeholder: it renders both `zai` and `opencode-go` accounts server-side from the coordinator's own `Status()` aggregation, with per-window utilization bar, percent, absolute UTC reset timestamp, countdown, source (quota_api/estimate for Z.ai; authoritative/429-derived/unknown for OpenCode Go), and health. No management or dashboard key is ever embedded in the page. Resource-page ownership moved from the `zai` module to the coordinator, since only the coordinator can see both providers; the menu entry is renamed from "Z.ai Quota" to "Subscription Quota" and its description now mentions both providers. (TOG-2477)
+
+## [0.4.1] - 2026-09-13
+
+### Fixed
+
+- `providers.opencode-go`: the dashboard usage poller fetched `/zen/go/v1/usage` once with a single module-level key and broadcast that one snapshot to every configured account, so all accounts reported identical utilization/reset regardless of their real usage. `dashboard-api-key` now lives on `accounts[]` (falling back to the module-level key only when an account omits its own), and each account is polled independently with its own key. (TOG-2472)
+- `providers.zai`: the quota poller rejected upstream CREDIT_LIMIT/`nextResetTime` values serialized with a trailing `.0` (e.g. `1789347583607.0`), falling back to a stuck-at-0% estimate. `strictInt64` now also accepts an exact, finite, in-range whole-number float. (TOG-2473)
+
+## [0.4.0] - 2026-09-13
+
+### Added
+
+- Operator bundle now packages the OpenCode Go telemetry path alongside the existing Z.ai lane: `collector-opencodego.py` and `deploy/verify-live-opencodego.sh` are installed into the release bundle, checksummed, and enforced by strict bundle-manifest validation.
+- Release workflow artifact staging and the published GitHub release now include both provider collectors and both live verifiers, so the installed bundle proves both `zai` and `opencode-go` provider modules are present and their telemetry files are valid.
+
+### Changed
+
+- Versioned release metadata (`Makefile`, `registry.json`, CI/package expectations, deploy runbook text) bumped to `0.4.0` to reflect the dual-provider `subscription-pool` coordinator baseline merged in `0.3.0`.
+
+## [0.3.0] - 2026-09-13
+
+### Added
+
+- Neutral `subscription-pool` coordinator plugin ID replacing the single-provider `zai-coding-plan` registration; Z.ai support is now a `providerModule` extraction (`internal/providers/zai`) behind a coordinator-owned dispatch registry.
+- `providerModule` interface and per-`authID`/`providerID`/`logicalAccountID` dispatch registry: zero recognized families yields `Handled:false`, more than one recognized family or a recognized-but-unmanaged/all-impaired family fails closed instead of silently passing traffic through.
+- Config YAML reshaped to a `providers.<name>` root shape (`providers.zai`, with `providers.opencode-go` reserved for the sibling module) with strict unknown-field rejection.
+
+### Changed
+
+- Z.ai account/quota/health/polling/management behavior is unchanged; existing tests were relocated to `internal/providers/zai` and continue to pass without modification.
+
+## [0.2.0] - 2026-09-11
+
+### Added
+
+- v0.2.0 release packaging and strict archive/checksum validation for the Linux/amd64 shared library and plugin-store archive.
+- Deployed, latest, and CLIProxyAPI v7.2.67 baseline compatibility evidence in the release gate.
+- Credential-free live verification, bounded canary guidance, and recoverable rollback procedures for the Z.ai lane.
+
+### Security
+
+- Live verification rejects malformed or confidential management responses, unsafe key-file permissions, missing managed capacity, and unbounded service output.
+- Rollback validates the backup and safe configuration directory before management-plane mutation and atomically restores the configuration.
+
 ## [0.1.0] - 2026-09-10
 
 ### Added
@@ -26,7 +91,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Raw plan keys, authorization headers, request bodies, and management credentials are excluded from persistent state, logs, and status responses; persistence uses only derived account identities and redacted state.
 - State and settings commits are atomic, redacted, and recovered fail-closed after interrupted writes.
 
-> This entry describes the v0.1.0 release candidate. The release workflow refuses publication unless the tag, registry, archive names, and checksums match this version at the reviewed release commit.
-
-[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.4
+[0.4.3]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.3
+[0.4.2]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.2
+[0.4.1]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.1
+[0.4.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.4.0
+[0.3.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.3.0
+[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0
 [0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0

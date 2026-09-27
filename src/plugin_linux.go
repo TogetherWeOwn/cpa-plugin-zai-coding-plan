@@ -1,6 +1,6 @@
 //go:build linux && cgo
 
-// Package main implements the zai-coding-plan CLIProxyAPI plugin skeleton.
+// Package main implements the subscription-pool CLIProxyAPI plugin skeleton.
 package main
 
 /*
@@ -83,20 +83,20 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 			raw = errorEnvelope("invalid_request", "request body is invalid")
 			break
 		}
-		if errConfig := runtimeState.reconfigure(lifecycle.ConfigYAML); errConfig != nil {
-			raw = errorEnvelope("invalid_config", runtimeState.validationStatus())
+		if errConfig := runtimeState.Reconfigure(lifecycle.ConfigYAML); errConfig != nil {
+			raw = errorEnvelope("invalid_config", runtimeState.ValidationStatus())
 			break
 		}
 		raw, err = okEnvelope(pluginRegistration())
 	case pluginabi.MethodPluginReconfigure:
 		lifecycle, errLifecycle := decodeLifecycle(payload)
 		if errLifecycle != nil {
-			_ = runtimeState.recordError(errLifecycle)
+			_ = runtimeState.RecordError(errLifecycle)
 			raw = errorEnvelope("invalid_request", "request body is invalid")
 			break
 		}
-		if errConfig := runtimeState.reconfigure(lifecycle.ConfigYAML); errConfig != nil {
-			raw = errorEnvelope("invalid_config", runtimeState.validationStatus())
+		if errConfig := runtimeState.Reconfigure(lifecycle.ConfigYAML); errConfig != nil {
+			raw = errorEnvelope("invalid_config", runtimeState.ValidationStatus())
 			break
 		}
 		raw, err = okEnvelope(pluginRegistration())
@@ -105,11 +105,11 @@ func cliproxyPluginCall(method *C.char, request *C.uint8_t, requestLen C.size_t,
 	case pluginabi.MethodUsageHandle:
 		raw, err = usageHandle(payload)
 	case pluginabi.MethodManagementRegister:
-		raw, err = okEnvelope(managementRegistration())
+		raw, err = okEnvelope(runtimeState.ManagementRegistration())
 	case pluginabi.MethodManagementHandle:
 		raw, err = managementHandle(payload)
 	case pluginabi.MethodPluginShutdown:
-		err = runtimeState.shutdown()
+		err = runtimeState.Shutdown()
 		if err == nil {
 			raw, err = okEnvelope(struct{}{})
 		}
@@ -149,7 +149,7 @@ func cliproxyPluginFree(ptr unsafe.Pointer, length C.size_t) {
 
 //export cliproxyPluginShutdown
 func cliproxyPluginShutdown() {
-	_ = runtimeState.shutdown()
+	_ = runtimeState.Shutdown()
 }
 
 func writeResponse(response *C.cliproxy_buffer, raw []byte) {

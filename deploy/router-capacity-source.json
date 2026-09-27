@@ -1,0 +1,20 @@
+{
+  "id": "cliproxy-zai-glm-5.3",
+  "statusUrl": "https://router.infextion.net/telemetry/model-usage/glm-5.3",
+  "modelIds": ["cliproxy/zai/glm-5.3"],
+  "healthFields": ["state"],
+  "requestTimeoutMs": 5000,
+  "maxResponseBytes": 262144,
+  "windows": [
+    {
+      "name": "five-hour",
+      "utilizationFields": ["fiveHourUtilization"],
+      "resetFields": ["fiveHourResetsAt"]
+    },
+    {
+      "name": "weekly",
+      "utilizationFields": ["weeklyUtilization"],
+      "resetFields": ["weeklyResetsAt"]
+    }
+  ]
+}

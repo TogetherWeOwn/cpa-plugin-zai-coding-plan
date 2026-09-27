@@ -1,0 +1,48 @@
+{
+  "plugin": "subscription-pool",
+  "status": "registered",
+  "version": "0.0.0-dev",
+  "generated_at": "2026-09-08T08:00:00Z",
+  "providers": {
+    "opencode-go": {
+      "provider": "opencode-go",
+      "status": "registered",
+      "credential_bound": true,
+      "observation_gaps": [
+        "five-hour and weekly enforcement are generalized from the observed monthly 429 shape"
+      ],
+      "accounts": [
+        {
+          "name": "opencodego-1",
+          "disabled": false,
+          "windows": {
+            "five_hour": {
+              "known": true,
+              "utilization": 0.31,
+              "exhausted": false,
+              "resets_at": "2026-09-08T13:00:00Z",
+              "source": "poll",
+              "authoritative": true
+            },
+            "weekly": {
+              "known": true,
+              "utilization": 0.12,
+              "exhausted": false,
+              "resets_at": "2026-09-14T00:00:00Z",
+              "source": "poll",
+              "authoritative": true
+            },
+            "monthly": {
+              "known": true,
+              "utilization": 0.05,
+              "exhausted": false,
+              "resets_at": "2026-10-01T00:00:00Z",
+              "source": "poll",
+              "authoritative": true
+            }
+          }
+        }
+      ]
+    }
+  }
+}

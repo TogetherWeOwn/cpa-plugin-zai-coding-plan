@@ -4,6 +4,7 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -21,11 +22,11 @@ import (
 )
 
 const (
-	pluginID             = "zai-coding-plan"
-	libraryName          = pluginID + ".so"
-	hostImageRepository  = "eceasy/cli-proxy-api"
-	hostImageTag         = "v7.2.67"
-	hostImageAMD64Digest = "sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606"
+	pluginID                     = "subscription-pool"
+	libraryName                  = pluginID + ".so"
+	hostImageRepository          = "eceasy/cli-proxy-api"
+	baselineHostImageTag         = "v7.2.67"
+	baselineHostImageAMD64Digest = "sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606"
 )
 
 var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
@@ -73,6 +74,14 @@ type registryPlugin struct {
 type registryRelease struct {
 	Archive   string `json:"archive"`
 	Checksums string `json:"checksums"`
+}
+
+type canonicalRunStep struct {
+	name             string
+	id               string
+	workingDirectory string
+	env              map[string]string
+	command          string
 }
 
 func main() {
@@ -161,17 +170,41 @@ func validateRelease(root, dist, tag, version string) error {
 	distPath := resolvePath(root, dist)
 	libraryPath := filepath.Join(distPath, fmt.Sprintf("%s-v%s.so", pluginID, version))
 	archivePath := filepath.Join(distPath, fmt.Sprintf("%s_%s_linux_amd64.zip", pluginID, version))
+	operatorPath := filepath.Join(distPath, fmt.Sprintf("%s-v%s-operator.zip", pluginID, version))
 	checksumsPath := filepath.Join(distPath, "checksums.txt")
-	if err := requireNonEmpty(libraryPath); err != nil {
-		return err
+	artifactPaths := []string{
+		libraryPath,
+		archivePath,
+		operatorPath,
+		filepath.Join(distPath, "compatibility-evidence.json"),
+		filepath.Join(distPath, "config.yaml.tmpl"),
+		filepath.Join(distPath, "registry.json"),
+		filepath.Join(distPath, "router-capacity-source.json"),
+		filepath.Join(distPath, "verify-live.sh"),
+		filepath.Join(distPath, "verify-live-opencodego.sh"),
+		filepath.Join(distPath, "collector-zai.py"),
+		filepath.Join(distPath, "collector-opencodego.py"),
+		filepath.Join(distPath, "prepare-usage-dir.py"),
+		filepath.Join(distPath, "remove-usage-output.py"),
+		filepath.Join(distPath, "rollback.sh"),
+		filepath.Join(distPath, "README.md"),
+		filepath.Join(distPath, "release-sha.txt"),
 	}
-	if err := requireNonEmpty(archivePath); err != nil {
-		return err
+	for _, path := range artifactPaths {
+		if err := requireNonEmpty(path); err != nil {
+			return err
+		}
 	}
 	if err := validateArchive(libraryPath, archivePath); err != nil {
 		return err
 	}
-	return validateChecksums(checksumsPath, []string{libraryPath, archivePath})
+	if err := validateOperatorBundle(root, distPath, version); err != nil {
+		return err
+	}
+	if err := validateReleaseSHA(filepath.Join(distPath, "release-sha.txt")); err != nil {
+		return err
+	}
+	return validateChecksums(checksumsPath, artifactPaths)
 }
 
 func validateVersion(tag, version string) error {
@@ -272,22 +305,48 @@ func normalizeDocument(value string) string {
 }
 
 func validateHostImagePin(root string) error {
-	path := filepath.Join(root, ".github", "release-host-image.json")
-	raw, err := os.ReadFile(path)
+	matrixRaw, err := os.ReadFile(filepath.Join(root, ".github", "host-images.json"))
 	if err != nil {
-		return fmt.Errorf("read release host image pin: %w", err)
+		return fmt.Errorf("read host image matrix: %w", err)
 	}
-	var pin struct {
+	var matrix struct {
+		Repository string `json:"repository"`
+		Platform   string `json:"platform"`
+		Baseline   struct {
+			Tag            string `json:"tag"`
+			ManifestDigest string `json:"manifest_digest"`
+		} `json:"baseline"`
+	}
+	if err := json.Unmarshal(matrixRaw, &matrix); err != nil {
+		return fmt.Errorf("parse host image matrix: %w", err)
+	}
+	if matrix.Repository != hostImageRepository || matrix.Platform != "linux/amd64" || matrix.Baseline.Tag != baselineHostImageTag || matrix.Baseline.ManifestDigest != baselineHostImageAMD64Digest {
+		return errors.New("host image matrix does not preserve the approved v7.2.67 linux/amd64 baseline")
+	}
+	deployedRaw, err := os.ReadFile(filepath.Join(root, "deploy", "deployed-host-image.json"))
+	if err != nil {
+		return fmt.Errorf("read deployed host image pin: %w", err)
+	}
+	var deployed struct {
 		Repository     string `json:"repository"`
 		Tag            string `json:"tag"`
 		Platform       string `json:"platform"`
 		ManifestDigest string `json:"manifest_digest"`
 	}
-	if err := json.Unmarshal(raw, &pin); err != nil {
-		return fmt.Errorf("parse release host image pin: %w", err)
+	if err := json.Unmarshal(deployedRaw, &deployed); err != nil {
+		return fmt.Errorf("parse deployed host image pin: %w", err)
 	}
-	if pin.Repository != hostImageRepository || pin.Tag != hostImageTag || pin.Platform != "linux/amd64" || pin.ManifestDigest != hostImageAMD64Digest {
-		return fmt.Errorf("release host image pin does not match the approved v7.2.67 linux/amd64 manifest")
+	if deployed.Repository != hostImageRepository || deployed.Platform != "linux/amd64" || !regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`).MatchString(deployed.Tag) || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(deployed.ManifestDigest) {
+		return errors.New("deployed host image pin is invalid")
+	}
+	for _, path := range []string{
+		filepath.Join(root, ".github", "scripts", "resolve-host-images.sh"),
+		filepath.Join(root, ".github", "scripts", "run-host-matrix.sh"),
+		filepath.Join(root, ".github", "workflows", "host-compatibility.yml"),
+	} {
+		if err := requireNonEmpty(path); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -353,147 +412,55 @@ func collectWorkflowUses(node *yaml.Node, uses *[]*yaml.Node) {
 }
 
 func validateReleaseWorkflowBoundary(root string) error {
+	ciPath := filepath.Join(root, ".github", "workflows", "ci.yml")
+	ciRaw, err := os.ReadFile(ciPath)
+	if err != nil {
+		return fmt.Errorf("read CI workflow: %w", err)
+	}
+	var ciDocument yaml.Node
+	if err := yaml.Unmarshal(ciRaw, &ciDocument); err != nil {
+		return fmt.Errorf("parse CI workflow: %w", err)
+	}
+	ciWorkflow, err := yamlMapping(&ciDocument, "CI workflow")
+	if err != nil {
+		return err
+	}
+	ciTrigger, err := yamlMapping(ciWorkflow["on"], "CI workflow trigger")
+	if err != nil {
+		return err
+	}
+	ciPush, err := yamlMapping(ciTrigger["push"], "CI push trigger")
+	if err != nil {
+		return err
+	}
+	ciBranches, err := yamlStringSequence(ciPush["branches"], "CI push branches")
+	if err != nil || len(ciBranches) != 1 || ciBranches[0] != "main" {
+		return errors.New("CI push trigger must contain only main")
+	}
+
 	path := filepath.Join(root, ".github", "workflows", "release.yml")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read release workflow: %w", err)
 	}
-	if err := validateReleaseWorkflowShape(raw); err != nil {
-		return err
-	}
-	var workflow struct {
-		Permissions map[string]string `yaml:"permissions"`
-		Jobs        map[string]struct {
-			Needs       string            `yaml:"needs"`
-			Permissions map[string]string `yaml:"permissions"`
-			Steps       []struct {
-				Uses string `yaml:"uses"`
-				Run  string `yaml:"run"`
-				With struct {
-					Name string `yaml:"name"`
-				} `yaml:"with"`
-				Env map[string]string `yaml:"env"`
-			} `yaml:"steps"`
-		} `yaml:"jobs"`
-	}
-	if err := yaml.Unmarshal(raw, &workflow); err != nil {
-		return fmt.Errorf("parse release workflow: %w", err)
-	}
-	if workflow.Permissions["contents"] != "read" {
-		return errors.New("release workflow must default contents permission to read")
-	}
-	build, exists := workflow.Jobs["build"]
-	if !exists {
-		return errors.New("release workflow is missing build job")
-	}
-	if build.Permissions["contents"] == "write" {
-		return errors.New("release build job must not have contents write permission")
-	}
-	publish, exists := workflow.Jobs["publish"]
-	if !exists {
-		return errors.New("release workflow is missing publish job")
-	}
-	if publish.Needs != "build" || publish.Permissions["contents"] != "write" {
-		return errors.New("release publish job must depend on build and hold contents write permission")
-	}
-	for name, job := range workflow.Jobs {
-		if name != "publish" && job.Permissions["contents"] == "write" {
-			return fmt.Errorf("release job %q must not have contents write permission", name)
-		}
-	}
-	const downloadArtifactAction = "actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093"
-	const publishCommand = `gh release create "$RAW_TAG" \
-  "release-artifacts/zai-coding-plan-v${VERSION}.so" \
-  "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
-  release-artifacts/checksums.txt \
-  --verify-tag --generate-notes`
-	var downloaded, published bool
-	for _, step := range publish.Steps {
-		switch {
-		case step.Uses != "":
-			if step.Uses != downloadArtifactAction || step.With.Name != "release-artifacts" || downloaded {
-				return errors.New("release publish job may only download the staged release artifacts with the approved action")
-			}
-			downloaded = true
-		case step.Run != "":
-			if normalizeShellCommand(step.Run) != normalizeShellCommand(publishCommand) || published {
-				return errors.New("release publish job must use the canonical publication command")
-			}
-			if step.Env["GH_TOKEN"] != "${{ github.token }}" || step.Env["GH_REPO"] != "${{ github.repository }}" || step.Env["VERSION"] != "${{ needs.build.outputs.version }}" || step.Env["RAW_TAG"] != "${{ github.ref_name }}" {
-				return errors.New("release publish job must use the canonical publication environment")
-			}
-			published = true
-		default:
-			return errors.New("release publish job contains an inert step")
-		}
-	}
-	if !downloaded || !published || len(publish.Steps) != 2 {
-		return errors.New("release publish job must contain exactly the artifact download and canonical publication steps")
-	}
-	return nil
+	return validateReleaseWorkflowShape(raw)
 }
 
-func validateReleaseWorkflowShape(raw []byte) error {
-	var document yaml.Node
-	if err := yaml.Unmarshal(raw, &document); err != nil {
-		return fmt.Errorf("parse release workflow structure: %w", err)
+func requireCanonicalRunScalar(raw []byte, node *yaml.Node, context string) error {
+	if node == nil || node.Kind != yaml.ScalarNode || node.Tag != "!!str" || node.Style != yaml.LiteralStyle {
+		return fmt.Errorf("%s run command must use literal block style", context)
 	}
-	workflow, err := yamlMapping(&document, "release workflow")
-	if err != nil {
-		return err
+	lineStart := node.Line - 1
+	if lineStart < 0 {
+		return fmt.Errorf("%s run command has an invalid source position", context)
 	}
-	jobs, err := yamlMapping(workflow["jobs"], "release workflow jobs")
-	if err != nil {
-		return err
+	lines := bytes.Split(raw, []byte{'\n'})
+	if lineStart >= len(lines) {
+		return fmt.Errorf("%s run command has an invalid source position", context)
 	}
-	publish, err := yamlMapping(jobs["publish"], "release publish job")
-	if err != nil {
-		return err
-	}
-	if err := requireOnlyYAMLKeys(publish, "release publish job", "needs", "runs-on", "permissions", "steps"); err != nil {
-		return err
-	}
-	if yamlScalarValue(publish["runs-on"]) != "ubuntu-24.04" {
-		return errors.New("release publish job must use the approved runner")
-	}
-	permissions, err := yamlStringMap(publish["permissions"], "release publish job permissions")
-	if err != nil {
-		return err
-	}
-	if len(permissions) != 1 || permissions["contents"] != "write" {
-		return errors.New("release publish job must hold only contents write permission")
-	}
-	steps := publish["steps"]
-	if steps == nil || steps.Kind != yaml.SequenceNode || len(steps.Content) != 2 {
-		return errors.New("release publish job must contain exactly the artifact download and canonical publication steps")
-	}
-	download, err := yamlMapping(steps.Content[0], "release artifact download step")
-	if err != nil {
-		return err
-	}
-	if err := requireOnlyYAMLKeys(download, "release artifact download step", "name", "uses", "with"); err != nil {
-		return err
-	}
-	downloadWith, err := yamlStringMap(download["with"], "release artifact download inputs")
-	if err != nil {
-		return err
-	}
-	if len(downloadWith) != 2 || downloadWith["name"] != "release-artifacts" || downloadWith["path"] != "release-artifacts" {
-		return errors.New("release artifact download step must use the canonical inputs")
-	}
-	publication, err := yamlMapping(steps.Content[1], "release publication step")
-	if err != nil {
-		return err
-	}
-	if err := requireOnlyYAMLKeys(publication, "release publication step", "name", "env", "run"); err != nil {
-		return err
-	}
-	publicationEnv, err := yamlStringMap(publication["env"], "release publication environment")
-	if err != nil {
-		return err
-	}
-	if len(publicationEnv) != 4 {
-		return errors.New("release publication environment must contain exactly the canonical variables")
+	declaration := strings.TrimSpace(string(lines[lineStart]))
+	if declaration != "run: |" {
+		return fmt.Errorf("%s run command must use exactly run: |", context)
 	}
 	return nil
 }
@@ -509,9 +476,9 @@ func yamlMapping(node *yaml.Node, context string) (map[string]*yaml.Node, error)
 		node = node.Content[0]
 	}
 	if node.Kind == yaml.AliasNode {
-		node = node.Alias
+		return nil, fmt.Errorf("%s cannot use YAML aliases", context)
 	}
-	if node == nil || node.Kind != yaml.MappingNode {
+	if node.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", context)
 	}
 	result := make(map[string]*yaml.Node, len(node.Content)/2)
@@ -524,6 +491,20 @@ func yamlMapping(node *yaml.Node, context string) (map[string]*yaml.Node, error)
 			return nil, fmt.Errorf("%s contains duplicate key %q", context, key.Value)
 		}
 		result[key.Value] = node.Content[index+1]
+	}
+	return result, nil
+}
+
+func yamlStringSequence(node *yaml.Node, context string) ([]string, error) {
+	if node == nil || node.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("%s must be a sequence", context)
+	}
+	result := make([]string, 0, len(node.Content))
+	for _, value := range node.Content {
+		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
+			return nil, fmt.Errorf("%s values must be strings", context)
+		}
+		result = append(result, value.Value)
 	}
 	return result, nil
 }
@@ -564,6 +545,18 @@ func requireOnlyYAMLKeys(mapping map[string]*yaml.Node, context string, allowed 
 		}
 	}
 	return nil
+}
+
+func equalStringMaps(actual, expected map[string]string) bool {
+	if len(actual) != len(expected) {
+		return false
+	}
+	for key, expectedValue := range expected {
+		if actual[key] != expectedValue {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeShellCommand(value string) string {
@@ -645,6 +638,117 @@ func readersEqual(left, right io.Reader) (bool, error) {
 		return false, err
 	}
 	return string(leftHash.Sum(nil)) == string(rightHash.Sum(nil)), nil
+}
+
+func validateOperatorBundle(root, distPath, version string) error {
+	bundle := filepath.Join(distPath, fmt.Sprintf("%s-v%s-operator.zip", pluginID, version))
+	if _, err := os.Stat(bundle); err != nil {
+		return fmt.Errorf("operator bundle is required: %w", err)
+	}
+	archive, err := zip.OpenReader(bundle)
+	if err != nil {
+		return fmt.Errorf("open operator bundle: %w", err)
+	}
+	defer archive.Close()
+	want := map[string]os.FileMode{
+		"compatibility-evidence.json": 0o644,
+		"config.yaml.tmpl":            0o644,
+		"registry.json":               0o644,
+		"router-capacity-source.json": 0o644,
+		"verify-live.sh":              0o755,
+		"verify-live-opencodego.sh":   0o755,
+		"collector-zai.py":            0o755,
+		"collector-opencodego.py":     0o755,
+		"prepare-usage-dir.py":        0o755,
+		"remove-usage-output.py":      0o755,
+		"rollback.sh":                 0o755,
+		"README.md":                   0o644,
+		"release-sha.txt":             0o644,
+	}
+	seen := make(map[string]struct{}, len(archive.File))
+	for _, entry := range archive.File {
+		name := entry.Name
+		if name == "" || filepath.Base(name) != name || strings.Contains(name, "..") || entry.FileInfo().IsDir() || entry.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("operator bundle contains unsafe entry %q", name)
+		}
+		mode, ok := want[name]
+		if !ok {
+			return fmt.Errorf("operator bundle contains unexpected entry %q", name)
+		}
+		if _, ok := seen[name]; ok {
+			return fmt.Errorf("operator bundle contains duplicate entry %q", name)
+		}
+		if entry.Mode().Perm() != mode {
+			return fmt.Errorf("operator bundle entry %s has mode %04o, want %04o", name, entry.Mode().Perm(), mode)
+		}
+		stagedPath := filepath.Join(distPath, name)
+		if err := requireNonEmpty(stagedPath); err != nil {
+			return err
+		}
+		entryReader, err := entry.Open()
+		if err != nil {
+			return fmt.Errorf("open operator bundle entry %s: %w", name, err)
+		}
+		staged, err := os.Open(stagedPath)
+		if err != nil {
+			_ = entryReader.Close()
+			return fmt.Errorf("open staged operator artifact %s: %w", name, err)
+		}
+		equal, err := readersEqual(entryReader, staged)
+		errEntryClose := entryReader.Close()
+		errStagedClose := staged.Close()
+		if err != nil {
+			return fmt.Errorf("compare operator bundle entry %s: %w", name, err)
+		}
+		if errEntryClose != nil || errStagedClose != nil {
+			return fmt.Errorf("close operator bundle entry %s", name)
+		}
+		if !equal {
+			return fmt.Errorf("operator bundle entry %s does not match staged artifact", name)
+		}
+		if name == "config.yaml.tmpl" || name == "README.md" {
+			raw, err := os.ReadFile(stagedPath)
+			if err != nil {
+				return fmt.Errorf("read staged operator artifact %s: %w", name, err)
+			}
+			if bytes.Contains(raw, []byte("${RELEASE_SHA}")) || bytes.Contains(raw, []byte("${REGISTRY_SHA256}")) {
+				return fmt.Errorf("operator bundle entry %s contains unresolved release placeholders", name)
+			}
+		}
+		seen[name] = struct{}{}
+	}
+	if len(seen) != len(want) {
+		return fmt.Errorf("operator bundle contains %d entries, want %d", len(seen), len(want))
+	}
+	for name := range want {
+		if _, ok := seen[name]; !ok {
+			return fmt.Errorf("operator bundle is missing %s", name)
+		}
+	}
+	registryRaw, err := os.ReadFile(filepath.Join(distPath, "registry.json"))
+	if err != nil {
+		return fmt.Errorf("read staged registry: %w", err)
+	}
+	sourceRegistry, err := os.ReadFile(filepath.Join(root, "registry.json"))
+	if err != nil {
+		return fmt.Errorf("read source registry: %w", err)
+	}
+	if !bytes.Equal(registryRaw, sourceRegistry) {
+		return errors.New("staged registry.json does not match reviewed source")
+	}
+	return nil
+}
+
+func validateReleaseSHA(path string) error {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read release SHA: %w", err)
+	}
+	value := strings.TrimSuffix(string(raw), "\n")
+	if len(value) != 40 || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(value) || string(raw) != value+"\n" {
+		return errors.New("release-sha.txt must contain exactly one lowercase 40-character commit SHA")
+	}
+	return nil
 }
 
 func validateChecksums(path string, artifactPaths []string) error {

