@@ -100,7 +100,10 @@ This contract covers only the **transient 429 block**. Authentication suspension
 administrative disablement, and quota-threshold exhaustion remain independent.
 An account can have `cooldown.active:true` while `health` says `suspended` or
 `disabled`; conversely `cooldown.active:false` never proves scheduler eligibility.
-Quota exhaustion alone must not become a cooldown.
+Quota exhaustion alone must not become a cooldown. Neither does a short
+request-rate throttle (`health:"throttled"`, at most 60 seconds, after a Z.ai
+`1302`/`1305` 429): it is reported only through `health`, and `cooldown` stays
+inactive unless the throttle escalates to the conservative fallback cooldown.
 
 At the deadline (`until <= generated_at`), the producer emits the explicit
 inactive object, even if an expired internal timestamp is retained. Existing

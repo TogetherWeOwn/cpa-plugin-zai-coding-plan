@@ -3,6 +3,7 @@ package zai
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -46,6 +47,21 @@ func (e *envelopeError) Coded() providermodule.WireError {
 
 func newSchedulerError(code, message string) error {
 	return &envelopeError{Code: code, Message: message, Retryable: false}
+}
+
+// newRateLimitedError is pick's answer when every remaining managed account is
+// only in a short request-rate backoff. It is a retryable 429, not the
+// zai_no_capacity 500: the router quarantines a lane on "no healthy managed
+// ... capacity remains", and a few seconds of request-rate backoff must not
+// evacuate the lane. The message must never contain that phrase.
+func newRateLimitedError(wait time.Duration) error {
+	seconds := max(1, int((wait+time.Second-1)/time.Second))
+	return &envelopeError{
+		Code:       "zai_rate_limited",
+		Message:    fmt.Sprintf("managed Z.ai accounts are briefly request-rate limited; retry in %ds", seconds),
+		Retryable:  true,
+		HTTPStatus: http.StatusTooManyRequests,
+	}
 }
 
 // usageHandle consumes a lossy best-effort usage observation. Persistence

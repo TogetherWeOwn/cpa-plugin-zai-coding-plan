@@ -7,6 +7,10 @@ const (
 	healthExhausted = "exhausted"
 	healthSuspended = "suspended"
 	healthDisabled  = "disabled"
+	// healthThrottled is a short per-account request-rate backoff. It is
+	// impaired for scheduling like exhausted, but pick reports it as a
+	// retryable 429 rather than a lane-wide capacity loss.
+	healthThrottled = "throttled"
 )
 
 type capacityUpdate struct {
@@ -22,6 +26,13 @@ type accountHealthState struct {
 	CapacityExhausted bool
 	CapacityResetAt   time.Time
 	CapacitySource    string
+	// ThrottledUntil, ThrottleStreak and ThrottleReason track the bounded
+	// request-rate backoff (failures.go). They are deliberately in-memory only:
+	// a throttle is at most requestRateBackoffCap long, so a restart that
+	// forgets it costs one more upstream 429, not a stale block.
+	ThrottledUntil time.Time
+	ThrottleStreak int
+	ThrottleReason string
 }
 
 type accountHealth struct {
@@ -41,6 +52,44 @@ func (state *accountHealthState) exhaustUntil(resetAt time.Time, reason string) 
 		state.ExhaustedUntil = resetAt.UTC()
 		state.ExhaustedReason = boundedHealthReason(reason)
 	}
+}
+
+// throttle applies one request-rate backoff step and reports whether the
+// account should instead take the conservative exhaustion path. A 429 that
+// lands while a throttle is already active belongs to the same burst (requests
+// dispatched before the first 429 was seen), so it can extend the deadline to
+// a hint but never advances the streak.
+func (state *accountHealthState) throttle(now, hintedAt time.Time, fallback time.Duration) bool {
+	if state.ThrottledUntil.After(now) {
+		if hintedAt.After(state.ThrottledUntil) {
+			state.ThrottledUntil = hintedAt.UTC()
+		}
+		return false
+	}
+	if state.ThrottleStreak > 0 && now.Sub(state.ThrottledUntil) >= requestRateStreakDecay {
+		state.ThrottleStreak = 0
+	}
+	if state.ThrottleStreak >= requestRateMaxThrottles {
+		state.clearThrottle()
+		return true
+	}
+	state.ThrottleStreak++
+	delay := requestRateBackoff(state.ThrottleStreak, fallback)
+	until := now.Add(delay)
+	reason := "request-rate backoff"
+	if hintedAt.After(now) {
+		until = hintedAt
+		reason = "request-rate retry hint"
+	}
+	state.ThrottledUntil = until.UTC()
+	state.ThrottleReason = reason
+	return false
+}
+
+func (state *accountHealthState) clearThrottle() {
+	state.ThrottledUntil = time.Time{}
+	state.ThrottleStreak = 0
+	state.ThrottleReason = ""
 }
 
 func (state accountHealthState) persisted(now time.Time) (persistedHealthState, bool) {
@@ -106,6 +155,9 @@ func (state accountHealthState) assess(item account, now time.Time) accountHealt
 			resetAt = time.Time{}
 		}
 		return accountHealth{Status: healthExhausted, Reason: reason, ResetAt: resetAt}
+	}
+	if state.ThrottledUntil.After(now) {
+		return accountHealth{Status: healthThrottled, Reason: state.ThrottleReason, ResetAt: state.ThrottledUntil}
 	}
 	return accountHealth{Status: healthHealthy}
 }

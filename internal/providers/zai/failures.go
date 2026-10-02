@@ -16,7 +16,31 @@ const (
 	maxFailureBodyBytes = 16 << 10
 	maxResetHintLength  = 256
 	maxResetHintFuture  = 8 * 24 * time.Hour
+
+	// Request-rate backoff for Z.ai's transient 429 business codes. The ladder
+	// is 5s, 10s, 20s, 40s, 60s (never above the configured fallback); a sixth
+	// consecutive transient 429 with no success in between is treated as
+	// sustained and takes the conservative fallback cooldown instead.
+	requestRateBackoffBase  = 5 * time.Second
+	requestRateBackoffCap   = time.Minute
+	requestRateMaxThrottles = 5
+	// A streak older than this, with no 429 since its last throttle expired,
+	// starts again from the first step even if no success was observed.
+	requestRateStreakDecay = 5 * time.Minute
 )
+
+// transientRateLimitCodes are the Z.ai business codes documented as
+// request-rate limits rather than allowance exhaustion
+// (https://docs.z.ai/api-reference/api-code): 1302 "Rate limit reached for
+// requests" and 1305 "The service may be temporarily overloaded". Every other
+// 429 — quota windows (1308, 1310, 1316-1321), plan expiry (1309), fair-use
+// limiting (1313), an unrecognized code or no code at all — keeps the
+// conservative exhaustion path, because the plugin cannot tell it apart from
+// a spent allowance.
+var transientRateLimitCodes = map[string]struct{}{
+	"1302": {},
+	"1305": {},
+}
 
 var resetHeaderNames = []string{
 	"Retry-After",
@@ -42,6 +66,50 @@ func rateLimitReset(now time.Time, state accountHealthState, fallback time.Durat
 		return state.CapacityResetAt, "authoritative quota reset"
 	}
 	return now.Add(fallback), "conservative rate-limit cooldown"
+}
+
+func requestRateBackoff(streak int, fallback time.Duration) time.Duration {
+	delay := requestRateBackoffBase
+	for step := 1; step < streak && delay < requestRateBackoffCap; step++ {
+		delay *= 2
+	}
+	delay = min(delay, requestRateBackoffCap)
+	if fallback > 0 {
+		delay = min(delay, fallback)
+	}
+	return delay
+}
+
+// transientRateLimit reports whether a 429 carries one of Z.ai's documented
+// request-rate business codes in the documented top-level shape
+// {"error":{"code":"1302","message":"..."}}. The body is bounded and parsed
+// strictly; anything else is not transient.
+func transientRateLimit(record pluginapi.UsageRecord) bool {
+	body := record.Failure.Body
+	if record.Failure.StatusCode != http.StatusTooManyRequests || len(body) == 0 || len(body) > maxFailureBodyBytes {
+		return false
+	}
+	decoder := json.NewDecoder(strings.NewReader(body))
+	decoder.UseNumber()
+	var envelope struct {
+		Error struct {
+			Code any `json:"code"`
+		} `json:"error"`
+	}
+	if err := decoder.Decode(&envelope); err != nil || securestore.EnsureJSONEOF(decoder) != nil {
+		return false
+	}
+	var code string
+	switch typed := envelope.Error.Code.(type) {
+	case string:
+		code = strings.TrimSpace(typed)
+	case json.Number:
+		code = typed.String()
+	default:
+		return false
+	}
+	_, transient := transientRateLimitCodes[code]
+	return transient
 }
 
 func parseRateLimitHint(record pluginapi.UsageRecord, now time.Time) (time.Time, string, bool) {

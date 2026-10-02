@@ -304,11 +304,33 @@ func (r *pluginRuntime) handleUsage(record pluginapi.UsageRecord) error {
 		case 401, 403:
 			health.suspendUntil(now.Add(r.snapshot.Config.SuspendDuration))
 		case 429:
-			if !hasResetHint {
-				resetAt, resetReason = rateLimitReset(now, health, r.snapshot.Config.FallbackCooldown)
+			// A documented request-rate code with no long reset hint, on an
+			// account that still has allowance, backs off only this account
+			// so CPA retries a sibling and pick does not report the whole lane
+			// lost. A long hint, a sustained streak, or any other 429 keeps the
+			// conservative exhaustion path.
+			escalate := true
+			if transientRateLimit(record) && !health.CapacityExhausted && (!hasResetHint || !resetAt.After(now.Add(requestRateBackoffCap))) {
+				hintedAt := time.Time{}
+				if hasResetHint {
+					hintedAt = resetAt
+				}
+				escalate = health.throttle(now, hintedAt, r.snapshot.Config.FallbackCooldown)
+				if escalate {
+					hasResetHint = false
+				}
 			}
-			health.exhaustUntil(resetAt, resetReason)
+			if escalate {
+				if !hasResetHint {
+					resetAt, resetReason = rateLimitReset(now, health, r.snapshot.Config.FallbackCooldown)
+				}
+				health.exhaustUntil(resetAt, resetReason)
+			}
 		}
+		r.snapshot.Health[identity] = health
+	} else if health.ThrottleStreak > 0 && !health.ThrottledUntil.After(now) {
+		// A served request after the backoff expired ends the streak.
+		health.clearThrottle()
 		r.snapshot.Health[identity] = health
 	}
 	if r.snapshot.Quota == nil || r.snapshot.Store == nil {

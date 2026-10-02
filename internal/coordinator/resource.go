@@ -271,7 +271,7 @@ func clampPercent(percent float64) float64 {
 
 func healthClass(health string) string {
 	switch health {
-	case "healthy", "exhausted", "suspended", "disabled":
+	case "healthy", "throttled", "exhausted", "suspended", "disabled":
 		return health
 	default:
 		return "unknown"
@@ -321,6 +321,7 @@ h1{font-size:24px;margin:0}
 .provider{color:#aaa;font-size:12px}
 .health{margin-left:auto;font-size:11px;padding:2px 8px;border-radius:999px;text-transform:uppercase}
 .health.healthy{background:#173d1e;color:#7be495}
+.health.throttled{background:#3d3a17;color:#e8dc7b}
 .health.exhausted{background:#4a1c1c;color:#ff8a8a}
 .health.suspended{background:#4a3a1c;color:#ffd27a}
 .health.disabled{background:#333;color:#999}
