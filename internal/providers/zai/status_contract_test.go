@@ -184,7 +184,7 @@ func TestStatusContractExpiryReleaseAndOtherHealth(t *testing.T) {
 			}
 		})
 	}
-	for _, kind := range []string{"suspension", "quota", "disabled"} {
+	for _, kind := range []string{"suspension", "quota", "disabled", "request_rate_throttle"} {
 		t.Run(kind, func(t *testing.T) {
 			r, accounts, now := statusContractFixture(t)
 			item := accounts[0]
@@ -197,6 +197,8 @@ func TestStatusContractExpiryReleaseAndOtherHealth(t *testing.T) {
 				r.snapshot.Quota[item.Identity] = state
 			case "disabled":
 				r.snapshot.Accounts[0].Disabled = true
+			case "request_rate_throttle":
+				mustHandleUsage(t, r, pluginapi.UsageRecord{AuthID: item.ClaudeAuthID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `{"error":{"code":"1302","message":"Rate limit reached for requests"}}`}})
 			}
 			got, err := consumeStatusCooldowns(serializedModuleStatus(t, r), map[string]bool{item.Identity: true}, now, time.Minute)
 			if err != nil || got[item.Identity].Active {

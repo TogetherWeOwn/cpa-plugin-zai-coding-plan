@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- `providers.zai`: a single Z.ai request-rate 429 (business code `1302` "Rate limit reached for requests", or `1305` "temporarily overloaded") no longer collapses the whole Z.ai lane. Before, it put the account into the 10-minute conservative cooldown. On a one-account pool the next pick then returned the `zai_no_capacity` 500, and the model router quarantined the lane for 15 minutes on that message. Now the 429 throttles only that account with a bounded backoff (5s doubling to 60s, never above `fallback-cooldown`, or a bounded hint of at most 60s), and CPA retries on a healthy sibling. When every account is only throttled, pick returns the retryable `zai_rate_limited` error with `http_status: 429` instead of a 500. A sixth consecutive step, any other 429 code, a long reset hint, or a spent allowance keeps the existing conservative cooldown, and `zai_no_capacity` remains the answer once every account is hard-impaired. Throttles show as `health: "throttled"` and are not exported as a status-contract `cooldown`. (TOG-12741)
+
 ### Added
 
 - Z.ai authenticated management status now exports the existing account pseudonym and a redacted transient-429 cooldown projection through the actual status DTO. The consumer contract defines explicit inactive state, generation freshness, closed reason provenance, and identity-only joins. OpenCode Go quota resets remain unsupported as cooldown evidence; no collector, routing, or deployment changes are included.

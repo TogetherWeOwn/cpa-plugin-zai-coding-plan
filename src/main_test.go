@@ -114,6 +114,55 @@ func TestSchedulerPickDeclinesUnmanagedTraffic(t *testing.T) {
 	}
 }
 
+// TestSchedulerPickRateLimitedEnvelopeKeepsHTTP429 pins the wire shape CPA
+// turns into the client status: an envelope error with http_status set becomes
+// that status, and one without becomes a 500. A request-rate throttle on every
+// managed account must therefore reach the host as a retryable 429, not as the
+// zai_no_capacity 500 the model router quarantines the whole lane on.
+func TestSchedulerPickRateLimitedEnvelopeKeepsHTTP429(t *testing.T) {
+	previous := runtimeState
+	defer func() { runtimeState = previous }()
+
+	root := t.TempDir()
+	authDir := filepath.Join(root, "auth")
+	configPath := filepath.Join(root, "config.yaml")
+	writeSrcCPAConfigFixture(t, configPath, authDir, "test-only-scheduler-key")
+
+	c := coordinator.New(zai.NewModule())
+	rawConfig := []byte("cpa-config-path: " + configPath + "\nproviders:\n  zai:\n    default-plan: pro\n")
+	if err := c.Reconfigure(rawConfig); err != nil {
+		t.Fatalf("Reconfigure() error = %v", err)
+	}
+	runtimeState = c
+
+	authIDs := c.OwnedAuthIDs("zai")
+	if len(authIDs) == 0 {
+		t.Fatal("zai module reported no owned auth ids")
+	}
+	candidates := make([]pluginapi.SchedulerAuthCandidate, 0, len(authIDs))
+	for _, authID := range authIDs {
+		if err := c.HandleUsage(pluginapi.UsageRecord{AuthID: authID, Failed: true, Failure: pluginapi.UsageFailure{StatusCode: http.StatusTooManyRequests, Body: `{"error":{"code":"1302","message":"Rate limit reached for requests"}}`}}); err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, pluginapi.SchedulerAuthCandidate{ID: authID, Attributes: map[string]string{"base_url": "https://api.z.ai/api/anthropic"}})
+	}
+	request, err := json.Marshal(pluginapi.SchedulerPickRequest{Candidates: candidates})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := schedulerPick(request); err == nil {
+		t.Fatal("schedulerPick() succeeded with every managed account throttled")
+	} else {
+		var wire envelope
+		if err := json.Unmarshal(errorEnvelopeFor(err), &wire); err != nil {
+			t.Fatal(err)
+		}
+		if wire.OK || wire.Error == nil || wire.Error.Code != "zai_rate_limited" || !wire.Error.Retryable || wire.Error.HTTPStatus != http.StatusTooManyRequests {
+			t.Fatalf("envelope = %#v, want retryable zai_rate_limited with http_status 429", wire.Error)
+		}
+	}
+}
+
 // managementRoutesWire mirrors the JSON shape of the coordinator's
 // (unexported) managementRoutesBody, since only its JSON tags, not the type
 // itself, are part of the ABI contract this package relies on.

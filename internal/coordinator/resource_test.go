@@ -142,3 +142,19 @@ func TestResourceStatusResponseRendersEmptyStateWhenNoAccountsConfigured(t *test
 		t.Fatalf("resource page missing empty state: %s", resp.Body)
 	}
 }
+
+func TestHealthClassAllowlistsThrottled(t *testing.T) {
+	for health, want := range map[string]string{
+		"healthy":                "healthy",
+		"throttled":              "throttled",
+		"exhausted":              "exhausted",
+		"suspended":              "suspended",
+		"disabled":               "disabled",
+		"throttled\" onload=\"x": "unknown",
+		"":                       "unknown",
+	} {
+		if got := healthClass(health); got != want {
+			t.Fatalf("healthClass(%q) = %q, want %q", health, got, want)
+		}
+	}
+}

@@ -118,7 +118,7 @@ plugins:
 | `authoritative-max-age` | `5m` | Maximum age before authoritative data becomes stale; must exceed maximum polling jitter. |
 | `threshold-percent` | `97` | Either quota bucket reaching this percentage exhausts the account. |
 | `suspend-duration` | `30m` | Conservative block after `401` or `403`. |
-| `fallback-cooldown` | `10m` | Block after `429` when no trustworthy reset time is available. |
+| `fallback-cooldown` | `10m` | Block after `429` when no trustworthy reset time is available. Z.ai request-rate 429s (codes `1302`/`1305`) first back off only the affected account for 5–60s, never longer than this value, and take this cooldown only once a sixth consecutive backoff step is needed. |
 | `state-retention` | `8d` | Local estimator and deduplication retention; must exceed one week. |
 | `default-plan` | none | Optional `lite`, `pro`, or `max` fallback plan. |
 | `accounts` | `[]` | Required suffix selectors with optional names, plan overrides, custom buckets, and administrative disable state. |

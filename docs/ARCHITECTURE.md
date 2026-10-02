@@ -347,6 +347,7 @@ Persist fallback state with a same-directory temporary write, file `fsync`, rena
 Shared account health values:
 
 - `healthy` — valid, enabled, under both thresholds, no active upstream block;
+- `throttled` — short per-account request-rate backoff after a documented transient Z.ai 429 (business code `1302` or `1305`); impaired for scheduling, but not a capacity loss;
 - `exhausted` — local threshold reached or 429 block active;
 - `suspended` — 401/403 block active;
 - `disabled` — administratively disabled;
@@ -358,10 +359,11 @@ Shared account health values:
 | Either authoritative bucket reaches threshold | Exhaust until its returned reset or a successful refresh below threshold. |
 | Quota endpoint unavailable | Retain bounded fresh data, then use the clearly labelled local estimator. |
 | Either fallback estimate reaches threshold | Exhaust until the fallback rolling sum falls below threshold. |
-| HTTP 429 | Exhaust; parse bounded reset hints or use fallback cooldown. |
+| HTTP 429 with Z.ai code `1302`/`1305`, allowance not spent, no hint over 60s | Throttle only that account: 5s, 10s, 20s, 40s, 60s (never above `fallback-cooldown`), or a bounded hint of at most 60s. 429s that land while the throttle is active belong to the same burst and never advance the step. A success after expiry, or 5 minutes without a 429, resets the ladder. A sixth consecutive step takes the conservative fallback cooldown instead. |
+| Any other HTTP 429 | Exhaust; parse bounded reset hints or use fallback cooldown. |
 | HTTP 401/403 | Suspend for configured duration. |
 | Window/timer expiry | Recompute and clear automatically. |
-| Management unblock | Clear transient flags and recompute retained quota/usage; never erase consumption. |
+| Management unblock | Clear transient flags (including a request-rate throttle) and recompute retained quota/usage; never erase consumption. |
 | Key rotation | Preserve state only for the same hashed identity. |
 
 A real 429 overrides a lower estimate. Repeated failures extend, never shorten, an active block. Treat reset hints as untrusted: bound body/header lengths, reject malformed/past/unreasonably distant values, and expose the chosen reason/reset.
@@ -386,7 +388,7 @@ For the zai module's own `Pick`, called only once the coordinator has establishe
 3. If no managed account is impaired, return `Handled:true, DelegateBuiltin:"round-robin"`; CPA retains native round-robin/session affinity through the explicit SDK delegate.
 4. In degraded state, discard every candidate belonging to an impaired account, including its sibling credential.
 5. Round-robin among healthy candidates per provider/model, preserving header-derived stickiness when possible (`X-Session-ID`, `Session-Id`, `Session_id`, `X-Client-Request-Id`). Return the selected `AuthID` with `Handled:true`.
-6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a non-retryable scheduler error such as `zai_no_capacity`. In v7.2.67, returning `Handled:false` falls back to built-in selection and is forbidden on this path.
+6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a scheduler error; `Handled:false` would fall back to built-in selection in v7.2.67 and is forbidden on this path. When at least one of those accounts is only `throttled`, the error is the retryable `zai_rate_limited` with `http_status: 429`, which CPA forwards as a 429 so the client retries in seconds. Otherwise it is the non-retryable `zai_no_capacity` (HTTP 500). The `zai_rate_limited` message must never contain "no healthy managed ... capacity remains": the model router quarantines the whole lane for 15 minutes on that phrase. CPA already retries a request on another credential after an upstream failure, so while any sibling account is healthy the throttled account is simply skipped.
 7. If the request contains no recognized Z.ai candidate, return `Handled:false` (so the coordinator's invariant 2 branch is unreachable here — Recognize already filtered this module out).
 
 The scheduler performs no disk, network, or host callback while holding its lock. Contract tests assert the all-impaired module error propagates through the coordinator and `pluginhost.PickAuth` with `handled=true` and cannot fall back to a known-bad credential.

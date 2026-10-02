@@ -302,6 +302,7 @@ func (r *pluginRuntime) unblock(accountName string) error {
 		health := r.snapshot.Health[identity]
 		health.ExhaustedUntil = time.Time{}
 		health.ExhaustedReason = ""
+		health.clearThrottle()
 		r.snapshot.Health[identity] = health
 		r.refreshCapacityLocked(identity, now)
 	}

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -100,11 +101,23 @@ func (r *pluginRuntime) pick(req pluginapi.SchedulerPickRequest) (pluginapi.Sche
 	}
 
 	healthy := make([]pluginapi.SchedulerAuthCandidate, 0, managedCount-impairedCount)
+	var throttledUntil time.Time
 	for _, candidate := range req.Candidates {
 		identity := r.snapshot.byAuthID[strings.TrimSpace(candidate.ID)]
-		if identity != "" && r.snapshot.Health[identity].assess(r.snapshot.byIdentity[identity], now).Status == healthHealthy {
-			healthy = append(healthy, candidate)
+		if identity == "" {
+			continue
 		}
+		switch health := r.snapshot.Health[identity].assess(r.snapshot.byIdentity[identity], now); health.Status {
+		case healthHealthy:
+			healthy = append(healthy, candidate)
+		case healthThrottled:
+			if throttledUntil.IsZero() || health.ResetAt.Before(throttledUntil) {
+				throttledUntil = health.ResetAt
+			}
+		}
+	}
+	if len(healthy) == 0 && !throttledUntil.IsZero() {
+		return pluginapi.SchedulerPickResponse{}, newRateLimitedError(throttledUntil.Sub(now))
 	}
 	if len(healthy) == 0 {
 		return pluginapi.SchedulerPickResponse{}, newSchedulerError("zai_no_capacity", "no healthy managed Z.ai capacity remains")
