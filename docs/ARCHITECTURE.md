@@ -561,3 +561,4 @@ The repository and reference plugin are MIT-licensed. Preserve required notices 
 1. Capture a redacted real quota response fixture and verify the five-hour/weekly unit mapping and utilization scale against the live endpoint.
 2. Capture redacted real `pluginapi.UsageRecord` fixtures to validate input/cache field overlap and model aliases for fallback accounting. Pricing is already bound to `CacheReadTokens` and `CacheCreationTokens`, never generic `CachedTokens`.
 3. Capture real redacted Z.ai 429/reset variants.
+
