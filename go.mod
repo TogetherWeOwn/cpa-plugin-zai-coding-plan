@@ -53,3 +53,5 @@ require (
 	google.golang.org/protobuf v1.34.1 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
+
+// probe: dependency manifest change must run the full suite
