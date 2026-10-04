@@ -25,8 +25,8 @@ const (
 	pluginID                     = "subscription-pool"
 	libraryName                  = pluginID + ".so"
 	hostImageRepository          = "eceasy/cli-proxy-api"
-	baselineHostImageTag         = "v7.2.67"
-	baselineHostImageAMD64Digest = "sha256:49a249ba0cb867d2e70ef90f23d5fa8b6e2d04bf6c73d9e666e8eee8c353b606"
+	baselineHostImageTag         = "v7.2.150"
+	baselineHostImageAMD64Digest = "sha256:dca10d258e7d83e7cbec21e1ba2919d416857ca83d40198abfd18b1e6558cdcd"
 )
 
 var versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$`)
@@ -321,7 +321,7 @@ func validateHostImagePin(root string) error {
 		return fmt.Errorf("parse host image matrix: %w", err)
 	}
 	if matrix.Repository != hostImageRepository || matrix.Platform != "linux/amd64" || matrix.Baseline.Tag != baselineHostImageTag || matrix.Baseline.ManifestDigest != baselineHostImageAMD64Digest {
-		return errors.New("host image matrix does not preserve the approved v7.2.67 linux/amd64 baseline")
+		return errors.New("host image matrix does not preserve the approved v7.2.150 linux/amd64 baseline")
 	}
 	deployedRaw, err := os.ReadFile(filepath.Join(root, "deploy", "deployed-host-image.json"))
 	if err != nil {

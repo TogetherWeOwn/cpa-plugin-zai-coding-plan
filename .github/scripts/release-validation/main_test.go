@@ -148,7 +148,7 @@ func TestValidateHostImagePinRejectsDigestDrift(t *testing.T) {
 	if err := os.WriteFile(path, raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateHostImagePin(root); err == nil || !strings.Contains(err.Error(), "approved v7.2.67") {
+	if err := validateHostImagePin(root); err == nil || !strings.Contains(err.Error(), "approved v7.2.150") {
 		t.Fatalf("validateHostImagePin() error = %v, want digest mismatch", err)
 	}
 }

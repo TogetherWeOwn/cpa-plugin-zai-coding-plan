@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- CLIProxyAPI SDK `v7.2.67` -> `v7.2.154` and approved baseline host `v7.2.67` -> `v7.2.150` (TOG-7425): the deferred bump re-fires on plugin-relevant patches in the unevaluated v7.2.152-159 window (`00c63a56` pluginhost HTTP wire profile, session-affinity/interceptor/quota plugin capabilities, schema 5->6 at v7.2.155) with SDK `SchemaVersion` 1 -> 5. ABI stays 1; v7.2.67 hosts accept only schema 1 and can no longer load this plugin. Dependabot now suppresses schema-6 patches (7.2.155-159) until the baseline moves past schema 5.
+
 ## [0.4.5] - 2026-10-02
 
 ### Fixed
