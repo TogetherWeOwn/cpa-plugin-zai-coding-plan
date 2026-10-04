@@ -49,7 +49,10 @@ jobs:
             exit 0
           fi
           merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
-          files="$(git diff --name-only "$merge_base" "$HEAD_SHA")"
+          # --no-renames: with rename detection on, a moved file lists only its
+          # destination, so `git mv CHANGELOG.md docs/CHANGELOG.md` would look
+          # docs-only and hide the deleted source path from the filter below.
+          files="$(git diff --name-only --no-renames "$merge_base" "$HEAD_SHA")"
           echo "changed files:"
           echo "$files"
           docs_only=true

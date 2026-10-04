@@ -11,9 +11,11 @@ permissions:
   contents: read
 
 # Not `github.workflow`: in a called workflow that is the caller's name, so the
-# group would collide with the caller's own and cancel the run.
+# group would collide with the caller's own and cancel the run. The event name
+# (the caller's, when called) keeps a manual dispatch on the same ref from
+# cancelling the host-compat job of a running CI run.
 concurrency:
-  group: host-compatibility-${{ github.ref }}
+  group: host-compatibility-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
