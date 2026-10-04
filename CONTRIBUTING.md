@@ -49,6 +49,8 @@ make package VERSION=0.1.0
 
 CI also runs race tests, validates the exported `cliproxy_plugin_init` symbol, checks archive contents and release metadata, scans for likely secrets, and checks required license/notices.
 
+Docs-only pull requests (only `docs/**` or Markdown files, excluding `CHANGELOG.md`, `deploy/README.md` and anything under `.github/`) skip the Quality, build and host-compatibility jobs. The secret scan and `pr-lint` always run, and the `ci-ok` check aggregates everything. Any other change, including `go.mod`, `go.sum`, `Makefile` and workflow edits, runs the full suite, as does every push to `main` and the nightly run.
+
 ## Review requirements
 
 Every change needs a review bound to the exact head SHA. Changes touching credentials, quota authorization, local persistence, management routes, or release trust require a separate exact-SHA security review.

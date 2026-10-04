@@ -1,18 +1,21 @@
 name: Host compatibility
 
+# Pull requests, pushes to main and the nightly run reach this workflow through
+# the `host-compat` job in ci.yml, so `ci-ok` covers them. Manual dispatch stays
+# available for an on-demand run against the live host images.
 on:
-  push:
-    branches: [main]
-  pull_request:
-  schedule:
-    - cron: "17 7 * * *"
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# Not `github.workflow`: in a called workflow that is the caller's name, so the
+# group would collide with the caller's own and cancel the run. The event name
+# (the caller's, when called) keeps a manual dispatch on the same ref from
+# cancelling the host-compat job of a running CI run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: host-compatibility-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
