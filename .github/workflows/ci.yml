@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Nightly full run: catches drift (latest host image, dependency updates)
+  # and anything a docs-only PR skip could have hidden. Scheduled runs always
+  # run everything; the `changes` job only narrows pull_request events.
+  schedule:
+    - cron: "17 7 * * *"
 
 permissions:
   contents: read
@@ -13,8 +18,75 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Change detection: native `git diff --name-only` against the merge base, no
+  # third-party action. Docs-only pull requests skip the heavy jobs below while
+  # `ci-ok` stays green. Everything else (Go code, go.mod/go.sum, Makefile,
+  # .github/** including this filter, LICENSE/NOTICE, release inputs) runs the
+  # full suite. push, schedule and every other event always run everything.
+  changes:
+    name: Change detection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.detect.outputs.docs_only }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect docs-only change
+        id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "$EVENT event: full run"
+            exit 0
+          fi
+          merge_base="$(git merge-base "$BASE_SHA" "$HEAD_SHA")"
+          files="$(git diff --name-only "$merge_base" "$HEAD_SHA")"
+          echo "changed files:"
+          echo "$files"
+          docs_only=true
+          if [ -z "$files" ]; then
+            docs_only=false
+          fi
+          while IFS= read -r file; do
+            [ -n "$file" ] || continue
+            case "$file" in
+              # Never docs: CI config and the filter itself, plus the two
+              # markdown files that release validation reads (CHANGELOG.md
+              # heading and link, deploy/README.md placeholders).
+              .github/*|CHANGELOG.md|deploy/README.md) docs_only=false ;;
+              docs/*|*.md) ;;
+              *) docs_only=false ;;
+            esac
+          done <<< "$files"
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+  # Always runs: a secret scan must never be skipped by change gating. It is
+  # the former gitleaks step of the Quality job, moved out unchanged.
+  secret-scan:
+    name: secret-scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Scan repository with gitleaks
+        run: make scan-secrets
   quality:
     name: Quality
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -37,8 +109,6 @@ jobs:
         run: make test-release
       - name: Validate release source
         run: make validate-source
-      - name: Scan repository with gitleaks
-        run: make scan-secrets
       - name: Lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
@@ -46,6 +116,8 @@ jobs:
 
   build:
     name: Linux amd64 shared library
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
     runs-on: ubuntu-24.04
     steps:
       - name: Check out repository
@@ -71,3 +143,48 @@ jobs:
           test "$(unzip -Z1 "$archive")" = "subscription-pool.so"
           cmp "$library" <(unzip -p "$archive" subscription-pool.so)
           make validate-release VERSION=0.4.5 TAG=v0.4.5
+
+  # Host image compatibility matrix, shared with the standalone workflow so it
+  # lives in one place and is covered by `ci-ok`.
+  host-compat:
+    name: Host compatibility
+    needs: [changes]
+    if: needs.changes.outputs.docs_only != 'true'
+    uses: ./.github/workflows/host-compatibility.yml
+    permissions:
+      contents: read
+
+  # The single required check. Branch protection requires only `ci-ok` (plus
+  # pr-lint and secret-scan): jobs skipped by change gating count as success,
+  # while a failed, cancelled or never-run `changes` job fails it. Every job
+  # above must be listed in `needs`.
+  ci-ok:
+    name: ci-ok
+    needs: [changes, secret-scan, quality, build, host-compat]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Aggregate job results
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          SECRET_SCAN: ${{ needs.secret-scan.result }}
+          QUALITY: ${{ needs.quality.result }}
+          BUILD: ${{ needs.build.result }}
+          HOST_COMPAT: ${{ needs.host-compat.result }}
+        run: |
+          set -euo pipefail
+          status=0
+          for pair in "changes=$CHANGES" "secret-scan=$SECRET_SCAN" "quality=$QUALITY" "build=$BUILD" "host-compat=$HOST_COMPAT"; do
+            name="${pair%%=*}"
+            result="${pair#*=}"
+            case "$name:$result" in
+              changes:success|secret-scan:success) ;;
+              quality:success|quality:skipped|build:success|build:skipped|host-compat:success|host-compat:skipped) ;;
+              *)
+                echo "::error::$name finished as $result"
+                status=1
+                ;;
+            esac
+          done
+          exit "$status"
