@@ -15,10 +15,10 @@ The plugin does not proxy inference, rewrite requests, or mint credentials. The 
 
 ## Exact CLIProxyAPI plugin contract
 
-The baseline is CLIProxyAPI v7.2.67, using the SDK's native c-shared/dlopen plugin pattern:
+The baseline is CLIProxyAPI v7.2.150, using the SDK's native c-shared/dlopen plugin pattern:
 
 ```go
-require github.com/router-for-me/CLIProxyAPI/v7 v7.2.67
+require github.com/router-for-me/CLIProxyAPI/v7 v7.2.154
 ```
 
 ```go
@@ -28,11 +28,11 @@ import (
 )
 ```
 
-The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork, so a version label alone is not proof of compatibility. Release requires the compatibility smoke against the exact operator-reported linux/amd64 manifest in `deploy/deployed-host-image.json` and the latest Docker Hub tag resolved to an immutable manifest at CI time; `.github/host-images.json` retains the historical v7.2.67 baseline.
+The deployed `eceasy/cli-proxy-api` v7.2.x image is a fork, so a version label alone is not proof of compatibility. Release requires the compatibility smoke against the exact operator-reported linux/amd64 manifest in `deploy/deployed-host-image.json` and the latest Docker Hub tag resolved to an immutable manifest at CI time; `.github/host-images.json` retains the schema-5-capable v7.2.150 baseline (moved from v7.2.67 under TOG-7425; a v7.2.67 host accepts only plugin schema 1 and cannot load this plugin).
 
 ### C ABI
 
-On Linux, the v7.2.67 host uses `dlopen(path, RTLD_NOW | RTLD_LOCAL)`, resolves exactly `cliproxy_plugin_init` with `dlsym`, and calls it using this ABI:
+On Linux, the v7.2.150 host uses `dlopen(path, RTLD_NOW | RTLD_LOCAL)`, resolves exactly `cliproxy_plugin_init` with `dlsym`, and calls it using this ABI:
 
 ```c
 typedef struct {
@@ -87,7 +87,7 @@ int cliproxy_plugin_init(
 );
 ```
 
-Initialization returns `0`, stores the host callback table, and fills all plugin callback fields. Both sides require `abi_version == pluginabi.ABIVersion`, which is `1` in v7.2.67. Registration uses `pluginabi.SchemaVersion`, also `1`. A buffer is freed by the side that allocated it, through that side's `free_buffer` callback.
+Initialization returns `0`, stores the host callback table, and fills all plugin callback fields. Both sides require `abi_version == pluginabi.ABIVersion`, which is `1` from v7.2.67 through v7.2.159. Registration uses `pluginabi.SchemaVersion`, which is `5` in the v7.2.154 SDK against the v7.2.150 baseline host. A buffer is freed by the side that allocated it, through that side's `free_buffer` callback.
 
 Build with Go 1.26, `CGO_ENABLED=1`, Linux/amd64, and `-buildmode=c-shared`.
 
@@ -255,7 +255,7 @@ Published plan buckets:
 | Pro | 12,000 | 60,000 |
 | Max | 28,000 | 140,000 |
 
-Reject the complete initial registration on invalid account cardinality, ambiguous suffixes, duplicate names, invalid durations, or non-positive buckets. An invalid reconfiguration retains the last valid internal snapshot and records a bounded redacted validation error, but returns an `invalid_config` RPC envelope; CPA v7.2.67 consequently removes the plugin from the rebuilt capability snapshot rather than serving a falsely valid registration. The exact-image integration test verifies that valid configuration registers and that invalid live configuration withdraws scheduler capability. An invalid initial registration does not advertise scheduler capability.
+Reject the complete initial registration on invalid account cardinality, ambiguous suffixes, duplicate names, invalid durations, or non-positive buckets. An invalid reconfiguration retains the last valid internal snapshot and records a bounded redacted validation error, but returns an `invalid_config` RPC envelope; CPA v7.2.150 consequently removes the plugin from the rebuilt capability snapshot rather than serving a falsely valid registration. The exact-image integration test verifies that valid configuration registers and that invalid live configuration withdraws scheduler capability. An invalid initial registration does not advertise scheduler capability.
 
 ## Identity and pairing
 
@@ -270,7 +270,7 @@ Each logical account contains:
 
 `byAuthID` maps both CPA credentials to the same account. A usage record or failure on either protocol updates one ledger and one health state. Key rotation creates a new identity, so the replacement key does not inherit stale blocks or usage.
 
-The stable auth-ID implementation must reproduce host iteration order and duplicate counters. Contract tests compare it with v7.2.67 fixtures and the deployed eceasy image.
+The stable auth-ID implementation must reproduce host iteration order and duplicate counters. Contract tests compare it with v7.2.150 fixtures and the deployed eceasy image.
 
 ## Quota and fallback credit accounting
 
@@ -315,7 +315,7 @@ Token rules:
 
 - bind published cached-input pricing to `UsageDetail.CacheReadTokens` only;
 - bind cache writes to `UsageDetail.CacheCreationTokens` and charge them at the normal input rate unless Z.ai documents a separate rate;
-- never use generic `UsageDetail.CachedTokens` for pricing because the v7.2.67 Claude usage helper can substitute cache-creation tokens into that field when it is zero;
+- never use generic `UsageDetail.CachedTokens` for pricing because the v7.2.150 Claude usage helper (`parseClaudeUsageNode`) can substitute cache-creation tokens into that field when it is zero;
 - subtract `CacheReadTokens` from `InputTokens` only when a redacted real fixture proves that CPA's input count includes cache reads; otherwise treat the fields as disjoint and fail the contract test rather than double-subtracting;
 - a failed request with no usage adds no estimated credits; and
 - a failure that includes usage is accounted on best effort.
@@ -370,7 +370,7 @@ A real 429 overrides a lower estimate. Repeated failures extend, never shorten, 
 
 ## Scheduler
 
-CPA v7.2.67 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `subscription-pool`. Startup/dogfood validation inspects the configured and registered capability set and refuses the lane if any second scheduler is enabled or if this plugin is not first. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
+CPA v7.2.150 invokes only the first active scheduler plugin, ordered by descending `plugins.configs.<id>.priority` and then ascending plugin ID. Quota enforcement is therefore a deployment invariant, not composable middleware: v0.1 supports exactly one enabled scheduler plugin, `subscription-pool`. Startup/dogfood validation inspects the configured and registered capability set and refuses the lane if any second scheduler is enabled or if this plugin is not first. `priority: 1000` is required as defense in depth, but exclusivity is the safety property. CI fixtures cover a lower-priority competitor, a higher-priority competitor, and an equal-priority ID tie; every non-exclusive configuration must fail closed before traffic is admitted.
 
 The coordinator, not any individual provider module, holds this single scheduler slot and dispatches every `scheduler.pick`/`usage.handle` call across its hosted modules under six invariants:
 
@@ -388,7 +388,7 @@ For the zai module's own `Pick`, called only once the coordinator has establishe
 3. If no managed account is impaired, return `Handled:true, DelegateBuiltin:"round-robin"`; CPA retains native round-robin/session affinity through the explicit SDK delegate.
 4. In degraded state, discard every candidate belonging to an impaired account, including its sibling credential.
 5. Round-robin among healthy candidates per provider/model, preserving header-derived stickiness when possible (`X-Session-ID`, `Session-Id`, `Session_id`, `X-Client-Request-Id`). Return the selected `AuthID` with `Handled:true`.
-6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a scheduler error; `Handled:false` would fall back to built-in selection in v7.2.67 and is forbidden on this path. When at least one of those accounts is only `throttled`, the error is the retryable `zai_rate_limited` with `http_status: 429`, which CPA forwards as a 429 so the client retries in seconds. Otherwise it is the non-retryable `zai_no_capacity` (HTTP 500). The `zai_rate_limited` message must never contain "no healthy managed ... capacity remains": the model router quarantines the whole lane for 15 minutes on that phrase. CPA already retries a request on another credential after an upstream failure, so while any sibling account is healthy the throttled account is simply skipped.
+6. If the request contains managed Z.ai candidates but no healthy managed candidate remains, return a scheduler error; `Handled:false` would fall back to built-in selection in v7.2.150 and is forbidden on this path. When at least one of those accounts is only `throttled`, the error is the retryable `zai_rate_limited` with `http_status: 429`, which CPA forwards as a 429 so the client retries in seconds. Otherwise it is the non-retryable `zai_no_capacity` (HTTP 500). The `zai_rate_limited` message must never contain "no healthy managed ... capacity remains": the model router quarantines the whole lane for 15 minutes on that phrase. CPA already retries a request on another credential after an upstream failure, so while any sibling account is healthy the throttled account is simply skipped.
 7. If the request contains no recognized Z.ai candidate, return `Handled:false` (so the coordinator's invariant 2 branch is unreachable here — Recognize already filtered this module out).
 
 The scheduler performs no disk, network, or host callback while holding its lock. Contract tests assert the all-impaired module error propagates through the coordinator and `pluginhost.PickAuth` with `handled=true` and cannot fall back to a known-bad credential.
@@ -487,7 +487,7 @@ Z.ai keys, CPA management authentication, usage/account state, local ledger inte
 | Unauthenticated quota/account disclosure | Data only on CPA management-key routes. Integration-test unauthorized/authorized HTTP behavior. Resource shell has no data. |
 | Local disclosure | `0700` directory, `0600` files, unprivileged CPA user, no secrets in filenames. |
 | Ledger tampering creates false capacity | Validate schema, non-negative bounded values, model/rate IDs, timestamps, sizes. Corruption causes conservative degraded state. Unblock never deletes usage. |
-| ABI mismatch crashes CPA | Pin v7.2.67 SDK, inspect exported symbol, then load-test exact eceasy image digest. |
+| ABI mismatch crashes CPA | Pin v7.2.154 SDK, inspect exported symbol, then load-test exact eceasy image digest. |
 | Malicious reset hints deny service | Allowlist fields, cap lengths/future duration, reject malformed/past values. |
 | Usage replay double charges | Persist a bounded heuristic hash of stable non-secret fields; surface collision/replay limitations through `dedup_mode` and integrity warnings. |
 | Concurrency race/deadlock | No host callback or I/O under state mutex; run `go test -race`. |
@@ -544,7 +544,7 @@ Coordinator/dispatch coverage (`internal/coordinator`):
 ABI/integration coverage:
 
 - Go 1.26 CGO `.so` build and exported symbol;
-- upstream v7.2.67 load baseline;
+- upstream v7.2.150 load baseline;
 - exact deployed eceasy image load;
 - paired-account synthetic usage/failure flow;
 - management-key enforcement; and

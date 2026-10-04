@@ -3,7 +3,7 @@ package coordinator
 import "testing"
 
 // TestParseCoordinatorConfigAcceptsHostInjectedFields pins the actual host
-// contract: pluginhost's normalizedConfigNode (both v7.2.67 and v7.2.157)
+// contract: pluginhost's normalizedConfigNode (both v7.2.150 and v7.2.157)
 // always injects enabled/priority scalars into config_yaml before the plugin
 // sees it -- it never strips them. KnownFields(true) must declare and ignore
 // these fields or every real reconfigure call fails with "field enabled not

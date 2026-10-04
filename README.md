@@ -18,12 +18,12 @@ Quota data comes from Z.AI's plan endpoint when available. The token-based credi
 ## Requirements
 
 - Linux amd64
-- CLIProxyAPI v7.2.x with native plugin ABI/schema version 1
+- CLIProxyAPI v7.2.x with native plugin ABI version 1 and plugin schema version 5 (SDK v7.2.154; v7.2.67 hosts accept only schema 1 and cannot load this plugin)
 - exactly one enabled scheduler plugin, with `zai-coding-plan` configured at priority `1000`
 - a Z.AI Coding Plan used through supported coding tools
 - Go 1.26 and a GCC-compatible C toolchain only when building from source
 
-The supported host range is CLIProxyAPI v7.2.67 through the newest `eceasy/cli-proxy-api` v7.2.x tag that passes the compatibility matrix. CI always tests the historical v7.2.67 baseline, the operator-recorded deployed image, and the latest published tag. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the pinned SDK, ABI, scheduler-exclusivity, persistence, and threat-model contracts.
+The supported host range is CLIProxyAPI v7.2.150 through the newest `eceasy/cli-proxy-api` v7.2.x tag that passes the compatibility matrix. CI always tests the v7.2.150 baseline, the operator-recorded deployed image, and the latest published tag. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the pinned SDK, ABI, scheduler-exclusivity, persistence, and threat-model contracts.
 
 ## Install
 
@@ -56,7 +56,7 @@ Restart CLIProxyAPI after changing the native plugin. Confirm registration and a
 The matrix is maintained in three places:
 
 - the operator updates [`deploy/deployed-host-image.json`](deploy/deployed-host-image.json) immediately after a host deployment, recording the exact linux/amd64 manifest digest;
-- [`.github/host-images.json`](.github/host-images.json) keeps the v7.2.67 baseline while that version remains supported;
+- [`.github/host-images.json`](.github/host-images.json) keeps the schema-5-capable v7.2.150 baseline (moved from v7.2.67 under TOG-7425);
 - [`.github/scripts/resolve-host-images.sh`](.github/scripts/resolve-host-images.sh) queries Docker Hub on every run and resolves the highest semantic v7.2.x tag to an immutable linux/amd64 manifest digest.
 
 For every image, CI loads the plugin, checks registration and all three advertised capabilities, sends real requests through the host scheduler, and requires HTTP `200` round trips for `zai/smoke-model` and `zai-openai/smoke-model` against an isolated TLS stub. Any `zai_unmanaged_candidate`, scheduler rejection, missing upstream request, or non-200 response fails the job. [`.github/workflows/host-compatibility.yml`](.github/workflows/host-compatibility.yml) runs this check on pull requests, `main`, manual dispatch, and daily at 07:17 UTC. A failed scheduled run creates a GitHub Actions notification; branch protection should require **Host compatibility / Deployed, latest, and baseline host images** before merge.
@@ -173,7 +173,7 @@ A v0.2.0 tag is created only after all implementation slices are merged and the 
 
 1. green formatting, vet, race-test, lint, build, packaging, secret-scan, and license/notice checks;
 2. machine-checked tag, binary, archive, registry, changelog, and checksum consistency;
-3. the immutable host compatibility matrix green for both release-required rows (the operator-reported deployed digest and the latest Docker Hub tag), with the supported v7.2.67 baseline also exercised; each row must advertise scheduler, usage, and management capabilities, return management `401`/redacted `200`, and serve both prefixed inference paths through a real scheduler pick;
+3. the immutable host compatibility matrix green for both release-required rows (the operator-reported deployed digest and the latest Docker Hub tag), with the supported v7.2.150 baseline also exercised; each row must advertise scheduler, usage, and management capabilities, return management `401`/redacted `200`, and serve both prefixed inference paths through a real scheduler pick;
 4. an exact-SHA code review; and
 5. a separate exact-SHA security review for credential handling and management operations.
 

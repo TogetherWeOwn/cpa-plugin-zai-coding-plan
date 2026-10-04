@@ -103,7 +103,7 @@ func TestManagementRouteEndToEnd(t *testing.T) {
 		t.Fatalf("status route = %#v, want GET %s", route, managementStatusPath)
 	}
 
-	// normalizeManagementRoute (identical in v7.2.67 and v7.2.151): a leading
+	// normalizeManagementRoute (identical in v7.2.150 and v7.2.151): a leading
 	// /v0/management/ prefix is trimmed, then re-prefixed, yielding the
 	// canonical key the host registers and dispatches.
 	dispatchPath := normalizeManagementRouteForTest(t, route.Path)
