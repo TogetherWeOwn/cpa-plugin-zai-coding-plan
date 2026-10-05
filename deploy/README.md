@@ -10,6 +10,89 @@ This directory records the exact non-secret inputs and checks for the Z.ai lane 
 
 The release operator bundle is the source of truth for the exact commit, registry digest, compatibility evidence, live verifier, rollback script, and per-file modes. Verify its manifest and `checksums.txt` before using any command below.
 
+### Current-host Docker acceptance (v0.4.5 packet)
+
+The live host is a Docker stack, not systemd: host config
+`/home/ubuntu/stacks/cliproxy/config.yaml` is bind-mounted to
+`/CLIProxyAPI/config.yaml`, and the live plugin directory is
+`/home/ubuntu/stacks/cliproxy/plugins/linux/amd64/`. OmniRoute is retired and
+the historical model-usage dashboard endpoint is retired; do not restart
+either, recreate `cliproxy.service`, or change host ownership to satisfy an
+old recipe. The host's usage-snapshot service is the sole quota poller and
+feed writer; verifiers run snapshot-only and never invoke collectors against
+live feeds.
+
+```sh
+set -euo pipefail
+umask 077
+# Credential source: the established host file holds CLIPROXY_MGMT_KEY.
+# Extract only that variable into a root-only temp key file, in process;
+# never print it, export it, or copy it to a new lasting file.
+management_key_file=$(mktemp)
+trap 'rm -f "$management_key_file"' EXIT
+python3 - /home/ubuntu/secure-drop/cliproxy.env "$management_key_file" <<'PY'
+import pathlib, shlex, sys
+value = None
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        continue
+    key, _, raw = line.partition("=")
+    if key.strip() == "CLIPROXY_MGMT_KEY":
+        parts = shlex.split(raw.strip(), posix=True)
+        value = parts[0] if parts else ""
+        break
+if not value:
+    raise SystemExit("CLIPROXY_MGMT_KEY not found in established credential source")
+path = pathlib.Path(sys.argv[2])
+path.write_text(value + "\n")
+path.chmod(0o600)
+PY
+plan_key_file=<existing host Z.ai plan-key file>
+# Discover the running container name on the host; record it, do not guess.
+docker ps --format '{{.Names}} {{.Image}}' | grep -i cliproxy
+container=<cliproxy-container-from-docker-ps>
+usage_dir=/srv/cliproxy-usage
+CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
+ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
+CLIPROXY_USAGE_DIR="$usage_dir" \
+CLIPROXY_CONTAINER="$container" \
+CLIPROXY_SNAPSHOT_ONLY=1 \
+  ./verify-live.sh
+```
+
+The Go lane needs `OPENCODE_GO_DASHBOARD_API_KEY_FILE` only when the lane is
+provisioned. When the host has no bound Go dashboard credential, pass
+`OPENCODE_GO_ALLOW_UNBOUND=1` with `CLIPROXY_SNAPSHOT_ONLY=1`; the verifier
+then records `UNAVAILABLE (no bound dashboard credential; unchanged, not a
+v0.4.5 regression)` after the same confidential-value scans, and never
+fabricates capacity. Do not create accounts, copy new credentials, or change
+lane policy to manufacture a PASS.
+
+Rollback on this host preserves the existing v7-layout config and ownership
+(no chown): set `CLIPROXY_CONFIG` (default
+`/home/ubuntu/stacks/cliproxy/config.yaml`),
+`CLIPROXY_CONFIG_UID`/`CLIPROXY_CONFIG_GID` to the actual config owner when it
+is not root, and `CLIPROXY_CONTAINER` so the service reload becomes
+`docker restart`. The usage-output cleanup targets the fixed feed path only
+when the usage directory exists.
+
+Status-shape note: v0.4.5 emits `identity` and `cooldown` on every Z.ai
+account (see `docs/STATUS-CONTRACT.md`) plus an optional `five_hour_error`.
+The collector and both live verifiers accept exactly that shape with strict
+64-hex identity, closed-vocabulary cooldown, and unchanged secret scans; older
+script copies reject live v0.4.5 status and must not be used for acceptance.
+
+Compatibility note: v0.4.5 builds against SDK v7.2.67 (ABI 1, schema 1),
+identical to the live v0.4.4, with no new RPC surface; the v0.4.4 library is
+loaded and serving on the current patched host image today. Release CI passed
+the exact-image matrix on stock v7.2.151 (deployed evidence), v8.0.13
+(latest), and v7.2.67 (baseline). The patched
+`v8.0.12-tog.3-musereplay` host image itself was never in CI; that is an
+evidence gap, not proof of incompatibility. The bounded host preflight is the
+management plugin-list registration check plus authenticated status on the new
+library, with no inference probe.
+
 ### Release preflight
 
 ```sh
@@ -52,9 +135,10 @@ The operator card must substitute the deployment's real container/config paths, 
 set -euo pipefail
 umask 077
 repo=/home/ubuntu/cpa-plugin-zai-coding-plan
-config=/home/ubuntu/cliproxy/config.yaml
+config=/home/ubuntu/stacks/cliproxy/config.yaml
 management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 plan_key_file=/home/ubuntu/secure-drop/zai-coding-plan.key
+container=<cliproxy-container-from-docker-ps>
 backup="${config}.pre-zai-$(date -u +%Y%m%dT%H%M%SZ)"
 cp -a "$config" "$backup"
 curl_config=$(mktemp)
@@ -105,9 +189,9 @@ finally:
     os.close(directory_fd)
 PY
 test "$(stat -c %a "$config")" = 600
-systemctl reload cliproxy.service || systemctl restart cliproxy.service
+docker restart "$container"
 
-# After config reload exposes the custom source, install the exact release. Keep the
+# After the container reload exposes the custom source, install the exact release. Keep the
 # response body in a root-only bounded file so an error page never reaches operator output.
 install_response=$(mktemp)
 install_error=$(mktemp)
@@ -156,12 +240,12 @@ test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
 CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
 ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
 CLIPROXY_USAGE_DIR="$usage_dir" \
-CLIPROXY_DASHBOARD_URL=http://127.0.0.1:3000/api/telemetry/model-usage/zai \
-CLIPROXY_SERVICE_UNIT=cliproxy.service \
+CLIPROXY_CONTAINER="$container" \
+CLIPROXY_SNAPSHOT_ONLY=1 \
   "$repo/deploy/verify-live.sh"
 ```
 
-The plugin-store response must report `id=subscription-pool`, `version=0.4.5`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names, writes sanitized `/srv/cliproxy-usage/zai.json`, and performs bounded projected-output, dashboard, and service-log scans for both management-key and plan-key markers without printing matches.
+The plugin-store response must report `id=subscription-pool`, `version=0.4.5`, `install_type=github-release`, and a versioned `linux/amd64` path. The host installer verifies the release `checksums.txt`; `deploy/verify-live.sh` then proves authenticated status field names (including the v0.4.5 `identity`/`cooldown` shape), reads the snapshot service's sanitized `/srv/cliproxy-usage/zai.json` with a freshness bound, and performs bounded projected-output and Docker service-log scans for both management-key and plan-key markers without printing matches. The historical dashboard fetch runs only when `CLIPROXY_DASHBOARD_URL` is explicitly set; the retired endpoint is skipped by default.
 
 `router-capacity-source.json` is the exact Model Router capacity-source shape for one opaque Z.ai model ID. Repeat it per model ID and retain `unknownTelemetry: fail-open` during dogfood. The operator dispatcher already maps `zai/*`, `zai-openai/*`, and `glm*` to lane `zai`; the live check is a dry-run selection with the Z.ai model enabled, followed by one bounded canary issue. Do not re-pin an issue mid-run.
 
@@ -181,11 +265,12 @@ usage_dir=/srv/cliproxy-usage
 CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
 OPENCODE_GO_DASHBOARD_API_KEY_FILE=/home/ubuntu/secure-drop/opencode-go-dashboard.key \
 CLIPROXY_USAGE_DIR="$usage_dir" \
-CLIPROXY_SERVICE_UNIT=cliproxy.service \
+CLIPROXY_CONTAINER="$container" \
+CLIPROXY_SNAPSHOT_ONLY=1 \
   "$repo/deploy/verify-live-opencodego.sh"
 ```
 
-`deploy/verify-live-opencodego.sh` is the near-direct adaptation of `deploy/verify-live.sh` for this lane: it proves the same unauthenticated-401/authenticated-200 shape against the coordinator's aggregate route, validates the outer coordinator envelope loosely and the inner `providers["opencode-go"]` object strictly, invokes the collector, and performs bounded projected-output and service-log confidential-value scans for both the management key and the OpenCode Go dashboard API key markers without printing matches. It has no dashboard-fetch step, since this lane has no separate telemetry dashboard endpoint analogous to `CLIPROXY_DASHBOARD_URL`.
+`deploy/verify-live-opencodego.sh` is the near-direct adaptation of `deploy/verify-live.sh` for this lane: it proves the same unauthenticated-401/authenticated-200 shape against the coordinator's aggregate route, validates the outer coordinator envelope loosely and the inner `providers["opencode-go"]` object strictly, reads the snapshot service's feed with a freshness bound in snapshot-only mode, and performs bounded projected-output and Docker service-log confidential-value scans for both the management key and the OpenCode Go dashboard API key markers without printing matches. It has no dashboard-fetch step. When the lane has no bound dashboard credential, `OPENCODE_GO_ALLOW_UNBOUND=1` records an explicit `UNAVAILABLE` disposition instead of manufacturing a PASS; the strict default still requires bound usable capacity.
 
 ## Rollback
 
@@ -193,8 +278,8 @@ CLIPROXY_SERVICE_UNIT=cliproxy.service \
 set -euo pipefail
 umask 077
 repo=/home/ubuntu/cpa-plugin-zai-coding-plan
-config=/home/ubuntu/cliproxy/config.yaml
-backup=/home/ubuntu/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
+config=/home/ubuntu/stacks/cliproxy/config.yaml
+backup=/home/ubuntu/stacks/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
 test -f "$backup" && test ! -L "$backup"
 test "$(stat -c %a "$backup")" = 600
 config_dir=$(dirname "$config")
@@ -254,11 +339,14 @@ else
   fi
   printf 'management unavailable; configuration restore remains recoverable; plugin cleanup is pending (response body suppressed)\n' >&2
 fi
-systemctl reload cliproxy.service || systemctl restart cliproxy.service
-python3 "$repo/deploy/remove-usage-output.py"
+CLIPROXY_CONTAINER="$container" CLIPROXY_CONFIG="$config" CLIPROXY_BACKUP="$backup" \
+CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
+  "$repo/deploy/rollback.sh"
 ```
 
-The rollback is complete only after the restored configuration has been loaded by the running service. If reload is unsupported or fails, the command above restarts the existing CLIProxy service rather than leaving the pre-rollback snapshot active.
+`deploy/rollback.sh` defaults to the current-host Docker layout (`CLIPROXY_CONFIG=/home/ubuntu/stacks/cliproxy/config.yaml`, `docker restart "$CLIPROXY_CONTAINER"`); `CLIPROXY_RESTART_COMMAND` overrides the restart, `CLIPROXY_CONFIG_UID`/`CLIPROXY_CONFIG_GID` declare the actual config owner when it is not root (ownership is verified, never changed), and the legacy `systemctl` path remains only when neither Docker knob is set. The usage-output cleanup targets the fixed feed path only when the usage directory exists.
+
+The rollback is complete only after the restored configuration has been loaded by the running service container.
 
 ## Evidence and redaction
 

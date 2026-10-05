@@ -2,10 +2,19 @@
 set -euo pipefail
 
 : "${CLIPROXY_MANAGEMENT_URL:=http://127.0.0.1:8317}"
-: "${CLIPROXY_CONFIG:=/home/ubuntu/cliproxy/config.yaml}"
+: "${CLIPROXY_CONFIG:=/home/ubuntu/stacks/cliproxy/config.yaml}"
 : "${CLIPROXY_BACKUP:?set CLIPROXY_BACKUP to the recorded pre-install backup}"
 : "${CLIPROXY_MANAGEMENT_KEY_FILE:?set CLIPROXY_MANAGEMENT_KEY_FILE to a root-readable 0600 file}"
 : "${CLIPROXY_USAGE_DIR:=/srv/cliproxy-usage}"
+# Expected config ownership without changing it: the rollback never chowns.
+# Keep the root default; the operator sets both to the host's actual owner
+# (for example the stack owner's uid/gid) when the layout is not root-owned.
+: "${CLIPROXY_CONFIG_UID:=0}"
+: "${CLIPROXY_CONFIG_GID:=0}"
+# Docker-native service reload: an explicit command wins, then
+# `docker restart` of CLIPROXY_CONTAINER, then the legacy systemd unit.
+: "${CLIPROXY_CONTAINER:=}"
+: "${CLIPROXY_RESTART_COMMAND:=}"
 
 umask 077
 management_url="${CLIPROXY_MANAGEMENT_URL%/}/v0/management/plugins/subscription-pool"
@@ -33,21 +42,43 @@ if parsed.path != "/v0/management/plugins/subscription-pool" or origin(removal) 
     raise SystemExit("management plugin removal URL is not approved")
 PY
 
+case "$CLIPROXY_CONFIG_UID" in
+  "" | *[!0-9]* )
+    printf '%s\n' 'CLIPROXY_CONFIG_UID and CLIPROXY_CONFIG_GID must be numeric uids' >&2
+    exit 1
+    ;;
+esac
+case "$CLIPROXY_CONFIG_GID" in
+  "" | *[!0-9]* )
+    printf '%s\n' 'CLIPROXY_CONFIG_UID and CLIPROXY_CONFIG_GID must be numeric uids' >&2
+    exit 1
+    ;;
+esac
+case "$CLIPROXY_CONTAINER" in
+  "" ) ;;
+  *[!A-Za-z0-9_.-]* | .* | -*)
+    printf '%s\n' 'CLIPROXY_CONTAINER is not a valid Docker container name' >&2
+    exit 1
+    ;;
+esac
+
 config_dir=$(dirname -- "$CLIPROXY_CONFIG")
 test -d "$config_dir" && test ! -L "$config_dir"
-test "$(stat -c '%u:%g:%a' -- "$config_dir")" = '0:0:700' || {
-  printf '%s\n' 'config directory must be root-owned with mode 0700' >&2
+test "$(stat -c '%u:%g:%a' -- "$config_dir")" = "$CLIPROXY_CONFIG_UID:$CLIPROXY_CONFIG_GID:700" || {
+  printf '%s\n' 'config directory must be owned by CLIPROXY_CONFIG_UID:CLIPROXY_CONFIG_GID with mode 0700' >&2
   exit 1
 }
 test -f "$CLIPROXY_BACKUP" && test ! -L "$CLIPROXY_BACKUP"
-test "$(stat -c '%u:%a' -- "$CLIPROXY_BACKUP")" = '0:600' || {
-  printf '%s\n' 'rollback backup must be root-owned with mode 0600' >&2
+test "$(stat -c '%u:%a' -- "$CLIPROXY_BACKUP")" = "$CLIPROXY_CONFIG_UID:600" || {
+  printf '%s\n' 'rollback backup must be owned by CLIPROXY_CONFIG_UID with mode 0600' >&2
   exit 1
 }
 
 restored=
 curl_config=
-cleanup() { rm -f -- "$restored" "$curl_config"; }
+delete_response=
+delete_error=
+cleanup() { rm -f -- "$restored" "$curl_config" "$delete_response" "$delete_error"; }
 trap cleanup EXIT
 
 # Validate the management key and build the curl config BEFORE replacing the live
@@ -82,13 +113,25 @@ PY
 mv -T -- "$restored" "$CLIPROXY_CONFIG"
 restored=
 
-if curl -q --fail --fail-early --max-redirs 0 --silent --show-error --connect-timeout 2 --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' --config "$curl_config" -X DELETE "$management_url" >/dev/null; then
+delete_response=$(mktemp)
+delete_error=$(mktemp)
+if curl -q --fail --fail-early --max-redirs 0 --silent --show-error --connect-timeout 2 --max-time 5 --max-filesize 1048576 --noproxy '*' --proxy '' --config "$curl_config" --output "$delete_response" --stderr "$delete_error" -X DELETE "$management_url" >/dev/null; then
   printf '%s\n' 'management-plane plugin removal PASS'
 else
-  printf '%s\n' 'management unavailable; configuration restore completed, plugin cleanup remains pending' >&2
+  printf '%s\n' 'management unavailable; configuration restore completed, plugin cleanup remains pending (response body suppressed)' >&2
+  if grep -Eq '^curl: \([0-9]+\) [[:print:]]{0,240}$' "$delete_error"; then
+    tr -d '\r\n' <"$delete_error" >&2
+    printf '\n' >&2
+  fi
 fi
-systemctl reload cliproxy.service || systemctl restart cliproxy.service
-if test -f "$(dirname "$0")/remove-usage-output.py"; then
+if test -n "$CLIPROXY_RESTART_COMMAND"; then
+  bash -c "$CLIPROXY_RESTART_COMMAND"
+elif test -n "$CLIPROXY_CONTAINER"; then
+  docker restart "$CLIPROXY_CONTAINER" >/dev/null
+else
+  systemctl reload cliproxy.service || systemctl restart cliproxy.service
+fi
+if test -d "$CLIPROXY_USAGE_DIR" && test -f "$(dirname "$0")/remove-usage-output.py"; then
   python3 "$(dirname "$0")/remove-usage-output.py" "$CLIPROXY_USAGE_DIR"
 fi
 printf '%s\n' 'rollback: restored configuration and reloaded service'

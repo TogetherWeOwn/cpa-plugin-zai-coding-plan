@@ -25,7 +25,72 @@ class CollectorZaiTest(unittest.TestCase):
         out = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
         self.assertEqual(out["lane"], "zai")
         self.assertEqual(out["records"][0]["quota_source"], "quota_api")
-        self.assertEqual(set(out["records"][0]), collector.EXPECTED_ACCOUNT_FIELDS - {"quota_error"})
+        self.assertEqual(
+            set(out["records"][0]),
+            collector.EXPECTED_ACCOUNT_FIELDS - collector.OPTIONAL_ACCOUNT_FIELDS,
+        )
+        self.assertEqual(
+            out["records"][0]["identity"],
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        self.assertEqual(
+            out["records"][0]["cooldown"],
+            {"active": False, "until": None, "reason": "",
+             "source": "zai_runtime_health_v1"},
+        )
+
+    def test_projects_active_cooldown_and_five_hour_error(self):
+        value = self.fixture("status-fallback.json")
+        value["accounts"][0]["five_hour_error"] = "five-hour window weeks out of range"
+        value["accounts"][0]["cooldown"] = {
+            "active": True,
+            "until": "2026-09-10T15:02:00Z",
+            "reason": "retry_after",
+            "source": "zai_runtime_health_v1",
+        }
+        out = collector.project(value, "2026-09-10T15:00:00Z")
+        self.assertEqual(out["records"][0]["five_hour_error"], "five-hour window weeks out of range")
+        self.assertEqual(out["records"][0]["cooldown"]["active"], True)
+        self.assertEqual(out["records"][0]["cooldown"]["reason"], "retry_after")
+
+    def test_rejects_bad_identity_and_cooldown_shapes(self):
+        cases = (
+            ("identity", "not-hex"),
+            ("identity", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            ("identity", "aa"),
+            ("cooldown", {"active": True, "until": None, "reason": "retry_after",
+                          "source": "zai_runtime_health_v1"}),
+            ("cooldown", {"active": False, "until": "2026-09-10T15:02:00Z", "reason": "",
+                          "source": "zai_runtime_health_v1"}),
+            ("cooldown", {"active": False, "until": None, "reason": "retry_after",
+                          "source": "zai_runtime_health_v1"}),
+            ("cooldown", {"active": True, "until": "2026-09-10T15:02:00Z", "reason": "made_up",
+                          "source": "zai_runtime_health_v1"}),
+            ("cooldown", {"active": True, "until": "2026-09-10T15:02:00Z", "reason": "retry_after",
+                          "source": "other_source"}),
+            ("cooldown", {"active": True, "until": "not-a-timestamp", "reason": "retry_after",
+                          "source": "zai_runtime_health_v1"}),
+            ("cooldown", {"active": "yes", "until": None, "reason": "",
+                          "source": "zai_runtime_health_v1"}),
+        )
+        for field, bad in cases:
+            with self.subTest(field=field, bad=bad):
+                status = self.fixture("status-authoritative.json")
+                status["accounts"][0][field] = bad
+                with self.assertRaises(ValueError):
+                    collector.project(status, "2026-09-10T15:00:00Z")
+
+    def test_rejects_duplicate_identities_and_marker_in_identity(self):
+        status = self.fixture("status-authoritative.json")
+        twin = dict(status["accounts"][0])
+        twin["name"] = "zai-pro-2"
+        status["accounts"].append(twin)
+        with self.assertRaisesRegex(ValueError, "unique"):
+            collector.project(status, "2026-09-10T15:00:00Z")
+        status = self.fixture("status-authoritative.json")
+        status["accounts"][0]["identity"] = "aa" * 31 + "00"
+        with self.assertRaises(ValueError):
+            collector.project(status, "2026-09-10T15:00:00Z", ("aa" * 31 + "00",))
 
     def test_reconfigure_rejected_marks_all_capacity_unavailable(self):
         value = self.fixture("status-authoritative.json")
@@ -103,13 +168,23 @@ class CollectorZaiTest(unittest.TestCase):
                 collector.project(status, "2026-09-10T15:00:00Z", ("fixture-plan-marker",))
 
     def test_rejects_secret_like_fields_and_nonredacted_suffix(self):
-        for field in ("api_key", "authorization", "credential", "key_hash", "identity"):
+        for field in ("api_key", "authorization", "credential", "key_hash", "dashboard_api_key"):
             value = self.fixture("status-authoritative.json")
             value["accounts"][0][field] = "fixture-secret"
             with self.subTest(field=field), self.assertRaises(ValueError):
                 collector.project(value, "2026-09-10T15:00:00Z")
         value = self.fixture("status-authoritative.json")
         value["accounts"][0]["key_suffix"] = "last-four"
+        with self.assertRaises(ValueError):
+            collector.project(value, "2026-09-10T15:00:00Z")
+
+    def test_identity_is_validated_not_forbidden(self):
+        # identity is a known pseudonym field (STATUS-CONTRACT.md): a valid
+        # shape projects, while a secret-shaped value fails closed.
+        out = collector.project(self.fixture("status-authoritative.json"), "2026-09-10T15:00:00Z")
+        self.assertIn("identity", out["records"][0])
+        value = self.fixture("status-authoritative.json")
+        value["accounts"][0]["identity"] = "not-a-pseudonym"
         with self.assertRaises(ValueError):
             collector.project(value, "2026-09-10T15:00:00Z")
 

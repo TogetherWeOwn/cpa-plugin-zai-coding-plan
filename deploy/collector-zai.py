@@ -19,6 +19,8 @@ from typing import Any, NoReturn
 REQUIRED_STATUS_FIELDS = {"plugin", "status", "version", "generated_at", "accounts"}
 EXPECTED_STATUS_FIELDS = REQUIRED_STATUS_FIELDS | {"validation_error"}
 EXPECTED_ACCOUNT_FIELDS = {
+    "identity",
+    "cooldown",
     "name",
     "key_suffix",
     "plan",
@@ -31,6 +33,7 @@ EXPECTED_ACCOUNT_FIELDS = {
     "quota_age_seconds",
     "quota_stale",
     "quota_error",
+    "five_hour_error",
     "offpeak",
     "health",
     "estimator_complete_since",
@@ -40,6 +43,21 @@ EXPECTED_ACCOUNT_FIELDS = {
     "heuristic_dedup_warning",
     "dedup_mode",
 }
+OPTIONAL_ACCOUNT_FIELDS = {"quota_error", "five_hour_error"}
+# identity and key_suffix are validated pseudonym/display fields, never
+# credentials; every other secret-shaped key name is still forbidden.
+NON_SECRET_FIELD_EXCEPTIONS = {"key_suffix", "identity"}
+COOLDOWN_FIELDS = {"active", "until", "reason", "source"}
+COOLDOWN_SOURCE = "zai_runtime_health_v1"
+COOLDOWN_REASONS = {
+    "retry_after",
+    "reset_header",
+    "reset_body",
+    "quota_reset_fallback",
+    "configured_fallback",
+    "upstream_rate_limit",
+}
+IDENTITY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SECRET_FIELD = re.compile(r"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)", re.I)
 SECRET_VALUE = re.compile(
     r"(?:bearer\s+\S+|(?:api[-_]?key|authorization|credential|secret|token|management[-_]?key|plan[-_]?key)\s*[:=]\s*\S+)",
@@ -57,11 +75,12 @@ STRING_FIELDS = {
     "quota_source",
     "quota_observed_at",
     "quota_error",
+    "five_hour_error",
     "health",
     "estimator_complete_since",
     "dedup_mode",
 }
-NULLABLE_STRING_FIELDS = {"five_hour_resets_at", "weekly_resets_at", "quota_error", "estimator_complete_since"}
+NULLABLE_STRING_FIELDS = {"five_hour_resets_at", "weekly_resets_at", "quota_error", "five_hour_error", "estimator_complete_since"}
 TIMESTAMP_FIELDS = {"five_hour_resets_at", "weekly_resets_at", "quota_observed_at", "estimator_complete_since"}
 BOOLEAN_FIELDS = {
     "quota_stale",
@@ -136,12 +155,51 @@ def require_timestamp(value: Any, field: str, nullable: bool = False) -> str | N
 def validate_no_secret_fields(value: Any, path: str = "status") -> None:
     if isinstance(value, dict):
         for key, child in value.items():
-            if SECRET_FIELD.search(key) and key != "key_suffix":
+            if SECRET_FIELD.search(key) and key not in NON_SECRET_FIELD_EXCEPTIONS:
                 fail(f"secret-like field is forbidden: {path}.{key}")
             validate_no_secret_fields(child, f"{path}.{key}")
     elif isinstance(value, list):
         for index, child in enumerate(value):
             validate_no_secret_fields(child, f"{path}[{index}]")
+
+
+def require_identity(value: Any, secret_markers: tuple[str, ...]) -> str:
+    if not isinstance(value, str) or not IDENTITY_PATTERN.fullmatch(value):
+        fail("identity must be 64 lowercase hex characters")
+    if any(marker and marker in value for marker in secret_markers):
+        fail("identity failed confidential-value scan")
+    return value
+
+
+def validate_cooldown(value: Any, secret_markers: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        fail("cooldown must be an object")
+    unknown = set(value) - COOLDOWN_FIELDS
+    if unknown:
+        fail(f"unexpected cooldown fields: {sorted(unknown)}")
+    missing = COOLDOWN_FIELDS - set(value)
+    if missing:
+        fail(f"missing cooldown fields: {sorted(missing)}")
+    if not isinstance(value["active"], bool):
+        fail("cooldown.active must be a boolean")
+    if value["source"] != COOLDOWN_SOURCE:
+        fail("cooldown.source is unsupported")
+    reason = value["reason"]
+    if not isinstance(reason, str):
+        fail("cooldown.reason must be a string")
+    if len(reason.encode()) > MAX_STRING_BYTES:
+        fail(f"cooldown.reason exceeds {MAX_STRING_BYTES} bytes")
+    if any(marker and marker in reason for marker in secret_markers):
+        fail("cooldown.reason failed confidential-value scan")
+    if value["active"]:
+        if reason not in COOLDOWN_REASONS:
+            fail("cooldown.reason is outside the closed vocabulary")
+        until = require_timestamp(value["until"], "cooldown.until")
+    else:
+        if value["until"] is not None or reason != "":
+            fail("inactive cooldown must carry until null and an empty reason")
+        until = None
+    return {"active": value["active"], "until": until, "reason": reason, "source": COOLDOWN_SOURCE}
 
 
 def validate_account(account: Any, secret_markers: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -150,7 +208,7 @@ def validate_account(account: Any, secret_markers: tuple[str, ...] = ()) -> dict
     unknown = set(account) - EXPECTED_ACCOUNT_FIELDS
     if unknown:
         fail(f"unexpected account fields: {sorted(unknown)}")
-    required = EXPECTED_ACCOUNT_FIELDS - {"quota_error"}
+    required = EXPECTED_ACCOUNT_FIELDS - OPTIONAL_ACCOUNT_FIELDS
     missing = required - set(account)
     if missing:
         fail(f"missing account fields: {sorted(missing)}")
@@ -161,8 +219,10 @@ def validate_account(account: Any, secret_markers: tuple[str, ...] = ()) -> dict
     if account["health"] not in ALLOWED_HEALTH:
         fail("health is invalid")
     projected: dict[str, Any] = {}
+    projected["identity"] = require_identity(account["identity"], secret_markers)
+    projected["cooldown"] = validate_cooldown(account["cooldown"], secret_markers)
     for key in STRING_FIELDS:
-        if key == "quota_error" and key not in account:
+        if key in OPTIONAL_ACCOUNT_FIELDS and key not in account:
             continue
         if key in TIMESTAMP_FIELDS:
             projected[key] = require_timestamp(account[key], key, key in NULLABLE_STRING_FIELDS)
@@ -200,6 +260,8 @@ def project(status: Any, observed_at: str, secret_markers: tuple[str, ...] = ())
     if len(accounts) > MAX_ACCOUNTS:
         fail(f"status contains more than {MAX_ACCOUNTS} accounts")
     projected_accounts = [validate_account(account, secret_markers) for account in accounts]
+    if len({account["identity"] for account in projected_accounts}) != len(projected_accounts):
+        fail("account identities must be unique")
     if status["status"] == "reconfigure_rejected":
         for account in projected_accounts:
             account["health"] = "config_error"

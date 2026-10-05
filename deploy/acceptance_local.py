@@ -45,10 +45,18 @@ def main() -> int:
             filesystem_root=root,
         )
         raw = (output_dir / "zai.json").read_text()
-        if any(value in raw for value in FORBIDDEN_VALUES) or FORBIDDEN_FIELDS.search(raw):
+        if any(value in raw for value in FORBIDDEN_VALUES):
             raise SystemExit("projected collector output contains a forbidden secret marker")
         decoded = json.loads(raw)
-        if decoded["lane"] != "zai" or decoded["records"][0]["key_suffix"] != "redacted":
+        record = decoded["records"][0]
+        if not re.fullmatch(r"[0-9a-f]{64}", record.get("identity", "")):
+            raise SystemExit("projected collector output has an invalid account identity")
+        if not isinstance(record.get("cooldown"), dict):
+            raise SystemExit("projected collector output is missing the account cooldown")
+        scrubbed = re.sub(r'"identity"\s*:\s*"[0-9a-f]{64}"', '"account_pseudonym":"<validated>"', raw)
+        if FORBIDDEN_FIELDS.search(scrubbed):
+            raise SystemExit("projected collector output contains a forbidden secret marker")
+        if decoded["lane"] != "zai" or record["key_suffix"] != "redacted":
             raise SystemExit("projected collector output failed lane/redaction checks")
     print("dogfood-local: paired 401/403/429 + threshold exclusion, healthy native round-robin, collector field contract, and redaction PASS")
     return 0
