@@ -3,8 +3,25 @@ set -euo pipefail
 
 : "${CLIPROXY_MANAGEMENT_URL:=http://127.0.0.1:8317}"
 : "${CLIPROXY_USAGE_DIR:=/srv/cliproxy-usage}"
-: "${CLIPROXY_MANAGEMENT_KEY_FILE:?set CLIPROXY_MANAGEMENT_KEY_FILE to a root-readable 0600 file}"
-: "${OPENCODE_GO_DASHBOARD_API_KEY_FILE:?set OPENCODE_GO_DASHBOARD_API_KEY_FILE to a root-readable 0600 file}"
+: "${CLIPROXY_MANAGEMENT_KEY_FILE:=}"
+: "${CLIPROXY_MANAGEMENT_KEY:=}"
+: "${OPENCODE_GO_DASHBOARD_API_KEY_FILE:=}"
+: "${OPENCODE_GO_DASHBOARD_API_KEY:=}"
+# Secret intake is file-first, environment-second, both fail-closed (see
+# verify-live.sh). The dashboard input is required except in snapshot-only
+# unbound mode, where no dashboard credential exists to scan for.
+: "${CLIPROXY_SNAPSHOT_ONLY:=}"
+: "${OPENCODE_GO_ALLOW_UNBOUND:=}"
+if test -z "$CLIPROXY_MANAGEMENT_KEY_FILE" && test -z "$CLIPROXY_MANAGEMENT_KEY"; then
+  printf '%s\n' 'set CLIPROXY_MANAGEMENT_KEY_FILE to a 0600 regular file or CLIPROXY_MANAGEMENT_KEY in-process' >&2
+  exit 1
+fi
+if test -z "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" && test -z "$OPENCODE_GO_DASHBOARD_API_KEY"; then
+  if test -z "$CLIPROXY_SNAPSHOT_ONLY" || test -z "$OPENCODE_GO_ALLOW_UNBOUND"; then
+    printf '%s\n' 'set OPENCODE_GO_DASHBOARD_API_KEY_FILE to a 0600 regular file or OPENCODE_GO_DASHBOARD_API_KEY in-process (optional only in snapshot-only unbound mode)' >&2
+    exit 1
+  fi
+fi
 # Docker-native log capture: set CLIPROXY_CONTAINER to capture
 # `docker logs` from the running CLIProxy container, or CLIPROXY_LOG_COMMAND
 # to run an explicit bounded log command. The retired systemd unit path is no
@@ -29,8 +46,21 @@ require_secure_key_file() {
   test ! -L "$path" || { printf '%s\n' "key file must not be a symlink" >&2; exit 1; }
   test "$(stat -c '%a' -- "$path")" = "600" || { printf '%s\n' "key file must have mode 0600" >&2; exit 1; }
 }
-require_secure_key_file "$CLIPROXY_MANAGEMENT_KEY_FILE"
-require_secure_key_file "$OPENCODE_GO_DASHBOARD_API_KEY_FILE"
+if test -n "$CLIPROXY_MANAGEMENT_KEY_FILE"; then
+  require_secure_key_file "$CLIPROXY_MANAGEMENT_KEY_FILE"
+  management_ref="file:$CLIPROXY_MANAGEMENT_KEY_FILE"
+else
+  management_ref="env:CLIPROXY_MANAGEMENT_KEY"
+fi
+if test -n "$OPENCODE_GO_DASHBOARD_API_KEY_FILE"; then
+  require_secure_key_file "$OPENCODE_GO_DASHBOARD_API_KEY_FILE"
+  dashboard_ref="file:$OPENCODE_GO_DASHBOARD_API_KEY_FILE"
+elif test -n "$OPENCODE_GO_DASHBOARD_API_KEY"; then
+  dashboard_ref="env:OPENCODE_GO_DASHBOARD_API_KEY"
+else
+  dashboard_ref=""
+  printf '%s\n' 'dashboard-key marker scan: no dashboard-key input in snapshot-only unbound mode; scanning with the management marker only' >&2
+fi
 
 python3 - "$CLIPROXY_JOURNAL_TIMEOUT" <<'PY'
 import re, sys
@@ -84,16 +114,22 @@ if parsed.path != "/v0/management/plugins/subscription-pool/status" or origin(st
     raise SystemExit("management status URL is not approved")
 PY
 
-python3 - "$CLIPROXY_MANAGEMENT_KEY_FILE" "$curl_config" <<'PY'
-import pathlib, sys
-raw=pathlib.Path(sys.argv[1]).read_bytes()
-lines=raw.splitlines()
-if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
-    raise SystemExit("management key file must contain exactly one non-empty line")
-try:
-    key=lines[0].decode("utf-8")
-except UnicodeDecodeError:
-    raise SystemExit("management key file must contain valid UTF-8")
+python3 - "$management_ref" "$curl_config" <<'PY'
+import os, pathlib, sys
+ref=sys.argv[1]
+if ref.startswith("env:"):
+    key=os.environ.get(ref[4:], "")
+    if not key or key.strip() != key or "\n" in key or "\r" in key:
+        raise SystemExit("management key environment input must contain exactly one non-empty line")
+else:
+    raw=pathlib.Path(ref[5:] if ref.startswith("file:") else ref).read_bytes()
+    lines=raw.splitlines()
+    if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
+        raise SystemExit("management key file must contain exactly one non-empty line")
+    try:
+        key=lines[0].decode("utf-8")
+    except UnicodeDecodeError:
+        raise SystemExit("management key file must contain valid UTF-8")
 path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
@@ -108,8 +144,8 @@ curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   "$status_url" >"$status_file"
 
 lane_file="$work_dir/go-lane"
-python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" "$OPENCODE_GO_ALLOW_UNBOUND" "$lane_file" <<'PY'
-import json, math, pathlib, re, sys
+python3 - "$status_file" "$management_ref" "$dashboard_ref" "$OPENCODE_GO_ALLOW_UNBOUND" "$lane_file" <<'PY'
+import json, math, os, pathlib, re, sys
 allow_unbound=sys.argv[4] != ""
 lane_file=pathlib.Path(sys.argv[5])
 lane_disposition="bound"
@@ -128,8 +164,13 @@ def fail(message):
 def require(condition, message):
     if not condition:
         fail(message)
-def read_secret(path):
-    raw=pathlib.Path(path).read_bytes()
+def read_secret(ref):
+    if ref.startswith("env:"):
+        value=os.environ.get(ref[4:], "")
+        if not value or value.strip() != value or "\n" in value or "\r" in value:
+            fail("secret environment input must contain exactly one non-empty line")
+        return value
+    raw=pathlib.Path(ref[5:] if ref.startswith("file:") else ref).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
         fail("secret input file must contain exactly one non-empty line")
@@ -137,6 +178,8 @@ def read_secret(path):
         return lines[0].decode("utf-8")
     except UnicodeDecodeError:
         fail("secret input file must contain valid UTF-8")
+def read_secret_opt(ref):
+    return read_secret(ref) if ref else None
 def scan_decoded(value, markers):
     if isinstance(value, str):
         if any(marker and marker in value for marker in markers):
@@ -152,9 +195,9 @@ raw=pathlib.Path(sys.argv[1]).read_bytes()
 if len(raw) > 1_048_576:
     fail("authenticated status response exceeds bounded scan size")
 management=read_secret(sys.argv[2])
-dashboard_key=read_secret(sys.argv[3])
-markers=[management, dashboard_key]
-if len(dashboard_key) > 6:
+dashboard_key=read_secret_opt(sys.argv[3])
+markers=[management] + ([dashboard_key] if dashboard_key else [])
+if dashboard_key and len(dashboard_key) > 6:
     markers.append(dashboard_key[-6:])
 if any(marker.encode() in raw for marker in markers):
     fail("authenticated status response failed confidential-value scan")
@@ -230,8 +273,8 @@ else
     >"$log_file"
 fi
 
-python3 - "$CLIPROXY_USAGE_DIR/opencode-go.json" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" "$lane_file" <<'PY'
-import json, pathlib, re, sys
+python3 - "$CLIPROXY_USAGE_DIR/opencode-go.json" "$log_file" "$management_ref" "$dashboard_ref" "$lane_file" <<'PY'
+import json, os, pathlib, re, sys
 from datetime import datetime, timezone
 projected, service_log = map(pathlib.Path, sys.argv[1:3])
 lane_disposition=pathlib.Path(sys.argv[5]).read_text().strip()
@@ -241,8 +284,13 @@ def fail(message):
 def require(condition, message):
     if not condition:
         fail(message)
-def read_secret(path):
-    raw=pathlib.Path(path).read_bytes()
+def read_secret(ref):
+    if ref.startswith("env:"):
+        value=os.environ.get(ref[4:], "")
+        if not value or value.strip() != value or "\n" in value or "\r" in value:
+            fail("secret environment input must contain exactly one non-empty line")
+        return value
+    raw=pathlib.Path(ref[5:] if ref.startswith("file:") else ref).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
         fail("secret input file must contain exactly one non-empty line")
@@ -250,6 +298,8 @@ def read_secret(path):
         return lines[0].decode("utf-8")
     except UnicodeDecodeError:
         fail("secret input file must contain valid UTF-8")
+def read_secret_opt(ref):
+    return read_secret(ref) if ref else None
 def load_json(path):
     try:
         return json.loads(path.read_bytes(), parse_constant=lambda _: fail(f"{path.name} contains a non-RFC JSON value"))
@@ -267,9 +317,9 @@ def scan_decoded(value, markers, label):
         for child in value:
             scan_decoded(child, markers, label)
 management=read_secret(sys.argv[3])
-dashboard_key=read_secret(sys.argv[4])
-markers=[management, dashboard_key]
-if len(dashboard_key) > 6:
+dashboard_key=read_secret_opt(sys.argv[4])
+markers=[management] + ([dashboard_key] if dashboard_key else [])
+if dashboard_key and len(dashboard_key) > 6:
     markers.append(dashboard_key[-6:])
 for path in (projected, service_log):
     raw = path.read_bytes()
@@ -279,7 +329,12 @@ for path in (projected, service_log):
         fail(f"{path.name} failed confidential-value scan")
 payload=load_json(projected)
 scan_decoded(payload, markers, projected.name)
-if require_disposition:
+snapshot_only=bool(os.environ.get("CLIPROXY_SNAPSHOT_ONLY"))
+snapshot_service_feed=snapshot_only and isinstance(payload, dict) and "lane" not in payload
+if snapshot_service_feed:
+    require(set(payload) == {"observedAt","records","schemaVersion","staleAfterSeconds"}, "snapshot feed has an unexpected envelope: the existing snapshot service writes only observedAt/records/schemaVersion/staleAfterSeconds")
+    require(isinstance(payload["records"], list) and bool(payload["records"]) and all(isinstance(record, dict) for record in payload["records"]), "snapshot feed has no records")
+elif require_disposition:
     require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="opencode-go" and isinstance(payload.get("records"), list), "projected collector payload has an invalid schema")
 else:
     require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="opencode-go" and isinstance(payload.get("records"), list) and bool(payload["records"]), "projected collector payload has an invalid schema")
@@ -294,7 +349,12 @@ require(observed_at <= now, "projected collector payload is dated in the future"
 require((now - observed_at).total_seconds() <= payload["staleAfterSeconds"], "projected collector payload is stale: snapshot service is not refreshing the feed")
 serialized=json.dumps(payload, allow_nan=False)
 require(not re.search(r'"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)"\s*:', serialized, re.I), "projected collector payload contains a secret-like field")
-if require_disposition:
+# Snapshot-service feeds carry no credential_bound field; the lane disposition
+# was already decided from live coordinator status above, so there is nothing
+# to agree against here. Collector-written feeds still prove agreement below.
+if snapshot_service_feed:
+    pass
+elif require_disposition:
     require(payload.get("credential_bound") is False, "projected collector payload disagrees with the unavailable lane disposition")
 else:
     require(payload.get("credential_bound") is True, "projected collector payload reports no bound dashboard credential")

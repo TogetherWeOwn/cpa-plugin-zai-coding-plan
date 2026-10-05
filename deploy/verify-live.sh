@@ -3,8 +3,24 @@ set -euo pipefail
 
 : "${CLIPROXY_MANAGEMENT_URL:=http://127.0.0.1:8317}"
 : "${CLIPROXY_USAGE_DIR:=/srv/cliproxy-usage}"
-: "${CLIPROXY_MANAGEMENT_KEY_FILE:?set CLIPROXY_MANAGEMENT_KEY_FILE to a root-readable 0600 file}"
-: "${ZAI_CODING_PLAN_KEY_FILE:?set ZAI_CODING_PLAN_KEY_FILE to a root-readable 0600 file}"
+: "${CLIPROXY_MANAGEMENT_KEY_FILE:=}"
+: "${CLIPROXY_MANAGEMENT_KEY:=}"
+: "${ZAI_CODING_PLAN_KEY_FILE:=}"
+: "${ZAI_CODING_PLAN_KEY:=}"
+# Secret intake is file-first, environment-second, both fail-closed. Key files
+# stay the default; on hosts where no standalone key file exists, the operator
+# sources the established credential file in-process and passes the value
+# through the environment (never a new file on disk). Refs below are
+# `file:<path>` or `env:<VAR>`; every consumer validates the value identically.
+: "${CLIPROXY_SNAPSHOT_ONLY:=}"
+if test -z "$CLIPROXY_MANAGEMENT_KEY_FILE" && test -z "$CLIPROXY_MANAGEMENT_KEY"; then
+  printf '%s\n' 'set CLIPROXY_MANAGEMENT_KEY_FILE to a 0600 regular file or CLIPROXY_MANAGEMENT_KEY in-process' >&2
+  exit 1
+fi
+if test -z "$ZAI_CODING_PLAN_KEY_FILE" && test -z "$ZAI_CODING_PLAN_KEY" && test -z "$CLIPROXY_SNAPSHOT_ONLY"; then
+  printf '%s\n' 'set ZAI_CODING_PLAN_KEY_FILE to a 0600 regular file or ZAI_CODING_PLAN_KEY in-process (optional only in snapshot-only mode)' >&2
+  exit 1
+fi
 # The historical model-usage dashboard endpoint is retired; leave this empty
 # (the default) to skip the dashboard step. Set it only when a live dashboard
 # URL is explicitly in scope for the host under test.
@@ -30,8 +46,21 @@ require_secure_key_file() {
   test ! -L "$path" || { printf '%s\n' "key file must not be a symlink" >&2; exit 1; }
   test "$(stat -c '%a' -- "$path")" = "600" || { printf '%s\n' "key file must have mode 0600" >&2; exit 1; }
 }
-require_secure_key_file "$CLIPROXY_MANAGEMENT_KEY_FILE"
-require_secure_key_file "$ZAI_CODING_PLAN_KEY_FILE"
+if test -n "$CLIPROXY_MANAGEMENT_KEY_FILE"; then
+  require_secure_key_file "$CLIPROXY_MANAGEMENT_KEY_FILE"
+  management_ref="file:$CLIPROXY_MANAGEMENT_KEY_FILE"
+else
+  management_ref="env:CLIPROXY_MANAGEMENT_KEY"
+fi
+if test -n "$ZAI_CODING_PLAN_KEY_FILE"; then
+  require_secure_key_file "$ZAI_CODING_PLAN_KEY_FILE"
+  plan_ref="file:$ZAI_CODING_PLAN_KEY_FILE"
+elif test -n "$ZAI_CODING_PLAN_KEY"; then
+  plan_ref="env:ZAI_CODING_PLAN_KEY"
+else
+  plan_ref=""
+  printf '%s\n' 'plan-key marker scan: no plan-key input in snapshot-only mode; scanning with the management marker only' >&2
+fi
 
 python3 - "$CLIPROXY_JOURNAL_TIMEOUT" "$CLIPROXY_CANARY_TIMEOUT" <<'PY'
 import re, sys
@@ -126,16 +155,22 @@ if parsed.path != "/v0/management/plugins/zai-coding-plan/status" or origin(stat
     raise SystemExit("management status URL is not approved")
 PY
 
-python3 - "$CLIPROXY_MANAGEMENT_KEY_FILE" "$curl_config" <<'PY'
-import pathlib, sys
-raw=pathlib.Path(sys.argv[1]).read_bytes()
-lines=raw.splitlines()
-if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
-    raise SystemExit("management key file must contain exactly one non-empty line")
-try:
-    key=lines[0].decode("utf-8")
-except UnicodeDecodeError:
-    raise SystemExit("management key file must contain valid UTF-8")
+python3 - "$management_ref" "$curl_config" <<'PY'
+import os, pathlib, sys
+ref=sys.argv[1]
+if ref.startswith("env:"):
+    key=os.environ.get(ref[4:], "")
+    if not key or key.strip() != key or "\n" in key or "\r" in key:
+        raise SystemExit("management key environment input must contain exactly one non-empty line")
+else:
+    raw=pathlib.Path(ref[5:] if ref.startswith("file:") else ref).read_bytes()
+    lines=raw.splitlines()
+    if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
+        raise SystemExit("management key file must contain exactly one non-empty line")
+    try:
+        key=lines[0].decode("utf-8")
+    except UnicodeDecodeError:
+        raise SystemExit("management key file must contain valid UTF-8")
 path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
@@ -149,8 +184,8 @@ curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --config "$curl_config" \
   "$status_url" >"$status_file"
 
-python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
-import json, math, pathlib, re, sys
+python3 - "$status_file" "$management_ref" "$plan_ref" <<'PY'
+import json, math, os, pathlib, re, sys
 expected_top={"plugin","status","version","generated_at","accounts"}
 required={"identity","cooldown","name","key_suffix","plan","five_hour_utilization","weekly_utilization","five_hour_resets_at","weekly_resets_at","quota_source","quota_observed_at","quota_age_seconds","quota_stale","offpeak","health","estimator_complete_since","delivery_warning","persistence_warning","unknown_model_warning","heuristic_dedup_warning","dedup_mode"}
 optional={"quota_error","five_hour_error"}
@@ -162,8 +197,13 @@ def fail(message):
 def require(condition, message):
     if not condition:
         fail(message)
-def read_secret(path):
-    raw=pathlib.Path(path).read_bytes()
+def read_secret(ref):
+    if ref.startswith("env:"):
+        value=os.environ.get(ref[4:], "")
+        if not value or value.strip() != value or "\n" in value or "\r" in value:
+            fail("secret environment input must contain exactly one non-empty line")
+        return value
+    raw=pathlib.Path(ref[5:] if ref.startswith("file:") else ref).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
         fail("secret input file must contain exactly one non-empty line")
@@ -171,6 +211,8 @@ def read_secret(path):
         return lines[0].decode("utf-8")
     except UnicodeDecodeError:
         fail("secret input file must contain valid UTF-8")
+def read_secret_opt(ref):
+    return read_secret(ref) if ref else None
 def scan_decoded(value, markers):
     if isinstance(value, str):
         if any(marker and marker in value for marker in markers):
@@ -186,9 +228,9 @@ raw=pathlib.Path(sys.argv[1]).read_bytes()
 if len(raw) > 1_048_576:
     fail("authenticated status response exceeds bounded scan size")
 management=read_secret(sys.argv[2])
-plan=read_secret(sys.argv[3])
-markers=[management, plan]
-if len(plan) > 6:
+plan=read_secret_opt(sys.argv[3])
+markers=[management] + ([plan] if plan else [])
+if plan and len(plan) > 6:
     markers.append(plan[-6:])
 if any(marker.encode() in raw for marker in markers):
     fail("authenticated status response failed confidential-value scan")
@@ -279,13 +321,18 @@ curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --config "$curl_config" \
   "$coordinator_status_url" >"$coordinator_status_file"
 
-python3 - "$coordinator_status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
-import json, pathlib, sys
+python3 - "$coordinator_status_file" "$management_ref" "$plan_ref" <<'PY'
+import json, os, pathlib, sys
 expected_providers={"zai", "opencode-go"}
 def fail(message):
     raise SystemExit(message)
-def read_secret(path):
-    raw=pathlib.Path(path).read_bytes()
+def read_secret(ref):
+    if ref.startswith("env:"):
+        value=os.environ.get(ref[4:], "")
+        if not value or value.strip() != value or "\n" in value or "\r" in value:
+            fail("secret environment input must contain exactly one non-empty line")
+        return value
+    raw=pathlib.Path(ref[5:] if ref.startswith("file:") else ref).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
         fail("secret input file must contain exactly one non-empty line")
@@ -293,6 +340,8 @@ def read_secret(path):
         return lines[0].decode("utf-8")
     except UnicodeDecodeError:
         fail("secret input file must contain valid UTF-8")
+def read_secret_opt(ref):
+    return read_secret(ref) if ref else None
 def scan_decoded(value, markers):
     if isinstance(value, str):
         if any(marker and marker in value for marker in markers):
@@ -308,9 +357,9 @@ raw=pathlib.Path(sys.argv[1]).read_bytes()
 if len(raw) > 1_048_576:
     fail("coordinator status response exceeds bounded scan size")
 management=read_secret(sys.argv[2])
-plan=read_secret(sys.argv[3])
-markers=[management, plan]
-if len(plan) > 6:
+plan=read_secret_opt(sys.argv[3])
+markers=[management] + ([plan] if plan else [])
+if plan and len(plan) > 6:
     markers.append(plan[-6:])
 if any(marker.encode() in raw for marker in markers):
     fail("coordinator status response failed confidential-value scan")
@@ -347,8 +396,8 @@ else
     >"$log_file"
 fi
 
-python3 - "$CLIPROXY_USAGE_DIR/zai.json" "$dashboard_file" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
-import json, pathlib, re, sys
+python3 - "$CLIPROXY_USAGE_DIR/zai.json" "$dashboard_file" "$log_file" "$management_ref" "$plan_ref" <<'PY'
+import json, os, pathlib, re, sys
 from datetime import datetime, timezone
 projected, dashboard, service_log = map(pathlib.Path, sys.argv[1:4])
 def fail(message):
@@ -356,8 +405,13 @@ def fail(message):
 def require(condition, message):
     if not condition:
         fail(message)
-def read_secret(path):
-    raw=pathlib.Path(path).read_bytes()
+def read_secret(ref):
+    if ref.startswith("env:"):
+        value=os.environ.get(ref[4:], "")
+        if not value or value.strip() != value or "\n" in value or "\r" in value:
+            fail("secret environment input must contain exactly one non-empty line")
+        return value
+    raw=pathlib.Path(ref[5:] if ref.startswith("file:") else ref).read_bytes()
     lines=raw.splitlines()
     if len(lines) != 1 or not lines[0] or lines[0].strip() != lines[0]:
         fail("secret input file must contain exactly one non-empty line")
@@ -365,6 +419,8 @@ def read_secret(path):
         return lines[0].decode("utf-8")
     except UnicodeDecodeError:
         fail("secret input file must contain valid UTF-8")
+def read_secret_opt(ref):
+    return read_secret(ref) if ref else None
 def load_json(path):
     try:
         return json.loads(path.read_bytes(), parse_constant=lambda _: fail(f"{path.name} contains a non-RFC JSON value"))
@@ -382,9 +438,9 @@ def scan_decoded(value, markers, label):
         for child in value:
             scan_decoded(child, markers, label)
 management=read_secret(sys.argv[4])
-plan=read_secret(sys.argv[5])
-markers=[management, plan]
-if len(plan) > 6:
+plan=read_secret_opt(sys.argv[5])
+markers=[management] + ([plan] if plan else [])
+if plan and len(plan) > 6:
     markers.append(plan[-6:])
 scan_targets=[projected, service_log]
 if dashboard.exists():
@@ -400,7 +456,12 @@ if dashboard.exists():
     dashboard_payload=load_json(dashboard)
     scan_decoded(dashboard_payload, markers, dashboard.name)
 scan_decoded(payload, markers, projected.name)
-require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="zai" and isinstance(payload.get("records"), list) and bool(payload["records"]), "projected collector payload has an invalid schema")
+snapshot_service_feed = bool(os.environ.get("CLIPROXY_SNAPSHOT_ONLY")) and isinstance(payload, dict) and "lane" not in payload
+if snapshot_service_feed:
+    require(set(payload) == {"observedAt","records","schemaVersion","staleAfterSeconds"}, "snapshot feed has an unexpected envelope: the existing snapshot service writes only observedAt/records/schemaVersion/staleAfterSeconds")
+    require(isinstance(payload["records"], list) and bool(payload["records"]) and all(isinstance(record, dict) for record in payload["records"]), "snapshot feed has no records")
+else:
+    require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="zai" and isinstance(payload.get("records"), list) and bool(payload["records"]), "projected collector payload has an invalid schema")
 require(isinstance(payload.get("observedAt"), str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", payload["observedAt"])), "projected collector payload has an invalid observedAt")
 require(isinstance(payload.get("staleAfterSeconds"), int) and not isinstance(payload.get("staleAfterSeconds"), bool) and payload["staleAfterSeconds"] > 0, "projected collector payload has an invalid staleAfterSeconds")
 try:
@@ -420,9 +481,10 @@ def scan_keys(value, label):
         for child in value:
             scan_keys(child, label)
 scan_keys(payload, projected.name)
-require(all(isinstance(record, dict) and record.get("key_suffix")=="redacted" for record in payload["records"]), "projected collector payload contains an unredacted key suffix")
-require(all(isinstance(record, dict) and isinstance(record.get("identity"), str) and bool(re.fullmatch(r"[0-9a-f]{64}", record["identity"])) for record in payload["records"]), "projected collector payload has an invalid account identity")
-require(all(isinstance(record, dict) and isinstance(record.get("cooldown"), dict) and isinstance(record["cooldown"].get("active"), bool) for record in payload["records"]), "projected collector payload has an invalid account cooldown")
+if not snapshot_service_feed:
+    require(all(isinstance(record, dict) and record.get("key_suffix")=="redacted" for record in payload["records"]), "projected collector payload contains an unredacted key suffix")
+    require(all(isinstance(record, dict) and isinstance(record.get("identity"), str) and bool(re.fullmatch(r"[0-9a-f]{64}", record["identity"])) for record in payload["records"]), "projected collector payload has an invalid account identity")
+    require(all(isinstance(record, dict) and isinstance(record.get("cooldown"), dict) and isinstance(record["cooldown"].get("active"), bool) for record in payload["records"]), "projected collector payload has an invalid account cooldown")
 PY
 
 printf 'dogfood-live: authenticated status, collector lane, service-log, snapshot freshness, and bounded secret-marker scans PASS\n'

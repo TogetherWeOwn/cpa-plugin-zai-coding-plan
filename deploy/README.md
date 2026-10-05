@@ -25,36 +25,21 @@ live feeds.
 ```sh
 set -euo pipefail
 umask 077
-# Credential source: the established host file holds CLIPROXY_MGMT_KEY.
-# Extract only that variable into a root-only temp key file, in process;
-# never print it, export it, or copy it to a new lasting file.
-management_key_file=$(mktemp)
-trap 'rm -f "$management_key_file"' EXIT
-python3 - /home/ubuntu/secure-drop/cliproxy.env "$management_key_file" <<'PY'
-import pathlib, shlex, sys
-value = None
-for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
-    line = line.strip()
-    if not line or line.startswith("#") or "=" not in line:
-        continue
-    key, _, raw = line.partition("=")
-    if key.strip() == "CLIPROXY_MGMT_KEY":
-        parts = shlex.split(raw.strip(), posix=True)
-        value = parts[0] if parts else ""
-        break
-if not value:
-    raise SystemExit("CLIPROXY_MGMT_KEY not found in established credential source")
-path = pathlib.Path(sys.argv[2])
-path.write_text(value + "\n")
-path.chmod(0o600)
-PY
-plan_key_file=<existing host Z.ai plan-key file>
+# In-process intake of the established credential source: the host file stays
+# where it is and no new key file is created. Sourcing marks the variables for
+# child processes of this shell only; nothing is printed, and the values never
+# touch disk outside the established file.
+set -a
+. /home/ubuntu/secure-drop/cliproxy.env
+set +a
+: "${CLIPROXY_MGMT_KEY:?CLIPROXY_MGMT_KEY missing from the established credential source}"
 # Discover the running container name on the host; record it, do not guess.
 docker ps --format '{{.Names}} {{.Image}}' | grep -i cliproxy
 container=<cliproxy-container-from-docker-ps>
 usage_dir=/srv/cliproxy-usage
-CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
-ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
+# No standalone Z.ai plan-key file exists on this host, so no plan-key marker
+# is passed: the verifier scans with the management marker and says so.
+CLIPROXY_MANAGEMENT_KEY="$CLIPROXY_MGMT_KEY" \
 CLIPROXY_USAGE_DIR="$usage_dir" \
 CLIPROXY_CONTAINER="$container" \
 CLIPROXY_SNAPSHOT_ONLY=1 \
@@ -129,29 +114,33 @@ test "$release_sha" = "$RELEASE_SHA"
 
 ## Exact host install and validation
 
-The operator card must substitute the deployment's real container/config paths, but these commands are the invariant core. The management key and Z.ai key are read from root-only files; neither is placed in an argument, output, or board comment. Curl reads the Authorization header from a root-only config file, so the credential is absent from process argv.
+The operator card must substitute the deployment's real container/config paths, but these commands are the invariant core. The management key and Z.ai key travel in-process from the established sources (key-file form is unchanged and still supported); neither is placed in an argument, output, or board comment. Curl reads the Authorization header from a 0600 transient config file, so the credential is absent from process argv.
 
 ```sh
 set -euo pipefail
 umask 077
 repo=/home/ubuntu/cpa-plugin-zai-coding-plan
 config=/home/ubuntu/stacks/cliproxy/config.yaml
-management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
-plan_key_file=/home/ubuntu/secure-drop/zai-coding-plan.key
+# Current host: the config stack is uid1000/gid1000 mode 0700, the config file
+# uid1000 mode 0600. No standalone key file exists on this host and none may
+# be created, so both keys arrive in-process (sourced from the established
+# credential file and the install-time secret channel as in the acceptance
+# block above). Ownership is verified, never changed; a root-owned host sets
+# config_owner=0:0 instead.
+config_owner=1000:1000
+: "${CLIPROXY_MGMT_KEY:?source /home/ubuntu/secure-drop/cliproxy.env in-process first}"
+: "${ZAI_CODING_PLAN_KEY:?Z.ai plan key missing from the install-time secret channel}"
 container=<cliproxy-container-from-docker-ps>
 backup="${config}.pre-zai-$(date -u +%Y%m%dT%H%M%SZ)"
 cp -a "$config" "$backup"
 curl_config=$(mktemp)
 trap 'rm -f "$curl_config"' EXIT
-python3 - "$management_key_file" "$curl_config" <<'PY'
-import pathlib, sys
-key_path=pathlib.Path(sys.argv[1])
-if key_path.is_symlink() or key_path.stat().st_mode & 0o777 != 0o600:
-    raise SystemExit("management key file must be mode 0600 and not a symlink")
-key=key_path.read_text().strip()
-if not key or "\n" in key or "\r" in key:
-    raise SystemExit("management key file must contain one non-empty line")
-path=pathlib.Path(sys.argv[2])
+python3 - "$curl_config" <<'PY'
+import os, pathlib, sys
+key=os.environ.get("CLIPROXY_MGMT_KEY", "")
+if not key or key.strip() != key or "\n" in key or "\r" in key:
+    raise SystemExit("management key environment input must contain one non-empty line")
+path=pathlib.Path(sys.argv[1])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
 PY
@@ -160,7 +149,7 @@ PY
 # config.yaml durably from the same directory. Never rename across filesystems.
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"
-test "$(stat -c %U:%G "$config_dir")" = root:root
+test "$(stat -c %u:%g "$config_dir")" = "$config_owner"
 test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
 candidate=$(mktemp --tmpdir="$config_dir" .config.yaml.zai.XXXXXX)
 trap 'rm -f "$curl_config" "$candidate"' EXIT
@@ -237,8 +226,11 @@ usage_dir=/srv/cliproxy-usage
 # O_NOFOLLOW, then verifies the pathname still names the secured directory fd.
 python3 "$repo/deploy/prepare-usage-dir.py" "$usage_dir"
 test "$(stat -c %u:%g:%a "$usage_dir")" = 0:0:700
-CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
-ZAI_CODING_PLAN_KEY_FILE="$plan_key_file" \
+# File-form alternative (unchanged and still supported):
+# CLIPROXY_MANAGEMENT_KEY_FILE=<0600 key file>
+# ZAI_CODING_PLAN_KEY_FILE=<0600 key file> in place of the two KEY variables.
+CLIPROXY_MANAGEMENT_KEY="$CLIPROXY_MGMT_KEY" \
+ZAI_CODING_PLAN_KEY="$ZAI_CODING_PLAN_KEY" \
 CLIPROXY_USAGE_DIR="$usage_dir" \
 CLIPROXY_CONTAINER="$container" \
 CLIPROXY_SNAPSHOT_ONLY=1 \
@@ -262,7 +254,10 @@ GET /v0/management/plugins/subscription-pool/status
 
 ```sh
 usage_dir=/srv/cliproxy-usage
-CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
+# The dashboard-key file below applies only when the Go lane is provisioned.
+# When the lane is knowingly unprovisioned, omit the dashboard variable
+# entirely and pass OPENCODE_GO_ALLOW_UNBOUND=1 with CLIPROXY_SNAPSHOT_ONLY=1.
+CLIPROXY_MANAGEMENT_KEY="$CLIPROXY_MGMT_KEY" \
 OPENCODE_GO_DASHBOARD_API_KEY_FILE=/home/ubuntu/secure-drop/opencode-go-dashboard.key \
 CLIPROXY_USAGE_DIR="$usage_dir" \
 CLIPROXY_CONTAINER="$container" \
@@ -282,30 +277,30 @@ config=/home/ubuntu/stacks/cliproxy/config.yaml
 backup=/home/ubuntu/stacks/cliproxy/config.yaml.pre-zai-YYYYMMDDTHHMMSSZ # use the recorded install backup
 test -f "$backup" && test ! -L "$backup"
 test "$(stat -c %a "$backup")" = 600
+# Current host substitutions: no standalone key file exists (none may be
+# created), so the key arrives in-process; the stack is uid1000/gid1000.
+config_owner=1000:1000
+: "${CLIPROXY_MGMT_KEY:?source /home/ubuntu/secure-drop/cliproxy.env in-process first}"
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"
-test "$(stat -c %U:%G "$config_dir")" = root:root
+test "$(stat -c %u:%g "$config_dir")" = "$config_owner"
 test "$((8#$(stat -c %a "$config_dir") & 8#077))" = 0
-management_key_file=/home/ubuntu/secure-drop/cliproxy-management.key
 curl_config=$(mktemp)
 delete_response=$(mktemp)
 delete_error=$(mktemp)
 trap 'rm -f "$curl_config" "$delete_response" "$delete_error"' EXIT
-python3 - "$management_key_file" "$curl_config" <<'PY'
-import pathlib, sys
-key_path=pathlib.Path(sys.argv[1])
-if key_path.is_symlink() or key_path.stat().st_mode & 0o777 != 0o600:
-    raise SystemExit("management key file must be mode 0600 and not a symlink")
-key=key_path.read_text().strip()
-if not key or "\n" in key or "\r" in key:
-    raise SystemExit("management key file must contain one non-empty line")
-path=pathlib.Path(sys.argv[2])
+python3 - "$curl_config" <<'PY'
+import os, pathlib, sys
+key=os.environ.get("CLIPROXY_MGMT_KEY", "")
+if not key or key.strip() != key or "\n" in key or "\r" in key:
+    raise SystemExit("management key environment input must contain one non-empty line")
+path=pathlib.Path(sys.argv[1])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
 PY
 config_dir=$(dirname "$config")
 test ! -L "$config_dir"
-test "$(stat -c %U:%G "$config_dir")" = root:root
+test "$(stat -c %u:%g "$config_dir")" = "$config_owner"
 restored=$(mktemp --tmpdir="$config_dir" .config.yaml.rollback.XXXXXX)
 trap 'rm -f "$curl_config" "$restored"' EXIT
 install -m 0600 "$backup" "$restored"
@@ -339,8 +334,10 @@ else
   fi
   printf 'management unavailable; configuration restore remains recoverable; plugin cleanup is pending (response body suppressed)\n' >&2
 fi
+# File-form alternative (unchanged): CLIPROXY_MANAGEMENT_KEY_FILE=<0600 key file>.
 CLIPROXY_CONTAINER="$container" CLIPROXY_CONFIG="$config" CLIPROXY_BACKUP="$backup" \
-CLIPROXY_MANAGEMENT_KEY_FILE="$management_key_file" \
+CLIPROXY_CONFIG_UID=1000 CLIPROXY_CONFIG_GID=1000 \
+CLIPROXY_MANAGEMENT_KEY="$CLIPROXY_MGMT_KEY" \
   "$repo/deploy/rollback.sh"
 ```
 

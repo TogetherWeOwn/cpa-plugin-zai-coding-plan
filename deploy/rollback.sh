@@ -4,7 +4,20 @@ set -euo pipefail
 : "${CLIPROXY_MANAGEMENT_URL:=http://127.0.0.1:8317}"
 : "${CLIPROXY_CONFIG:=/home/ubuntu/stacks/cliproxy/config.yaml}"
 : "${CLIPROXY_BACKUP:?set CLIPROXY_BACKUP to the recorded pre-install backup}"
-: "${CLIPROXY_MANAGEMENT_KEY_FILE:?set CLIPROXY_MANAGEMENT_KEY_FILE to a root-readable 0600 file}"
+: "${CLIPROXY_MANAGEMENT_KEY_FILE:=}"
+: "${CLIPROXY_MANAGEMENT_KEY:=}"
+# File-first, environment-second, both fail-closed (see verify-live.sh). The
+# root-ownership assertion below applies to key files only; an in-process
+# environment value has no file to assert on.
+if test -z "$CLIPROXY_MANAGEMENT_KEY_FILE" && test -z "$CLIPROXY_MANAGEMENT_KEY"; then
+  printf '%s\n' 'set CLIPROXY_MANAGEMENT_KEY_FILE to a root-owned 0600 file or CLIPROXY_MANAGEMENT_KEY in-process' >&2
+  exit 1
+fi
+if test -n "$CLIPROXY_MANAGEMENT_KEY_FILE"; then
+  management_ref="file:$CLIPROXY_MANAGEMENT_KEY_FILE"
+else
+  management_ref="env:CLIPROXY_MANAGEMENT_KEY"
+fi
 : "${CLIPROXY_USAGE_DIR:=/srv/cliproxy-usage}"
 # Expected config ownership without changing it: the rollback never chowns.
 # Keep the root default; the operator sets both to the host's actual owner
@@ -85,14 +98,20 @@ trap cleanup EXIT
 # config file below, so an invalid key can never abort this script after the restore
 # has already landed but before the service has been told to reload it.
 curl_config=$(mktemp)
-python3 - "$CLIPROXY_MANAGEMENT_KEY_FILE" "$curl_config" <<'PY'
+python3 - "$management_ref" "$curl_config" <<'PY'
 import os, pathlib, sys
-key_path=pathlib.Path(sys.argv[1])
-if key_path.is_symlink() or key_path.stat().st_uid != 0 or key_path.stat().st_mode & 0o777 != 0o600:
-    raise SystemExit('management key file must be root-owned mode 0600 and not a symlink')
-key=key_path.read_text().strip()
-if not key or '\n' in key or '\r' in key:
-    raise SystemExit('management key file must contain one non-empty line')
+ref=sys.argv[1]
+if ref.startswith("env:"):
+    key=os.environ.get(ref[4:], "")
+    if not key or key.strip() != key or '\n' in key or '\r' in key:
+        raise SystemExit('management key environment input must contain one non-empty line')
+else:
+    key_path=pathlib.Path(ref[5:] if ref.startswith("file:") else ref)
+    if key_path.is_symlink() or key_path.stat().st_uid != 0 or key_path.stat().st_mode & 0o777 != 0o600:
+        raise SystemExit('management key file must be root-owned mode 0600 and not a symlink')
+    key=key_path.read_text().strip()
+    if not key or '\n' in key or '\r' in key:
+        raise SystemExit('management key file must contain one non-empty line')
 path=pathlib.Path(sys.argv[2])
 path.write_text('header = "Authorization: Bearer ' + key.replace('\\', '\\\\').replace('"', '\\"') + '"\n')
 path.chmod(0o600)
