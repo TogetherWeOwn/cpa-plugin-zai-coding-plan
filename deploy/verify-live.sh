@@ -5,12 +5,24 @@ set -euo pipefail
 : "${CLIPROXY_USAGE_DIR:=/srv/cliproxy-usage}"
 : "${CLIPROXY_MANAGEMENT_KEY_FILE:?set CLIPROXY_MANAGEMENT_KEY_FILE to a root-readable 0600 file}"
 : "${ZAI_CODING_PLAN_KEY_FILE:?set ZAI_CODING_PLAN_KEY_FILE to a root-readable 0600 file}"
-: "${CLIPROXY_DASHBOARD_URL:=http://127.0.0.1:3000/api/telemetry/model-usage/zai}"
-: "${CLIPROXY_SERVICE_UNIT:=cliproxy.service}"
+# The historical model-usage dashboard endpoint is retired; leave this empty
+# (the default) to skip the dashboard step. Set it only when a live dashboard
+# URL is explicitly in scope for the host under test.
+: "${CLIPROXY_DASHBOARD_URL:=}"
+# Docker-native log capture: set CLIPROXY_CONTAINER to capture
+# `docker logs` from the running CLIProxy container, or CLIPROXY_LOG_COMMAND
+# to run an explicit bounded log command. The retired systemd unit path is no
+# longer the default. CLIPROXY_JOURNAL_TIMEOUT bounds the capture.
+: "${CLIPROXY_CONTAINER:=}"
+: "${CLIPROXY_LOG_COMMAND:=}"
 : "${CLIPROXY_JOURNAL_TIMEOUT:=5}"
 : "${CLIPROXY_ROUTER_DRY_RUN:=}"
 : "${CLIPROXY_CANARY_COMMAND:=}"
 : "${CLIPROXY_CANARY_TIMEOUT:=5}"
+# Snapshot-only telemetry: set to 1 when the host's usage-snapshot service is
+# the sole quota poller and feed writer. The verifier then reads the existing
+# snapshot files and never invokes the collectors against live feeds.
+: "${CLIPROXY_SNAPSHOT_ONLY:=}"
 
 require_secure_key_file() {
   local path=$1
@@ -27,6 +39,18 @@ for name, value in zip(("CLIPROXY_JOURNAL_TIMEOUT", "CLIPROXY_CANARY_TIMEOUT"), 
     if len(value) > 16 or not re.fullmatch(r"(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)[smh]?", value):
         raise SystemExit(f"{name} must be a positive duration using s, m, or h")
 PY
+
+if test -z "$CLIPROXY_LOG_COMMAND" && test -z "$CLIPROXY_CONTAINER"; then
+  printf '%s\n' 'set CLIPROXY_CONTAINER to the running CLIProxy container (or CLIPROXY_LOG_COMMAND for an explicit log command)' >&2
+  exit 1
+fi
+case "$CLIPROXY_CONTAINER" in
+  "" ) ;;
+  *[!A-Za-z0-9_.-]* | .* | -*)
+    printf '%s\n' 'CLIPROXY_CONTAINER is not a valid Docker container name' >&2
+    exit 1
+    ;;
+esac
 
 umask 077
 work_dir=$(mktemp -d)
@@ -128,7 +152,10 @@ curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
 python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
 import json, math, pathlib, re, sys
 expected_top={"plugin","status","version","generated_at","accounts"}
-required={"name","key_suffix","plan","five_hour_utilization","weekly_utilization","five_hour_resets_at","weekly_resets_at","quota_source","quota_observed_at","quota_age_seconds","quota_stale","offpeak","health","estimator_complete_since","delivery_warning","persistence_warning","unknown_model_warning","heuristic_dedup_warning","dedup_mode"}
+required={"identity","cooldown","name","key_suffix","plan","five_hour_utilization","weekly_utilization","five_hour_resets_at","weekly_resets_at","quota_source","quota_observed_at","quota_age_seconds","quota_stale","offpeak","health","estimator_complete_since","delivery_warning","persistence_warning","unknown_model_warning","heuristic_dedup_warning","dedup_mode"}
+optional={"quota_error","five_hour_error"}
+cooldown_reasons={"retry_after","reset_header","reset_body","quota_reset_fallback","configured_fallback","upstream_rate_limit"}
+identity_pattern=re.compile(r"^[0-9a-f]{64}$")
 rfc3339=re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
 def fail(message):
     raise SystemExit(message)
@@ -178,24 +205,42 @@ require(isinstance(status["version"], str) and bool(status["version"]), "authent
 require(isinstance(status["generated_at"], str) and bool(rfc3339.fullmatch(status["generated_at"])), "authenticated status response has invalid generated_at")
 require(isinstance(status["accounts"], list) and bool(status["accounts"]), "authenticated status response has no accounts")
 require(any(isinstance(account, dict) and account.get("health") == "healthy" and account.get("quota_stale") is False for account in status["accounts"]), "authenticated status response has no usable managed capacity")
+seen_identities=set()
 for account in status["accounts"]:
     require(isinstance(account, dict), "authenticated status account must be an object")
-    require(required <= set(account) and set(account) <= required | {"quota_error"}, "authenticated status account has unexpected fields")
+    require(required <= set(account) and set(account) <= required | optional, "authenticated status account has unexpected fields")
     require(isinstance(account["name"], str) and bool(account["name"]), "authenticated status account has invalid name")
     require(account["key_suffix"] == "redacted", "authenticated status account key suffix is not redacted")
+    identity=account["identity"]
+    require(isinstance(identity, str) and bool(identity_pattern.fullmatch(identity)), "authenticated status account has invalid identity")
+    require(identity not in seen_identities, "authenticated status account identities are not unique")
+    seen_identities.add(identity)
+    cooldown=account["cooldown"]
+    require(isinstance(cooldown, dict) and set(cooldown) == {"active","until","reason","source"}, "authenticated status account has invalid cooldown shape")
+    require(isinstance(cooldown["active"], bool), "authenticated status account has invalid cooldown active flag")
+    require(cooldown["source"] == "zai_runtime_health_v1", "authenticated status account has unsupported cooldown source")
+    if cooldown["active"]:
+        require(cooldown["reason"] in cooldown_reasons, "authenticated status account has unsupported cooldown reason")
+        require(isinstance(cooldown["until"], str) and bool(rfc3339.fullmatch(cooldown["until"])), "authenticated status account has invalid cooldown deadline")
+    else:
+        require(cooldown["until"] is None and cooldown["reason"] == "", "authenticated status account has contradictory inactive cooldown")
     require(account["quota_source"] in {"quota_api","estimate"}, "authenticated status account has invalid quota source")
     require(isinstance(account["quota_age_seconds"], int) and not isinstance(account["quota_age_seconds"], bool) and account["quota_age_seconds"] >= 0, "authenticated status account has invalid quota age")
     require(all(account[field] is None or isinstance(account[field], str) and rfc3339.fullmatch(account[field]) for field in ("five_hour_resets_at","weekly_resets_at","estimator_complete_since")), "authenticated status account has invalid optional timestamp")
     require(isinstance(account["quota_observed_at"], str) and bool(rfc3339.fullmatch(account["quota_observed_at"])), "authenticated status account has invalid observed timestamp")
     require(all(isinstance(account[field], (int,float)) and not isinstance(account[field], bool) and math.isfinite(account[field]) and 0 <= account[field] <= 1 for field in ("five_hour_utilization","weekly_utilization")), "authenticated status account has invalid utilization")
-    require(not any(re.search(r"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)", key, re.I) for key in account), "authenticated status account contains a secret-like field")
+    require(not any(re.search(r"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)", key, re.I) for key in account if key != "identity"), "authenticated status account contains a secret-like field")
 PY
 
-"${COLLECTOR_ZAI:-$(dirname "$0")/collector-zai.py}" \
-  --management-key-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
-  --secret-marker-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
-  --secret-marker-file "$ZAI_CODING_PLAN_KEY_FILE" \
-  --url "$status_url"
+if test -z "$CLIPROXY_SNAPSHOT_ONLY"; then
+  "${COLLECTOR_ZAI:-$(dirname "$0")/collector-zai.py}" \
+    --management-key-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
+    --secret-marker-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
+    --secret-marker-file "$ZAI_CODING_PLAN_KEY_FILE" \
+    --url "$status_url"
+else
+  printf '%s\n' 'snapshot-only: existing usage-snapshot service remains the sole poller; collector invocation skipped'
+fi
 
 # Prove both provider modules are hosted by the coordinator, not just that the
 # zai module's own sub-route answers. This queries the coordinator's own
@@ -283,17 +328,28 @@ if not isinstance(providers, dict) or not expected_providers.issubset(providers)
     fail("coordinator status response does not list both zai and opencode-go provider modules")
 PY
 
-curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
-  --max-time 5 --max-filesize 1048576 \
-  "$CLIPROXY_DASHBOARD_URL" >"$dashboard_file"
+if test -n "$CLIPROXY_DASHBOARD_URL"; then
+  curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
+    --max-time 5 --max-filesize 1048576 \
+    "$CLIPROXY_DASHBOARD_URL" >"$dashboard_file"
+else
+  printf '%s\n' 'dashboard step skipped: historical model-usage dashboard endpoint is retired'
+fi
 
-timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_JOURNAL_TIMEOUT" \
-  journalctl --unit "$CLIPROXY_SERVICE_UNIT" --since '-15 minutes' --no-pager --output=cat --lines=2000 \
-  | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
-  >"$log_file"
+if test -n "$CLIPROXY_LOG_COMMAND"; then
+  bash -c "$CLIPROXY_LOG_COMMAND" \
+    | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
+    >"$log_file"
+else
+  timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_JOURNAL_TIMEOUT" \
+    docker logs --since 15m --tail 2000 "$CLIPROXY_CONTAINER" 2>&1 \
+    | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
+    >"$log_file"
+fi
 
 python3 - "$CLIPROXY_USAGE_DIR/zai.json" "$dashboard_file" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$ZAI_CODING_PLAN_KEY_FILE" <<'PY'
 import json, pathlib, re, sys
+from datetime import datetime, timezone
 projected, dashboard, service_log = map(pathlib.Path, sys.argv[1:4])
 def fail(message):
     raise SystemExit(message)
@@ -330,20 +386,43 @@ plan=read_secret(sys.argv[5])
 markers=[management, plan]
 if len(plan) > 6:
     markers.append(plan[-6:])
-for path in (projected, dashboard, service_log):
+scan_targets=[projected, service_log]
+if dashboard.exists():
+    scan_targets.append(dashboard)
+for path in scan_targets:
     raw = path.read_bytes()
     if len(raw) > 1_048_576:
         fail(f"{path.name} exceeds bounded scan size")
     if any(marker.encode() in raw for marker in markers):
         fail(f"{path.name} failed confidential-value scan")
 payload=load_json(projected)
-dashboard_payload=load_json(dashboard)
+if dashboard.exists():
+    dashboard_payload=load_json(dashboard)
+    scan_decoded(dashboard_payload, markers, dashboard.name)
 scan_decoded(payload, markers, projected.name)
-scan_decoded(dashboard_payload, markers, dashboard.name)
 require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="zai" and isinstance(payload.get("records"), list) and bool(payload["records"]), "projected collector payload has an invalid schema")
-serialized=json.dumps(payload, allow_nan=False)
-require(not re.search(r'"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)"\s*:', serialized, re.I), "projected collector payload contains a secret-like field")
+require(isinstance(payload.get("observedAt"), str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", payload["observedAt"])), "projected collector payload has an invalid observedAt")
+require(isinstance(payload.get("staleAfterSeconds"), int) and not isinstance(payload.get("staleAfterSeconds"), bool) and payload["staleAfterSeconds"] > 0, "projected collector payload has an invalid staleAfterSeconds")
+try:
+    observed_at=datetime.fromisoformat(payload["observedAt"].replace("Z", "+00:00"))
+except ValueError:
+    fail("projected collector payload has an invalid observedAt")
+now=datetime.now(timezone.utc)
+require(observed_at <= now, "projected collector payload is dated in the future")
+require((now - observed_at).total_seconds() <= payload["staleAfterSeconds"], "projected collector payload is stale: snapshot service is not refreshing the feed")
+def scan_keys(value, label):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key != "identity" and re.search(r"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)", key, re.I):
+                fail(f"{label} contains a secret-like field")
+            scan_keys(child, label)
+    elif isinstance(value, list):
+        for child in value:
+            scan_keys(child, label)
+scan_keys(payload, projected.name)
 require(all(isinstance(record, dict) and record.get("key_suffix")=="redacted" for record in payload["records"]), "projected collector payload contains an unredacted key suffix")
+require(all(isinstance(record, dict) and isinstance(record.get("identity"), str) and bool(re.fullmatch(r"[0-9a-f]{64}", record["identity"])) for record in payload["records"]), "projected collector payload has an invalid account identity")
+require(all(isinstance(record, dict) and isinstance(record.get("cooldown"), dict) and isinstance(record["cooldown"].get("active"), bool) for record in payload["records"]), "projected collector payload has an invalid account cooldown")
 PY
 
-printf 'dogfood-live: authenticated status, collector lane, dashboard, service-log, and bounded secret-marker scans PASS\n'
+printf 'dogfood-live: authenticated status, collector lane, service-log, snapshot freshness, and bounded secret-marker scans PASS\n'

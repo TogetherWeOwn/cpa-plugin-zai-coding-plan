@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Deployment verification now accepts the v0.4.5 status shape: `collector-zai.py` and `deploy/verify-live.sh` validate the per-account `identity` pseudonym (64 lowercase hex, unique, confidential-value scanned) and the `cooldown` object (closed reason vocabulary, exact source, active/inactive consistency) from `docs/STATUS-CONTRACT.md`, plus the optional `five_hour_error` diagnostic. Previously both scripts rejected live v0.4.5 status with `secret-like field is forbidden: status.accounts[0].identity` / `unexpected fields`, so no published script could complete acceptance after the v0.4.5 install.
+- `deploy/verify-live.sh` and `deploy/verify-live-opencodego.sh` are Docker-native: log evidence comes from `docker logs` of `CLIPROXY_CONTAINER` (or an explicit `CLIPROXY_LOG_COMMAND`) instead of the retired `cliproxy.service` journal; the retired model-usage dashboard fetch runs only when `CLIPROXY_DASHBOARD_URL` is explicitly set; `CLIPROXY_SNAPSHOT_ONLY=1` reads the usage-snapshot service's existing feed files with a freshness bound instead of invoking collectors against live feeds. The container name is validated before any credentialed request.
+- `deploy/verify-live-opencodego.sh` distinguishes an unprovisioned Go lane: with `OPENCODE_GO_ALLOW_UNBOUND=1` it records `UNAVAILABLE (no bound dashboard credential; unchanged, not a v0.4.5 regression)` after the same shape and confidential-value scans, and requires the snapshot to agree (`credential_bound: false`). The strict default still mandates a bound credential with usable capacity.
+- `deploy/rollback.sh` restores the current-host Docker layout by default (`/home/ubuntu/stacks/cliproxy/config.yaml`, `docker restart`), verifies declared `CLIPROXY_CONFIG_UID`/`CLIPROXY_CONFIG_GID` ownership without ever changing it, and bounds the management DELETE response the same way the runbook does.
+
 ### Changed
 
 - CLIProxyAPI SDK `v7.2.67` -> `v7.2.154` and approved baseline host `v7.2.67` -> `v7.2.150` (TOG-7425): the deferred bump re-fires on plugin-relevant patches in the unevaluated v7.2.152-159 window (`00c63a56` pluginhost HTTP wire profile, session-affinity/interceptor/quota plugin capabilities, schema 5->6 at v7.2.155) with SDK `SchemaVersion` 1 -> 5. ABI stays 1; v7.2.67 hosts accept only schema 1 and can no longer load this plugin. Dependabot now suppresses schema-6 patches (7.2.155-159) until the baseline moves past schema 5.

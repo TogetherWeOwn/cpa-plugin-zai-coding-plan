@@ -5,8 +5,23 @@ set -euo pipefail
 : "${CLIPROXY_USAGE_DIR:=/srv/cliproxy-usage}"
 : "${CLIPROXY_MANAGEMENT_KEY_FILE:?set CLIPROXY_MANAGEMENT_KEY_FILE to a root-readable 0600 file}"
 : "${OPENCODE_GO_DASHBOARD_API_KEY_FILE:?set OPENCODE_GO_DASHBOARD_API_KEY_FILE to a root-readable 0600 file}"
-: "${CLIPROXY_SERVICE_UNIT:=cliproxy.service}"
+# Docker-native log capture: set CLIPROXY_CONTAINER to capture
+# `docker logs` from the running CLIProxy container, or CLIPROXY_LOG_COMMAND
+# to run an explicit bounded log command. The retired systemd unit path is no
+# longer the default. CLIPROXY_JOURNAL_TIMEOUT bounds the capture.
+: "${CLIPROXY_CONTAINER:=}"
+: "${CLIPROXY_LOG_COMMAND:=}"
 : "${CLIPROXY_JOURNAL_TIMEOUT:=5}"
+# Snapshot-only telemetry: set to 1 when the host's usage-snapshot service is
+# the sole quota poller and feed writer. The verifier then reads the existing
+# snapshot files and never invokes the collectors against live feeds.
+: "${CLIPROXY_SNAPSHOT_ONLY:=}"
+# Go-lane disposition: the strict default still requires a bound dashboard
+# credential with usable capacity. Set to 1 only when the lane is knowingly
+# unprovisioned on the host; the verifier then accepts a strictly all-unknown
+# provider shape as UNAVAILABLE (unchanged, not a regression) after the same
+# confidential-value scans, and never fabricates capacity.
+: "${OPENCODE_GO_ALLOW_UNBOUND:=}"
 
 require_secure_key_file() {
   local path=$1
@@ -23,6 +38,18 @@ for name, value in zip(("CLIPROXY_JOURNAL_TIMEOUT",), sys.argv[1:]):
     if len(value) > 16 or not re.fullmatch(r"(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)[smh]?", value):
         raise SystemExit(f"{name} must be a positive duration using s, m, or h")
 PY
+
+if test -z "$CLIPROXY_LOG_COMMAND" && test -z "$CLIPROXY_CONTAINER"; then
+  printf '%s\n' 'set CLIPROXY_CONTAINER to the running CLIProxy container (or CLIPROXY_LOG_COMMAND for an explicit log command)' >&2
+  exit 1
+fi
+case "$CLIPROXY_CONTAINER" in
+  "" ) ;;
+  *[!A-Za-z0-9_.-]* | .* | -*)
+    printf '%s\n' 'CLIPROXY_CONTAINER is not a valid Docker container name' >&2
+    exit 1
+    ;;
+esac
 
 umask 077
 work_dir=$(mktemp -d)
@@ -80,8 +107,12 @@ curl -q --fail-with-body --fail-early --max-redirs 0 --silent --show-error \
   --config "$curl_config" \
   "$status_url" >"$status_file"
 
-python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" <<'PY'
+lane_file="$work_dir/go-lane"
+python3 - "$status_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" "$OPENCODE_GO_ALLOW_UNBOUND" "$lane_file" <<'PY'
 import json, math, pathlib, re, sys
+allow_unbound=sys.argv[4] != ""
+lane_file=pathlib.Path(sys.argv[5])
+lane_disposition="bound"
 coordinator_expected_top={"plugin","status","version","generated_at","providers","validation_error"}
 coordinator_required_top={"plugin","status","version","generated_at","providers"}
 provider_expected={"provider","status","validation_error","credential_bound","accounts","observation_gaps"}
@@ -145,12 +176,17 @@ require(isinstance(provider, dict), "authenticated opencode-go provider status m
 require(provider_required <= set(provider) <= provider_expected, "authenticated opencode-go provider status has unexpected fields")
 require(provider["provider"]=="opencode-go" and provider["status"]=="registered", "authenticated opencode-go provider has unexpected status")
 require(isinstance(provider["credential_bound"], bool), "authenticated opencode-go provider has invalid credential_bound")
-require(provider["credential_bound"] is True, "authenticated opencode-go provider has no bound dashboard credential")
+bound=provider["credential_bound"] is True
+if not bound:
+    require(allow_unbound, "authenticated opencode-go provider has no bound dashboard credential")
+    lane_disposition="unavailable"
 gaps=provider["observation_gaps"]
 require(isinstance(gaps, list) and all(isinstance(gap, str) for gap in gaps), "authenticated opencode-go provider has invalid observation_gaps")
 accounts=provider.get("accounts", [])
-require(isinstance(accounts, list) and bool(accounts), "authenticated opencode-go provider has no accounts")
-require(any(isinstance(account, dict) and not account.get("disabled", False) for account in accounts), "authenticated opencode-go provider has no usable managed capacity")
+require(isinstance(accounts, list), "authenticated opencode-go provider has invalid accounts")
+if bound:
+    require(bool(accounts), "authenticated opencode-go provider has no accounts")
+    require(any(isinstance(account, dict) and not account.get("disabled", False) for account in accounts), "authenticated opencode-go provider has no usable managed capacity")
 for account in accounts:
     require(isinstance(account, dict), "authenticated opencode-go account must be an object")
     require(account_required <= set(account) <= account_expected, "authenticated opencode-go account has unexpected fields")
@@ -170,22 +206,36 @@ for account in accounts:
             if "resets_at" in window:
                 require(isinstance(window["resets_at"], str) and bool(rfc3339.fullmatch(window["resets_at"])), f"authenticated opencode-go {kind} window has invalid resets_at")
     require(not any(re.search(r"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)", key, re.I) and key != "credential_bound" for key in account), "authenticated opencode-go account contains a secret-like field")
+lane_file.write_text(lane_disposition)
 PY
 
-"${COLLECTOR_OPENCODEGO:-$(dirname "$0")/collector-opencodego.py}" \
-  --management-key-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
-  --secret-marker-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
-  --secret-marker-file "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" \
-  --url "$status_url"
+if test -z "$CLIPROXY_SNAPSHOT_ONLY"; then
+  "${COLLECTOR_OPENCODEGO:-$(dirname "$0")/collector-opencodego.py}" \
+    --management-key-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
+    --secret-marker-file "$CLIPROXY_MANAGEMENT_KEY_FILE" \
+    --secret-marker-file "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" \
+    --url "$status_url"
+else
+  printf '%s\n' 'snapshot-only: existing usage-snapshot service remains the sole poller; collector invocation skipped'
+fi
 
-timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_JOURNAL_TIMEOUT" \
-  journalctl --unit "$CLIPROXY_SERVICE_UNIT" --since '-15 minutes' --no-pager --output=cat --lines=2000 \
-  | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
-  >"$log_file"
+if test -n "$CLIPROXY_LOG_COMMAND"; then
+  bash -c "$CLIPROXY_LOG_COMMAND" \
+    | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
+    >"$log_file"
+else
+  timeout --foreground --signal=TERM --kill-after=1 -- "$CLIPROXY_JOURNAL_TIMEOUT" \
+    docker logs --since 15m --tail 2000 "$CLIPROXY_CONTAINER" 2>&1 \
+    | python3 -c 'import sys; raw=sys.stdin.buffer.read(1_048_577); sys.stdout.buffer.write(raw); raise SystemExit(len(raw) > 1_048_576)' \
+    >"$log_file"
+fi
 
-python3 - "$CLIPROXY_USAGE_DIR/opencode-go.json" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" <<'PY'
+python3 - "$CLIPROXY_USAGE_DIR/opencode-go.json" "$log_file" "$CLIPROXY_MANAGEMENT_KEY_FILE" "$OPENCODE_GO_DASHBOARD_API_KEY_FILE" "$lane_file" <<'PY'
 import json, pathlib, re, sys
+from datetime import datetime, timezone
 projected, service_log = map(pathlib.Path, sys.argv[1:3])
+lane_disposition=pathlib.Path(sys.argv[5]).read_text().strip()
+require_disposition=lane_disposition == "unavailable"
 def fail(message):
     raise SystemExit(message)
 def require(condition, message):
@@ -229,10 +279,29 @@ for path in (projected, service_log):
         fail(f"{path.name} failed confidential-value scan")
 payload=load_json(projected)
 scan_decoded(payload, markers, projected.name)
-require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="opencode-go" and isinstance(payload.get("records"), list) and bool(payload["records"]), "projected collector payload has an invalid schema")
+if require_disposition:
+    require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="opencode-go" and isinstance(payload.get("records"), list), "projected collector payload has an invalid schema")
+else:
+    require(isinstance(payload, dict) and payload.get("schemaVersion")==1 and payload.get("lane")=="opencode-go" and isinstance(payload.get("records"), list) and bool(payload["records"]), "projected collector payload has an invalid schema")
+require(isinstance(payload.get("observedAt"), str) and bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})", payload["observedAt"])), "projected collector payload has an invalid observedAt")
+require(isinstance(payload.get("staleAfterSeconds"), int) and not isinstance(payload.get("staleAfterSeconds"), bool) and payload["staleAfterSeconds"] > 0, "projected collector payload has an invalid staleAfterSeconds")
+try:
+    observed_at=datetime.fromisoformat(payload["observedAt"].replace("Z", "+00:00"))
+except ValueError:
+    fail("projected collector payload has an invalid observedAt")
+now=datetime.now(timezone.utc)
+require(observed_at <= now, "projected collector payload is dated in the future")
+require((now - observed_at).total_seconds() <= payload["staleAfterSeconds"], "projected collector payload is stale: snapshot service is not refreshing the feed")
 serialized=json.dumps(payload, allow_nan=False)
 require(not re.search(r'"(?:api[-_]?key|authorization|credential|secret|token|key_hash|identity)"\s*:', serialized, re.I), "projected collector payload contains a secret-like field")
-require(payload.get("credential_bound") is True, "projected collector payload reports no bound dashboard credential")
+if require_disposition:
+    require(payload.get("credential_bound") is False, "projected collector payload disagrees with the unavailable lane disposition")
+else:
+    require(payload.get("credential_bound") is True, "projected collector payload reports no bound dashboard credential")
 PY
 
-printf 'dogfood-live: authenticated coordinator status, opencode-go provider lane, collector output, and service-log confidential-value scans PASS\n'
+if test "$(cat "$lane_file")" = "unavailable"; then
+  printf 'dogfood-live: opencode-go lane UNAVAILABLE (no bound dashboard credential; unchanged, not a v0.4.5 regression) after coordinator status, snapshot freshness, and service-log confidential-value scans PASS\n'
+else
+  printf 'dogfood-live: authenticated coordinator status, opencode-go provider lane, collector output, snapshot freshness, and service-log confidential-value scans PASS\n'
+fi
